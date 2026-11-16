@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+<score-partwise version="4.0">
+  <work>
+    <work-title>Sample 03 - Partial Fingering Anchors (Hanon-style)</work-title>
+  </work>
+  <part-list>
+    <score-part id="P1">
+      <part-name>Piano</part-name>
+    </score-part>
+  </part-list>
+  <part id="P1">
+    <!-- Measure 1: Hanon No.1 pattern with partial Finger Anchors -->
+    <measure number="1">
+      <attributes>
+        <divisions>4</divisions>
+        <key><fifths>0</fifths></key>
+        <time><beats>2</beats><beat-type>4</beat-type></time>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <!-- Staff 1 (RH): C4(anchor 1) E4(anchor 2) F4 G4 A4(anchor 5) G4 F4 E4 -->
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff>
+        <notations><technical><fingering placement="above">1</fingering></technical></notations>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff>
+        <notations><technical><fingering placement="above">2</fingering></technical></notations>
+      </note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff></note>
+      <note>
+        <pitch><step>A</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff>
+        <notations><technical><fingering placement="above">5</fingering></technical></notations>
+      </note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff></note>
+      <backup><duration>8</duration></backup>
+      <!-- Staff 2 (LH): C3(anchor 5) E3(anchor 4) F3 G3 A3(anchor 1) G3 F3 E3 -->
+      <note>
+        <pitch><step>C</step><octave>3</octave></pitch>
+        <duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff>
+        <notations><technical><fingering placement="below">5</fingering></technical></notations>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>3</octave></pitch>
+        <duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff>
+        <notations><technical><fingering placement="below">4</fingering></technical></notations>
+      </note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff></note>
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff></note>
+      <note>
+        <pitch><step>A</step><octave>3</octave></pitch>
+        <duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff>
+        <notations><technical><fingering placement="below">1</fingering></technical></notations>
+      </note>
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff></note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff></note>
+      <note><pitch><step>E</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff></note>
+    </measure>
+    <!-- Measure 2: Next step up (D4..B4) without anchors to test continuation + ending chord with partial anchor -->
+    <measure number="2">
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><type>16th</type><staff>1</staff></note>
+      <!-- Ending chord with anchor on top note + lyric to test XSD element order (<notations> before <lyric>) -->
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><type>quarter</type><staff>1</staff></note>
+      <note>
+        <chord/>
+        <pitch><step>C</step><octave>5</octave></pitch>
+        <duration>4</duration><voice>1</voice><type>quarter</type><staff>1</staff>
+        <notations><technical><fingering placement="above">5</fingering></technical></notations>
+        <lyric number="1"><text>end</text></lyric>
+      </note>
+      <backup><duration>8</duration></backup>
+      <note><pitch><step>D</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff></note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff></note>
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff></note>
+      <note><pitch><step>A</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><type>16th</type><staff>2</staff></note>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><voice>2</voice><type>quarter</type><staff>2</staff></note>
+      <barline location="right"><bar-style>light-heavy</bar-style></barline>
+    </measure>
+  </part>
+</score-partwise>
