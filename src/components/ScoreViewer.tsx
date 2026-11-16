@@ -54,7 +54,7 @@ export function ScoreViewer({ xmlString }: ScoreViewerProps) {
   if (!xmlString) {
     return (
       <div className="flex min-h-80 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500">
-        Upload a single-staff <code>.musicxml</code> file to deduce and preview piano fingerings.
+        Upload a <code>.musicxml</code>, <code>.xml</code>, or <code>.mxl</code> file to deduce and preview piano fingerings.
       </div>
     );
   }

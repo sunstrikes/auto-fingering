@@ -77,6 +77,9 @@ export function writeFingeringsToScore(
     if (!finger) {
       continue;
     }
+    if (event.anchorRawPreserved && finger === event.anchorFinger) {
+      continue;
+    }
     const noteEl = noteElementsByUid.get(event.noteUid);
     if (!noteEl) {
       continue;
