@@ -209,13 +209,11 @@ describe("walking skeleton end-to-end headless pipeline", () => {
       )
     ).rejects.toThrow(/score-partwise/i);
 
-    // 4. App UI renders .musicxml/.xml/.mxl upload, export format, HandSpanProfile controls, and ignore-original-fingerings toggle
+    // 4. App UI renders .musicxml/.xml/.mxl upload, export format, settings button, and ignore-original-fingerings toggle
     const appHtml = renderToStaticMarkup(createElement(App));
     expect(appHtml).toContain('accept=".musicxml,.xml,.mxl"');
     expect(appHtml).toContain('aria-label="导出格式"');
-    expect(appHtml).toContain('aria-label="手型跨度预设"');
-    expect(appHtml).toContain("尽量避免大拇指弹黑键");
-    expect(appHtml).toContain("优先保持手位稳定");
+    expect(appHtml).toContain('data-testid="header-midi-status-btn"');
     expect(appHtml).toContain("忽略原谱已有指法");
   });
 
@@ -304,6 +302,12 @@ describe("walking skeleton end-to-end headless pipeline", () => {
       expect(seenProfiles[0]).toEqual({ preset: "M", avoidThumbOnBlack: true, preferStablePosition: false });
       expect(container.textContent).toContain("高风险 1");
 
+      // Open settings modal where HandSpanProfile controls live
+      const settingsBtn = container.querySelector('[data-testid="header-midi-status-btn"]') as HTMLButtonElement;
+      await act(async () => {
+        settingsBtn.click();
+      });
+
       // Rapidly click S then L without awaiting S in between -> S gets cancelled, L completes cleanly
       const btnS = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "S")!;
       const btnL = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "L")!;
@@ -330,11 +334,13 @@ describe("walking skeleton end-to-end headless pipeline", () => {
       expect(container.textContent).toContain("警告 1");
 
       // Toggle avoidThumbOnBlack & preferStablePosition -> triggers new worker solves
-      const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
-      expect(checkboxes).toHaveLength(3);
+      const avoidThumbCheckbox = container.querySelector('[data-testid="avoid-thumb-black-toggle"]') as HTMLInputElement;
+      const preferStableCheckbox = container.querySelector('[data-testid="prefer-stable-position-toggle"]') as HTMLInputElement;
+      expect(avoidThumbCheckbox).not.toBeNull();
+      expect(preferStableCheckbox).not.toBeNull();
 
       await act(async () => {
-        checkboxes[0].click();
+        avoidThumbCheckbox.click();
         await Promise.resolve();
       });
       await act(async () => {
@@ -343,7 +349,7 @@ describe("walking skeleton end-to-end headless pipeline", () => {
       });
 
       await act(async () => {
-        checkboxes[1].click();
+        preferStableCheckbox.click();
         await Promise.resolve();
       });
       await act(async () => {

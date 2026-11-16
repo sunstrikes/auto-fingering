@@ -184,6 +184,48 @@ describe("Seam 1: Lazy Piano Audio + Web Audio Synth Fallback", () => {
     // Stopping all voices cancels scheduled audio cleanly without throwing
     engine.stopAll();
     expect(oscInstances[0].stop).toHaveBeenCalledTimes(2);
+    expect(gainInstances[0].disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels smplr scheduler queue and returned StopFn handles on stopAll() so queued future notes never overlap", async () => {
+    let currentTime = 0;
+    const ctx = createMockAudioContext(0);
+    Object.defineProperty(ctx, "currentTime", { get: () => currentTime });
+
+    const queued: Array<{ note: number; time: number; cancelled: boolean }> = [];
+    const schedulerStopSpy = vi.fn(() => {
+      for (const item of queued) item.cancelled = true;
+    });
+    const smplrStopSpy = vi.fn();
+
+    const engine = createPianoAudioEngine({
+      getAudioContext: () => ctx,
+      loadSmplrPiano: async () => ({
+        load: Promise.resolve(),
+        scheduler: { stop: schedulerStopSpy },
+        start(event) {
+          const entry = { note: event.note, time: event.time ?? currentTime, cancelled: false };
+          queued.push(entry);
+          return () => {
+            entry.cancelled = true;
+          };
+        },
+        stop: smplrStopSpy,
+      }),
+    });
+
+    await engine.prepare();
+
+    // Schedule two future notes (simulating 4s lookahead)
+    engine.triggerNote({ midi: 60, time: 0.5, duration: 0.5 });
+    engine.triggerNote({ midi: 64, time: 2.0, duration: 0.5 });
+    expect(queued.every((q) => !q.cancelled)).toBe(true);
+
+    engine.stopAll();
+
+    expect(schedulerStopSpy).toHaveBeenCalledTimes(1);
+    expect(smplrStopSpy).toHaveBeenCalledTimes(1);
+    expect(queued.every((q) => q.cancelled)).toBe(true);
   });
 });
 
@@ -986,6 +1028,229 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     });
     expect(syncCursor).toHaveBeenLastCalledWith(
       expect.objectContaining({ measureIndex: 0, midis: [60] })
+    );
+  });
+
+  it("stops previously queued smplr notes immediately on measure jump and restart without overlap", async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <direction><sound tempo="60"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    // Simulate smplr's 0.2s lookahead scheduler queue (smplr.stop() alone does NOT clear it!)
+    let currentTime = 0;
+    const mockCtx = createMockAudioContext(0);
+    Object.defineProperty(mockCtx, "currentTime", { get: () => currentTime });
+
+    const queuedNotes: Array<{ midi: number; time: number }> = [];
+    const soundedNotes: Array<{ midi: number; time: number }> = [];
+    const flushSmplrScheduler = (now: number) => {
+      const lookahead = now + 0.2;
+      const due = queuedNotes.filter((item) => item.time <= lookahead).sort((a, b) => a.time - b.time);
+      for (const item of due) {
+        soundedNotes.push(item);
+        const idx = queuedNotes.indexOf(item);
+        if (idx >= 0) queuedNotes.splice(idx, 1);
+      }
+    };
+
+    const audioEngine = createPianoAudioEngine({
+      getAudioContext: () => mockCtx,
+      loadSmplrPiano: async () => ({
+        load: Promise.resolve(),
+        scheduler: {
+          stop() {
+            queuedNotes.length = 0;
+          },
+        },
+        start(event) {
+          const item = { midi: event.note, time: event.time ?? currentTime };
+          if (item.time <= currentTime + 0.2) {
+            soundedNotes.push(item);
+            return () => {};
+          }
+          queuedNotes.push(item);
+          return () => {
+            const idx = queuedNotes.indexOf(item);
+            if (idx >= 0) queuedNotes.splice(idx, 1);
+          };
+        },
+        stop: vi.fn(),
+      }),
+    });
+
+    const engine = createPlaybackEngine({
+      audioEngine,
+      requestAnimationFrame: () => 1,
+      cancelAnimationFrame: () => {},
+    });
+
+    const scoreDoc = parseMusicXml(xml);
+    // Start playing from measure 1 at t=0 -> C4(0s) sounds immediately; D4(1s), E4(2s), F4(3s) queued
+    await engine.play(scoreDoc);
+    expect(soundedNotes.map((n) => n.midi)).toEqual([60]);
+    expect(queuedNotes.map((n) => n.midi)).toEqual([62, 64, 65]);
+
+    // At t=0.5s, jump to measure 2 -> old D4/E4/F4 from measure 1 schedule must be cancelled!
+    currentTime = 0.5;
+    await engine.play(scoreDoc, { fromScoreSec: scoreDoc.measureTimelines[1].startSec });
+    // Flush scheduler across time: ONLY E4(0.5s) and F4(1.5s) from measure 2 may sound, NEVER D4(62)!
+    currentTime = 2.0;
+    flushSmplrScheduler(currentTime);
+    expect(soundedNotes.map((n) => n.midi)).toEqual([60, 64, 65]);
+
+    // Now restart from beginning while playing -> old queued notes cancelled, fresh C4/D4/E4/F4 play
+    soundedNotes.length = 0;
+    currentTime = 2.2;
+    await engine.play(scoreDoc, { restart: true });
+    currentTime = 5.5;
+    flushSmplrScheduler(currentTime);
+    expect(soundedNotes.map((n) => n.midi)).toEqual([60, 62, 64, 65]);
+
+    engine.stop();
+  });
+
+  it("resets paused position when switching measures in <App /> so pressing Play starts from the selected measure", async () => {
+    const inProcessWorkerFactory = (): WorkerLike => {
+      const worker: WorkerLike = {
+        onmessage: null,
+        onerror: null,
+        postMessage(msg: unknown) {
+          const req = msg as WorkerRequest;
+          queueMicrotask(() => {
+            const result = solveFingering(req.onsetSlices, req.profile, {
+              ignoreExistingFingerings: req.ignoreExistingFingerings,
+            });
+            const resp: WorkerResponse = { requestId: req.requestId, ok: true, result };
+            worker.onmessage?.({ data: resp } as MessageEvent<WorkerResponse>);
+          });
+        },
+        terminate() {},
+      };
+      return worker;
+    };
+
+    const syncCursor = vi.fn();
+    const rendererSpy: ScoreRendererHandle = {
+      render: vi.fn(async () => ({
+        measureCount: 2,
+        measureGeometry: [
+          { measureIndex: 0, top: 0, height: 100 },
+          { measureIndex: 1, top: 100, height: 100 },
+        ],
+      })),
+      syncCursor,
+      highlightMeasure: vi.fn(),
+      markAnchoredNotes: vi.fn(),
+      scrollToMeasure: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    let currentTime = 0;
+    const mockCtx = createMockAudioContext(0);
+    Object.defineProperty(mockCtx, "currentTime", { get: () => currentTime });
+
+    mountedContainer = document.createElement("div");
+    document.body.appendChild(mountedContainer);
+    mountedRoot = createRoot(mountedContainer);
+
+    await act(async () => {
+      mountedRoot!.render(
+        createElement(App, {
+          solverClientFactory: () => createSolverClient(inProcessWorkerFactory),
+          scoreRendererFactory: () => rendererSpy,
+          audioDeps: {
+            getAudioContext: () => mockCtx,
+            loadSmplrPiano: async () => {
+              throw new Error("offline");
+            },
+            requestAnimationFrame: () => 1,
+            cancelAnimationFrame: () => {},
+          },
+        })
+      );
+    });
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <direction><sound tempo="60"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const fileInput = mountedContainer.querySelector('input[type="file"]') as HTMLInputElement;
+    const fakeFile = {
+      name: "pause-switch.musicxml",
+      text: async () => xml,
+      arrayBuffer: async () => new TextEncoder().encode(xml).buffer,
+    };
+    Object.defineProperty(fileInput, "files", { value: [fakeFile], configurable: true });
+
+    await act(async () => {
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    const playBtn = mountedContainer.querySelector('[data-testid="audio-play-btn"]') as HTMLButtonElement;
+    const pauseBtn = mountedContainer.querySelector('[data-testid="audio-pause-btn"]') as HTMLButtonElement;
+    const rulerM2 = mountedContainer.querySelector('[data-testid="measure-ruler-item-1"]') as HTMLButtonElement;
+
+    // Play measure 1, pause at t=0.2s, switch to measure 2, then press Play
+    await act(async () => {
+      playBtn.click();
+      await Promise.resolve();
+    });
+    expect(syncCursor).toHaveBeenLastCalledWith(
+      expect.objectContaining({ measureIndex: 0, midis: [60] })
+    );
+
+    await act(async () => {
+      currentTime = 0.2;
+      pauseBtn.click();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      rulerM2.click();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      playBtn.click();
+      await Promise.resolve();
+    });
+    expect(syncCursor).toHaveBeenLastCalledWith(
+      expect.objectContaining({ measureIndex: 1, midis: [64] })
     );
   });
 });

@@ -719,6 +719,8 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       const prevState = state;
       if (prevState === "playing") {
         deps.audioEngine.stopAll();
+        metronomeAudio.stopAll();
+      } else {
         metronomeAudio.cancelPending();
       }
 

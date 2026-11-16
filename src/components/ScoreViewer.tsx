@@ -36,7 +36,7 @@ export interface OsmdNoteHit {
 export interface ScoreRendererHandle {
   render(
     xmlString: string,
-    options?: { layoutMode?: ScoreLayoutMode }
+    options?: { layoutMode?: ScoreLayoutMode; zoom?: number }
   ): Promise<{
     measureCount: number;
     measureGeometry: MeasureGeometry[];
@@ -353,7 +353,7 @@ export function matchMeasureGraphicalNotes<T extends MatchableScoreItem>(
  * SVG measure highlighting, anchor/diff/selection markers, click hit-testing, playback cursor sync, and scrolling.
  */
 export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHandle {
-  let activeLayoutMode: ScoreLayoutMode = "horizontal";
+  let activeLayoutMode: ScoreLayoutMode = "page";
   const buildOsmd = (mode: ScoreLayoutMode) =>
     new OpenSheetMusicDisplay(container, {
       autoResize: mode === "page",
@@ -442,7 +442,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
   };
 
   return {
-    async render(xmlString: string, options?: { layoutMode?: ScoreLayoutMode }) {
+    async render(xmlString: string, options?: { layoutMode?: ScoreLayoutMode; zoom?: number }) {
       const nextMode = options?.layoutMode ?? activeLayoutMode;
       if (nextMode !== activeLayoutMode) {
         activeLayoutMode = nextMode;
@@ -452,11 +452,18 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       if (activeLayoutMode === "horizontal") {
         container.style.width = "max-content";
         container.style.minWidth = "100%";
+        osmd.EngravingRules.PageTopMargin = 1;
+        osmd.EngravingRules.PageBottomMargin = 1;
+        osmd.EngravingRules.PageLeftMargin = 1.5;
+        osmd.EngravingRules.PageRightMargin = 1.5;
       } else {
         container.style.width = "";
         container.style.minWidth = "";
+        osmd.EngravingRules.PageTopMargin = 4;
+        osmd.EngravingRules.PageBottomMargin = 4;
       }
       await osmd.load(xmlString);
+      osmd.Zoom = options?.zoom ?? 0.85;
       osmd.render();
       lastCursorKey = null;
       osmd.cursor?.hide();
@@ -764,7 +771,7 @@ export function ScoreViewer({
   selectedNoteUid = null,
   cursorTarget = null,
   playbackFrame = null,
-  layoutMode = "horizontal",
+  layoutMode = "page",
   onLayoutModeChange,
   onSelectMeasure,
   onSelectNote,
@@ -780,6 +787,7 @@ export function ScoreViewer({
   const [measureGeometry, setMeasureGeometry] = useState<MeasureGeometry[]>([]);
   const [isRendered, setIsRendered] = useState<boolean>(false);
   const [manualScrollPaused, setManualScrollPaused] = useState<boolean>(false);
+  const [scoreZoom, setScoreZoom] = useState<number>(0.85);
 
   // Build per-measure [startSec, endSec] lookup for smooth intra-measure continuous horizontal scrolling
   const measureTimeBounds = useRef<Map<number, { startSec: number; endSec: number }>>(new Map());
@@ -827,7 +835,10 @@ export function ScoreViewer({
         if (!rendererRef.current) {
           rendererRef.current = rendererFactory(container);
         }
-        const info = await rendererRef.current.render(xmlString, { layoutMode });
+        const info = await rendererRef.current.render(xmlString, {
+          layoutMode,
+          zoom: scoreZoom,
+        });
         if (!cancelled) {
           setMeasureGeometry(info.measureGeometry);
           setIsRendered(true);
@@ -844,7 +855,7 @@ export function ScoreViewer({
     return () => {
       cancelled = true;
     };
-  }, [xmlString, layoutMode, rendererFactory]);
+  }, [xmlString, layoutMode, scoreZoom, rendererFactory]);
 
   useEffect(() => {
     return () => {
@@ -970,9 +981,9 @@ export function ScoreViewer({
       data-active-measure={selectedMeasureIndex !== null ? String(selectedMeasureIndex) : undefined}
       data-selected-slice={selectedSliceId ?? undefined}
       data-selected-note={selectedNoteUid ?? undefined}
-      className="flex min-h-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white p-3 shadow-sm"
+      className="flex min-h-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white p-2 shadow-sm sm:p-2.5"
     >
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1.5 text-xs">
+      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1 text-xs">
         <div className="flex flex-wrap items-center gap-2 text-slate-600">
           <span className="font-semibold text-slate-800">乐谱画布</span>
           <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800">
@@ -1001,6 +1012,43 @@ export function ScoreViewer({
               回到游标
             </button>
           )}
+
+          <div
+            className="inline-flex items-center rounded-md border border-slate-300 bg-slate-100 p-0.5 text-[11px] font-medium"
+            role="group"
+            aria-label="乐谱缩放"
+          >
+            <button
+              type="button"
+              data-testid="score-zoom-out-btn"
+              aria-label="缩小乐谱"
+              disabled={scoreZoom <= 0.5}
+              onClick={() =>
+                setScoreZoom((z) => Math.max(0.5, Math.round((z - 0.1) * 100) / 100))
+              }
+              className="rounded px-1.5 py-0.5 text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              -
+            </button>
+            <span
+              data-testid="score-zoom-label"
+              className="min-w-[36px] text-center text-[11px] text-slate-700"
+            >
+              {Math.round(scoreZoom * 100)}%
+            </span>
+            <button
+              type="button"
+              data-testid="score-zoom-in-btn"
+              aria-label="放大乐谱"
+              disabled={scoreZoom >= 1.4}
+              onClick={() =>
+                setScoreZoom((z) => Math.min(1.4, Math.round((z + 0.1) * 100) / 100))
+              }
+              className="rounded px-1.5 py-0.5 text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              +
+            </button>
+          </div>
 
           {onLayoutModeChange && (
             <div

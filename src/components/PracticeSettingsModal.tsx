@@ -1,5 +1,12 @@
 import type { SpeedMultiplier } from "../audio/playbackEngine";
+import type { HandSpanProfile, SpanPreset } from "../domain/types";
 import type { MidiConnectionState } from "../midi/webMidi";
+
+const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
+  { preset: "S", title: "小手型（偏保守跨度，0.82×）" },
+  { preset: "M", title: "标准手型（1.00×）" },
+  { preset: "L", title: "大手型（允许更大八度/九度扩张，1.18×）" },
+];
 
 export interface PracticeSettingsModalProps {
   open: boolean;
@@ -11,12 +18,20 @@ export interface PracticeSettingsModalProps {
   loopGapEnabled?: boolean;
   metronomeVolume: number;
   skipGraceNotes?: boolean;
+  showStatusBar?: boolean;
+  showPianoOverhead?: boolean;
+  showFullPalm?: boolean;
+  handSpanProfile?: HandSpanProfile;
   onSelectDevice: (deviceId: string | null) => void;
   onToggleLocalSound: (enabled: boolean) => void;
   onToggleCountIn: () => void;
   onToggleLoopGap?: () => void;
   onChangeMetronomeVolume: (volume: number) => void;
   onToggleSkipGraceNotes?: () => void;
+  onToggleShowStatusBar?: () => void;
+  onToggleShowPianoOverhead?: () => void;
+  onToggleShowFullPalm?: () => void;
+  onChangeHandSpanProfile?: (profile: HandSpanProfile) => void;
   onClose: () => void;
 }
 
@@ -64,12 +79,20 @@ export function PracticeSettingsModal({
   loopGapEnabled = false,
   metronomeVolume,
   skipGraceNotes = false,
+  showStatusBar = true,
+  showPianoOverhead = true,
+  showFullPalm = false,
+  handSpanProfile,
   onSelectDevice,
   onToggleLocalSound,
   onToggleCountIn,
   onToggleLoopGap,
   onChangeMetronomeVolume,
   onToggleSkipGraceNotes,
+  onToggleShowStatusBar,
+  onToggleShowPianoOverhead,
+  onToggleShowFullPalm,
+  onChangeHandSpanProfile,
   onClose,
 }: PracticeSettingsModalProps) {
   if (!open) return null;
@@ -85,7 +108,7 @@ export function PracticeSettingsModal({
       aria-label="练习设置"
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
     >
-      <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-4 shadow-xl">
+      <div className="max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 shadow-xl">
         <div className="flex items-center justify-between border-b border-slate-100 pb-2">
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold text-slate-900">练习设置</h2>
@@ -252,6 +275,127 @@ export function PracticeSettingsModal({
               onChange={(e) => onChangeMetronomeVolume(Number.parseFloat(e.target.value))}
               className="w-full accent-blue-600"
             />
+          </div>
+
+          {handSpanProfile && onChangeHandSpanProfile && (
+            <div className="space-y-2.5 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="font-semibold text-slate-800">手型大小与指法求解偏好</div>
+                  <div className="text-[11px] text-slate-500">
+                    调整手掌跨度预设（S/M/L）与自动指法倾向
+                  </div>
+                </div>
+                <div
+                  className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 text-xs font-medium"
+                  role="group"
+                  aria-label="手型跨度预设"
+                >
+                  {SPAN_PRESETS.map(({ preset, title }) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      title={title}
+                      aria-pressed={handSpanProfile.preset === preset}
+                      onClick={() =>
+                        onChangeHandSpanProfile({ ...handSpanProfile, preset })
+                      }
+                      className={`rounded-md px-2.5 py-1 transition ${
+                        handSpanProfile.preset === preset
+                          ? "bg-slate-900 text-white shadow-xs"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-slate-200/70 pt-2">
+                <span className="font-medium text-slate-900">尽量避免大拇指弹黑键</span>
+                <input
+                  type="checkbox"
+                  data-testid="avoid-thumb-black-toggle"
+                  checked={handSpanProfile.avoidThumbOnBlack}
+                  onChange={(e) =>
+                    onChangeHandSpanProfile({
+                      ...handSpanProfile,
+                      avoidThumbOnBlack: e.target.checked,
+                    })
+                  }
+                  className="h-4 w-4 shrink-0 accent-blue-600"
+                />
+              </label>
+
+              <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-slate-200/70 pt-2">
+                <span className="font-medium text-slate-900">优先保持手位稳定</span>
+                <input
+                  type="checkbox"
+                  data-testid="prefer-stable-position-toggle"
+                  checked={handSpanProfile.preferStablePosition}
+                  onChange={(e) =>
+                    onChangeHandSpanProfile({
+                      ...handSpanProfile,
+                      preferStablePosition: e.target.checked,
+                    })
+                  }
+                  className="h-4 w-4 shrink-0 accent-blue-600"
+                />
+              </label>
+            </div>
+          )}
+
+          <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div className="font-semibold text-slate-800">界面显示与布局</div>
+            <label className="flex cursor-pointer items-center justify-between gap-3">
+              <div>
+                <div className="font-medium text-slate-900">显示顶部状态与风险栏</div>
+                <div className="text-[11px] text-slate-500">
+                  显示或隐藏乐谱上方的指法统计、高风险/警告计数及本地运算提示栏
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                data-testid="show-status-bar-toggle"
+                aria-label="显示顶部状态与风险栏"
+                checked={showStatusBar}
+                onChange={() => onToggleShowStatusBar?.()}
+                className="h-4 w-4 shrink-0 accent-blue-600"
+              />
+            </label>
+            <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-slate-200/70 pt-2">
+              <div>
+                <div className="font-medium text-slate-900">显示键盘上方手位与换指提示</div>
+                <div className="text-[11px] text-slate-500">
+                  显示或隐藏 88 键琴键上方的手位区间（RH/LH）与换指提示条（Position shift）
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                data-testid="show-piano-overhead-toggle"
+                aria-label="显示键盘上方手位与换指提示"
+                checked={showPianoOverhead}
+                onChange={() => onToggleShowPianoOverhead?.()}
+                className="h-4 w-4 shrink-0 accent-blue-600"
+              />
+            </label>
+            <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-slate-200/70 pt-2">
+              <div>
+                <div className="font-medium text-slate-900">显示键盘下方完整手掌</div>
+                <div className="text-[11px] text-slate-500">
+                  开启后显示琴键下方的完整手掌与手腕；关闭时键盘下沿对齐屏幕底端，为乐谱留出更多空间
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                data-testid="show-full-palm-toggle"
+                aria-label="显示键盘下方完整手掌"
+                checked={showFullPalm}
+                onChange={() => onToggleShowFullPalm?.()}
+                className="h-4 w-4 shrink-0 accent-blue-600"
+              />
+            </label>
           </div>
 
           <p className="text-[11px] text-slate-400">

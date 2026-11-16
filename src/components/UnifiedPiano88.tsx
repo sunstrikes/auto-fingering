@@ -28,6 +28,7 @@ import {
 import {
   PIANO_BLACK_KEY_H,
   PIANO_BLACK_KEY_W,
+  PIANO_KEYBED_BOTTOM_Y,
   PIANO_KEYS_Y,
   PIANO_SVG_H,
   PIANO_WHITE_KEY_H,
@@ -42,6 +43,8 @@ export interface UnifiedPiano88Props {
   handSpanProfile?: HandSpanProfile;
   playbackFrame?: PlaybackFrame | null;
   practiceMode?: PracticeMode;
+  showOverhead?: boolean;
+  showFullPalm?: boolean;
   wrongMidis?: ReadonlySet<number>;
   hitMidis?: ReadonlySet<number>;
   pressedMidis?: ReadonlySet<number>;
@@ -62,7 +65,7 @@ const RH_LANE_Y = 6;
 const LH_LANE_Y = 25;
 const FALLBOARD_Y = 46;
 const KEYS_Y = PIANO_KEYS_Y;
-const SVG_H = PIANO_SVG_H;
+const SVG_BOTTOM_Y = PIANO_KEYBED_BOTTOM_Y + 2;
 
 const FINGERS: Finger[] = [1, 2, 3, 4, 5];
 
@@ -422,6 +425,8 @@ export function UnifiedPiano88({
   handSpanProfile = DEFAULT_HAND_SPAN_PROFILE,
   playbackFrame = null,
   practiceMode = "both",
+  showOverhead = true,
+  showFullPalm = false,
   wrongMidis,
   hitMidis,
   pressedMidis,
@@ -548,13 +553,19 @@ export function UnifiedPiano88({
     }, 180);
   };
 
+  const viewBoxTop = showOverhead ? 0 : FALLBOARD_Y;
+  const viewBoxBottom = showFullPalm ? PIANO_SVG_H : SVG_BOTTOM_Y;
+  const viewBoxHeight = viewBoxBottom - viewBoxTop;
+
   return (
     <section
       data-testid="unified-piano-88"
       aria-label="88键双手钢琴键盘"
-      className="border-t border-slate-300 bg-white px-4 py-2 shadow-[0_-4px_12px_rgba(15,23,42,0.05)]"
+      className={`border-t border-slate-300 bg-white px-3 pt-1.5 shadow-[0_-4px_12px_rgba(15,23,42,0.05)] sm:px-4 ${
+        showFullPalm ? "pb-1.5" : "pb-0"
+      }`}
     >
-      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-semibold text-slate-900">88 键钢琴与双手实时模拟</span>
           <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 font-medium text-indigo-700">
@@ -628,8 +639,8 @@ export function UnifiedPiano88({
       <div className="overflow-x-auto lg:overflow-x-visible">
         <svg
           width={SVG_W}
-          height={SVG_H}
-          viewBox={`0 0 ${SVG_W} ${SVG_H}`}
+          height={viewBoxHeight}
+          viewBox={`0 ${viewBoxTop} ${SVG_W} ${viewBoxHeight}`}
           className="block h-auto w-full min-w-[960px] select-none lg:min-w-0"
         >
           <defs>
@@ -652,8 +663,12 @@ export function UnifiedPiano88({
           </defs>
 
           {/* Overhead Dual Lanes: RH Top, LH Bottom */}
-          <OverheadHandLane posture={displayFrame.rh} laneY={RH_LANE_Y} dimmed={dimRh} />
-          <OverheadHandLane posture={displayFrame.lh} laneY={LH_LANE_Y} dimmed={dimLh} />
+          {showOverhead && (
+            <>
+              <OverheadHandLane posture={displayFrame.rh} laneY={RH_LANE_Y} dimmed={dimRh} />
+              <OverheadHandLane posture={displayFrame.lh} laneY={LH_LANE_Y} dimmed={dimLh} />
+            </>
+          )}
 
           {/* Fallboard Divider */}
           <rect

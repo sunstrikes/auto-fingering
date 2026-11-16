@@ -11,7 +11,6 @@ import {
   type PracticeMode,
   type PracticeStep,
   type ScoreDocument,
-  type SpanPreset,
   type TransitionCue,
   type WaitingModeState,
 } from "./domain/types";
@@ -74,12 +73,6 @@ import {
   type SpeedMultiplier,
 } from "./audio/playbackEngine";
 
-const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
-  { preset: "S", title: "小手跨度 (0.82x)" },
-  { preset: "M", title: "标准手跨度 (1.00x)" },
-  { preset: "L", title: "大手跨度 (1.18x)" },
-];
-
 export interface AppAudioDeps extends PianoAudioDeps {
   requestAnimationFrame?: (cb: FrameRequestCallback) => number;
   cancelAnimationFrame?: (id: number) => void;
@@ -122,12 +115,15 @@ export default function App({
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
   const [playbackFrame, setPlaybackFrame] = useState<PlaybackFrame | null>(null);
-  const [layoutMode, setLayoutMode] = useState<ScoreLayoutMode>("horizontal");
+  const [layoutMode, setLayoutMode] = useState<ScoreLayoutMode>("page");
   const [popoverOpen, setPopoverOpen] = useState<boolean>(false);
   const [popoverAnchorRect, setPopoverAnchorRect] = useState<PopoverAnchorRect | null>(null);
   const [diffDropdownOpen, setDiffDropdownOpen] = useState<boolean>(false);
   const [warningNavIndex, setWarningNavIndex] = useState<number>(-1);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  const [showStatusBar, setShowStatusBar] = useState<boolean>(true);
+  const [showPianoOverhead, setShowPianoOverhead] = useState<boolean>(false);
+  const [showFullPalm, setShowFullPalm] = useState<boolean>(false);
   const [midiLocalSound, setMidiLocalSound] = useState<boolean>(false);
   const [midiState, setMidiState] = useState<MidiConnectionState>({
     status: "unsupported",
@@ -677,28 +673,44 @@ export default function App({
     handleSelectWarning(sortedWarnings[nextIdx]);
   };
 
+  const cancelWaitingLoopGapIfActive = (preservePlayingState: boolean) => {
+    if (!waitingLoopGapActiveRef.current) return;
+    waitingLoopGapActiveRef.current = false;
+    playbackEngineRef.current?.stop();
+    if (preservePlayingState) {
+      setPlaybackState("playing");
+      playbackEngineRef.current?.setMetronomePaused(true);
+    }
+  };
+
   const handleSelectMeasure = (measureIndex: number) => {
     const summary = measureRisks.find((m) => m.measureIndex === measureIndex);
     useStudioStore
       .getState()
       .selectMeasure(measureIndex, summary?.firstWarningSliceId ?? summary?.firstSliceId ?? null);
     setPopoverOpen(false);
+    const currentPlaybackState = waitingModeEnabled
+      ? playbackState
+      : (playbackEngineRef.current?.getState() ?? playbackState);
     if (waitingModeEnabled && practiceSteps.length > 0) {
+      cancelWaitingLoopGapIfActive(currentPlaybackState === "playing");
       const stepIdx = practiceSteps.findIndex((s) => s.measureIndex >= measureIndex);
       const targetIdx = stepIdx >= 0 ? stepIdx : 0;
       setWaitingState(createWaitingModeState(targetIdx));
-      if (playbackState !== "stopped") {
-        syncToPracticeStep(practiceSteps[targetIdx] ?? null, playbackState);
+      if (currentPlaybackState !== "stopped") {
+        syncToPracticeStep(practiceSteps[targetIdx] ?? null, currentPlaybackState);
       }
       return;
     }
-    if (playbackState === "playing" && scoreDoc && playbackEngineRef.current) {
+    if (currentPlaybackState === "playing" && scoreDoc && playbackEngineRef.current) {
       const tl = scoreDoc.measureTimelines[measureIndex];
       if (tl) {
         void playbackEngineRef.current.play(scoreDoc, { fromScoreSec: tl.startSec });
       } else if (summary?.firstSliceId) {
         void playbackEngineRef.current.play(scoreDoc, { fromSliceId: summary.firstSliceId });
       }
+    } else if (currentPlaybackState === "paused") {
+      playbackEngineRef.current?.stop();
     }
   };
 
@@ -707,16 +719,20 @@ export default function App({
     setPopoverOpen(false);
     const firstSliceId = onsetSlices[0]?.sliceId ?? null;
     useStudioStore.getState().selectMeasure(0, firstSliceId);
+    const currentPlaybackState = waitingModeEnabled
+      ? playbackState
+      : (playbackEngineRef.current?.getState() ?? playbackState);
     if (waitingModeEnabled) {
+      cancelWaitingLoopGapIfActive(currentPlaybackState === "playing");
       setWaitingState(createWaitingModeState(0));
-      if (playbackState !== "stopped") {
-        syncToPracticeStep(practiceSteps[0] ?? null, playbackState);
+      if (currentPlaybackState !== "stopped") {
+        syncToPracticeStep(practiceSteps[0] ?? null, currentPlaybackState);
       }
       return;
     }
-    if (playbackState === "playing" && playbackEngineRef.current) {
+    if (currentPlaybackState === "playing" && playbackEngineRef.current) {
       void playbackEngineRef.current.play(scoreDoc, { restart: true });
-    } else if (playbackState === "paused") {
+    } else if (currentPlaybackState === "paused") {
       playbackEngineRef.current?.stop();
     }
   };
@@ -726,7 +742,10 @@ export default function App({
   };
 
   const handleSelectNote = (noteUid: string, anchorRect?: PopoverAnchorRect) => {
-    if (playbackState !== "stopped" || waitingModeEnabled) {
+    const currentPlaybackState = waitingModeEnabled
+      ? playbackState
+      : (playbackEngineRef.current?.getState() ?? playbackState);
+    if (currentPlaybackState !== "stopped" || waitingModeEnabled) {
       setPopoverOpen(false);
       const clickedNote = noteEvents.find((n) => n.noteUid === noteUid);
       const targetSlice =
@@ -741,6 +760,7 @@ export default function App({
       if (targetSlice) {
         useStudioStore.getState().selectSlice(targetSlice.sliceId);
         if (waitingModeEnabled && practiceSteps.length > 0) {
+          cancelWaitingLoopGapIfActive(currentPlaybackState === "playing");
           const stepIdx = practiceSteps.findIndex(
             (s) =>
               s.primarySliceId === targetSlice.sliceId ||
@@ -748,12 +768,12 @@ export default function App({
           );
           const targetIdx = stepIdx >= 0 ? stepIdx : 0;
           setWaitingState(createWaitingModeState(targetIdx));
-          if (playbackState !== "stopped") {
-            syncToPracticeStep(practiceSteps[targetIdx] ?? null, playbackState);
+          if (currentPlaybackState !== "stopped") {
+            syncToPracticeStep(practiceSteps[targetIdx] ?? null, currentPlaybackState);
           }
           return;
         }
-        if (playbackState === "playing" && scoreDoc && playbackEngineRef.current) {
+        if (currentPlaybackState === "playing" && scoreDoc && playbackEngineRef.current) {
           void playbackEngineRef.current.play(scoreDoc, { fromSliceId: targetSlice.sliceId });
         }
       }
@@ -905,10 +925,7 @@ export default function App({
     setPopoverOpen(false);
     if (waitingModeEnabled) {
       if (practiceSteps.length === 0) return;
-      if (waitingLoopGapActiveRef.current) {
-        waitingLoopGapActiveRef.current = false;
-        playbackEngineRef.current.stop();
-      }
+      cancelWaitingLoopGapIfActive(false);
       const loopRange = findAbLoopStepRange(practiceSteps, abLoop);
       let startIdx = 0;
       if (playbackState === "paused" && waitingState.currentStepIndex < practiceSteps.length) {
@@ -925,7 +942,8 @@ export default function App({
       syncToPracticeStep(practiceSteps[startIdx] ?? null, "playing");
       return;
     }
-    if (playbackState === "stopped" && selectedMeasureIndex !== null && selectedMeasureIndex > 0) {
+    const currentPlaybackState = playbackEngineRef.current.getState();
+    if (currentPlaybackState === "stopped" && selectedMeasureIndex !== null && selectedMeasureIndex > 0) {
       const tl = scoreDoc.measureTimelines[selectedMeasureIndex];
       if (tl) {
         void playbackEngineRef.current.play(scoreDoc, { fromScoreSec: tl.startSec });
@@ -940,6 +958,7 @@ export default function App({
     setPopoverOpen(false);
     if (waitingModeEnabled) {
       if (practiceSteps.length === 0) return;
+      cancelWaitingLoopGapIfActive(false);
       const slice = onsetSlices.find((s) => s.sliceId === selectedSliceId);
       const idx = slice
         ? practiceSteps.findIndex(
@@ -1070,21 +1089,21 @@ export default function App({
   };
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-slate-50 text-slate-900">
-      <header className="shrink-0 border-b border-slate-200 bg-white px-4 py-2.5">
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-base font-semibold tracking-tight text-slate-900">
+    <div className="flex h-dvh flex-col overflow-hidden bg-slate-50 text-slate-900">
+      <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-1.5 sm:px-4">
+        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 lg:flex-nowrap">
+          <div className="shrink-0">
+            <h1 className="whitespace-nowrap text-sm font-semibold tracking-tight text-slate-900 sm:text-base">
               MusicXML 钢琴自动指法
             </h1>
-            <p className="text-[11px] text-slate-500">
+            <p className="hidden text-[11px] text-slate-500 2xl:block">
               纯浏览器端 Beam Search DP 钢琴指法推导与双轨实时演练
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="cursor-pointer rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800">
-              上传 .musicxml / .mxl
+          <div className="flex flex-wrap items-center gap-1.5 lg:flex-nowrap">
+            <label className="shrink-0 cursor-pointer whitespace-nowrap rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-800">
+              上传<span className="hidden xl:inline"> .musicxml / .mxl</span>
               <input
                 type="file"
                 accept=".musicxml,.xml,.mxl"
@@ -1095,7 +1114,7 @@ export default function App({
 
             <div
               data-testid="practice-mode-selector"
-              className="inline-flex rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-xs font-medium"
+              className="inline-flex shrink-0 rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-xs font-medium"
               role="group"
               aria-label="练习模式"
             >
@@ -1119,7 +1138,7 @@ export default function App({
                       setPracticeMode(mode);
                       setWaitingState(createWaitingModeState(0));
                     }}
-                    className={`rounded-md px-2.5 py-1.5 transition ${
+                    className={`whitespace-nowrap rounded-md px-2 py-1 transition ${
                       isActive
                         ? "bg-white text-slate-900 shadow-xs"
                         : "text-slate-600 hover:text-slate-900"
@@ -1133,14 +1152,14 @@ export default function App({
 
             {isSingleStaff && (
               <div
-                className="inline-flex rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-xs font-medium"
+                className="inline-flex shrink-0 rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-xs font-medium"
                 role="group"
                 aria-label="单谱表声部手别"
               >
                 <button
                   type="button"
                   onClick={() => void handleSingleStaffHandToggle("RH")}
-                  className={`rounded-md px-3 py-1.5 transition ${
+                  className={`whitespace-nowrap rounded-md px-2 py-1 transition ${
                     singleStaffHand === "RH"
                       ? "bg-white text-slate-900 shadow-xs"
                       : "text-slate-600 hover:text-slate-900"
@@ -1151,7 +1170,7 @@ export default function App({
                 <button
                   type="button"
                   onClick={() => void handleSingleStaffHandToggle("LH")}
-                  className={`rounded-md px-3 py-1.5 transition ${
+                  className={`whitespace-nowrap rounded-md px-2 py-1 transition ${
                     singleStaffHand === "LH"
                       ? "bg-white text-slate-900 shadow-xs"
                       : "text-slate-600 hover:text-slate-900"
@@ -1162,80 +1181,23 @@ export default function App({
               </div>
             )}
 
-            <div className="flex flex-wrap items-center gap-3">
-              <div
-                className="inline-flex rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-xs font-medium"
-                role="group"
-                aria-label="手型跨度预设"
-              >
-                {SPAN_PRESETS.map(({ preset, title }) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    title={title}
-                    aria-pressed={handSpanProfile.preset === preset}
-                    onClick={() =>
-                      handleProfileChange({ ...handSpanProfile, preset })
-                    }
-                    className={`rounded-md px-2.5 py-1.5 transition ${
-                      handSpanProfile.preset === preset
-                        ? "bg-white text-slate-900 shadow-xs"
-                        : "text-slate-600 hover:text-slate-900"
-                    }`}
-                  >
-                    {preset}
-                  </button>
-                ))}
-              </div>
+            <label className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50">
+              <input
+                type="checkbox"
+                checked={ignoreExistingFingerings}
+                onChange={(e) => handleIgnoreExistingToggle(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900"
+              />
+              忽略原谱已有指法
+            </label>
 
-              <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={handSpanProfile.avoidThumbOnBlack}
-                  onChange={(e) =>
-                    handleProfileChange({
-                      ...handSpanProfile,
-                      avoidThumbOnBlack: e.target.checked,
-                    })
-                  }
-                  className="rounded border-slate-300 text-slate-900"
-                />
-                尽量避免大拇指弹黑键
-              </label>
-
-              <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={handSpanProfile.preferStablePosition}
-                  onChange={(e) =>
-                    handleProfileChange({
-                      ...handSpanProfile,
-                      preferStablePosition: e.target.checked,
-                    })
-                  }
-                  className="rounded border-slate-300 text-slate-900"
-                />
-                优先保持手位稳定
-              </label>
-
-              <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50">
-                <input
-                  type="checkbox"
-                  checked={ignoreExistingFingerings}
-                  onChange={(e) => handleIgnoreExistingToggle(e.target.checked)}
-                  className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900"
-                />
-                忽略原谱已有指法
-              </label>
-            </div>
-
-            <div className="inline-flex items-center gap-1.5">
+            <div className="inline-flex shrink-0 items-center gap-1">
               <button
                 type="button"
                 data-testid="undo-btn"
                 disabled={!canUndo}
                 onClick={() => useStudioStore.getState().undo()}
-                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
               >
                 撤销
               </button>
@@ -1244,19 +1206,19 @@ export default function App({
                 data-testid="redo-btn"
                 disabled={!canRedo}
                 onClick={() => useStudioStore.getState().redo()}
-                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
               >
                 重做
               </button>
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex shrink-0 items-center gap-1">
               <select
                 aria-label="导出格式"
                 value={exportFormat}
                 onChange={(e) => useStudioStore.getState().setExportFormat(e.target.value as ExportFormat)}
                 disabled={!renderedXml}
-                className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <option value="musicxml">.musicxml</option>
                 <option value="mxl">.mxl</option>
@@ -1265,17 +1227,18 @@ export default function App({
               <button
                 type="button"
                 disabled={!renderedXml}
+                title={`下载 .${exportFormat}`}
                 onClick={() => void handleDownload()}
-                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                下载 .{exportFormat}
+                下载
               </button>
 
               <button
                 type="button"
                 data-testid="header-midi-status-btn"
                 onClick={() => setSettingsOpen(true)}
-                className={`rounded-lg border px-3 py-2 text-xs font-medium transition hover:opacity-90 ${getMidiStatusBadgeClass(midiState)}`}
+                className={`whitespace-nowrap rounded-lg border px-2.5 py-1 text-xs font-medium transition hover:opacity-90 ${getMidiStatusBadgeClass(midiState)}`}
               >
                 {formatMidiStatusLabel(midiState)} · 设置
               </button>
@@ -1284,11 +1247,12 @@ export default function App({
         </div>
       </header>
 
-      <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-2 px-4 pt-2 pb-1">
-        <div
-          data-testid="top-status-warning-bar"
-          className="relative flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
-        >
+      <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-1.5 px-2.5 pt-1.5 pb-1 sm:px-4">
+        {showStatusBar && (
+          <div
+            data-testid="top-status-warning-bar"
+            className="relative flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
+          >
           <div className="flex flex-wrap items-center gap-3">
             <span>
               <strong>状态:</strong> {status}
@@ -1407,7 +1371,8 @@ export default function App({
 
             <span className="hidden text-slate-400 xl:inline">纯本地运算 · Web Worker DP</span>
           </div>
-        </div>
+          </div>
+        )}
 
         {errorMsg && (
           <div
@@ -1502,6 +1467,8 @@ export default function App({
           handSpanProfile={handSpanProfile}
           playbackFrame={playbackFrame}
           practiceMode={effectivePracticeMode}
+          showOverhead={showPianoOverhead}
+          showFullPalm={showFullPalm}
           wrongMidis={waitingState.wrongMidis}
           hitMidis={waitingState.hitMidis}
           pressedMidis={pressedMidis}
@@ -1540,12 +1507,20 @@ export default function App({
         loopGapEnabled={abLoop.loopGap}
         metronomeVolume={metronomeVolume}
         skipGraceNotes={skipGraceNotes}
+        showStatusBar={showStatusBar}
+        showPianoOverhead={showPianoOverhead}
+        showFullPalm={showFullPalm}
+        handSpanProfile={handSpanProfile}
         onSelectDevice={(deviceId) => midiControllerRef.current?.setSelectedDeviceId(deviceId)}
         onToggleLocalSound={setMidiLocalSound}
         onToggleCountIn={handleToggleCountIn}
         onToggleLoopGap={handleToggleLoopGap}
         onChangeMetronomeVolume={handleChangeMetronomeVolume}
         onToggleSkipGraceNotes={handleToggleSkipGraceNotes}
+        onToggleShowStatusBar={() => setShowStatusBar((v) => !v)}
+        onToggleShowPianoOverhead={() => setShowPianoOverhead((v) => !v)}
+        onToggleShowFullPalm={() => setShowFullPalm((v) => !v)}
+        onChangeHandSpanProfile={handleProfileChange}
         onClose={() => setSettingsOpen(false)}
       />
     </div>

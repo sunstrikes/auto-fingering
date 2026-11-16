@@ -10,6 +10,7 @@ export interface TriggerNoteParams {
 export interface SmplrPianoLike {
   load?: Promise<unknown>;
   ready?: Promise<unknown>;
+  scheduler?: { stop?: () => void };
   start(event: { note: number; time?: number; duration?: number; velocity?: number }): unknown;
   stop(target?: unknown): void;
   disconnect?(): void;
@@ -126,6 +127,11 @@ function createSynthPiano(ctx: AudioContext) {
         } catch {
           // ignore mocked or closed audio nodes
         }
+        try {
+          voice.envelopeGain.disconnect?.();
+        } catch {
+          // ignore mocked or closed audio nodes
+        }
         for (const osc of voice.oscillators) {
           try {
             osc.stop(now + 0.01);
@@ -187,6 +193,34 @@ export function createPianoAudioEngine(deps?: PianoAudioDeps): PianoAudioEngine 
   let smplrPiano: SmplrPianoLike | null = null;
   let synthPiano: ReturnType<typeof createSynthPiano> | null = null;
   let preparePromise: Promise<"samples" | "synth"> | null = null;
+
+  interface TrackedSmplrStop {
+    stop: () => void;
+    endTime: number;
+  }
+  const activeSmplrStops = new Set<TrackedSmplrStop>();
+
+  const pruneSmplrStops = (now: number) => {
+    for (const entry of activeSmplrStops) {
+      if (entry.endTime <= now) {
+        activeSmplrStops.delete(entry);
+      }
+    }
+  };
+
+  const stopSmplrVoices = () => {
+    // smplr.stop() only stops already-dispatched voices and leaves future notes queued in scheduler
+    smplrPiano?.scheduler?.stop?.();
+    for (const entry of activeSmplrStops) {
+      try {
+        entry.stop();
+      } catch {
+        // ignore already stopped or disposed note handle
+      }
+    }
+    activeSmplrStops.clear();
+    smplrPiano?.stop();
+  };
 
   const setStatus = (next: AudioEngineStatus) => {
     if (status !== next) {
@@ -252,24 +286,33 @@ export function createPianoAudioEngine(deps?: PianoAudioDeps): PianoAudioEngine 
 
     triggerNote(params: TriggerNoteParams) {
       if (status === "samples" && smplrPiano) {
-        smplrPiano.start({
+        const ctx = ensureAudioContext();
+        pruneSmplrStops(ctx.currentTime);
+        const safeDuration = Math.max(0.05, params.duration);
+        const stopHandle = smplrPiano.start({
           note: params.midi,
           time: params.time,
-          duration: Math.max(0.05, params.duration),
+          duration: safeDuration,
           velocity: params.velocity ?? 88,
         });
+        if (typeof stopHandle === "function") {
+          activeSmplrStops.add({
+            stop: stopHandle as () => void,
+            endTime: Math.max(ctx.currentTime, params.time) + safeDuration + 1.0,
+          });
+        }
         return;
       }
       ensureSynth().triggerNote(params);
     },
 
     stopAll() {
-      smplrPiano?.stop();
+      stopSmplrVoices();
       synthPiano?.stopAll();
     },
 
     dispose() {
-      smplrPiano?.stop();
+      stopSmplrVoices();
       smplrPiano?.disconnect?.();
       smplrPiano = null;
       synthPiano?.stopAll();

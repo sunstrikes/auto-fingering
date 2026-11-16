@@ -389,9 +389,18 @@ export function computeVerticalCost(
       if (pair.hasUnreachableSpan) hasUnreachableSpan = true;
       if (pair.hasWideStretch) hasWideStretch = true;
 
-      // Penalize awkward finger inversion while another finger is physically held down
+      // Penalize finger inversion while another finger is physically held down;
+      // wide or thumb-pinky inversions are anatomically impossible (hard constraint).
       if ((f > fH && posS < posH - 0.5) || (f < fH && posS > posH + 0.5)) {
-        cost += f === 1 || fH === 1 ? vw.heldInversionThumb : vw.heldInversionNonThumb;
+        const invDist = Math.abs(posS - posH);
+        const involvesThumb = f === 1 || fH === 1;
+        const involvesPinky = f === 5 || fH === 5;
+        if ((involvesThumb && involvesPinky) || invDist > weights.horizontal.crossMax * scale) {
+          cost += IMPOSSIBLE_COST + invDist;
+          hasUnreachableSpan = true;
+        } else {
+          cost += involvesThumb ? vw.heldInversionThumb : vw.heldInversionNonThumb;
+        }
       }
     }
 

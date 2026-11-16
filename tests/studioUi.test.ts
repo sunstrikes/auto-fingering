@@ -307,7 +307,10 @@ describe("Slice 3: ScoreViewer OSMD/scroll seam, anchor indicators & active meas
       await Promise.resolve();
     });
 
-    expect(fakeRenderer.render).toHaveBeenCalledWith("<score-partwise/>", { layoutMode: "horizontal" });
+    expect(fakeRenderer.render).toHaveBeenCalledWith("<score-partwise/>", {
+      layoutMode: "page",
+      zoom: 0.85,
+    });
     expect(markAnchoredNotes).toHaveBeenCalledWith(anchoredNotes);
     expect(highlightMeasure).toHaveBeenCalledWith(1);
     expect(scrollToMeasure).toHaveBeenCalledWith(1, expect.any(HTMLElement));
@@ -318,12 +321,12 @@ describe("Slice 3: ScoreViewer OSMD/scroll seam, anchor indicators & active meas
     expect(anchorStrip!.textContent).toContain("1");
 
     const viewer = mountedContainer.querySelector('[data-testid="score-viewer"]') as HTMLElement;
-    expect(viewer.dataset.layoutMode).toBe("horizontal");
+    expect(viewer.dataset.layoutMode).toBe("page");
     expect(viewer.dataset.activeMeasure).toBe("1");
     expect(viewer.dataset.selectedSlice).toBe("s1");
 
     const gutter = mountedContainer.querySelector('[data-testid="margin-risk-gutter"]') as HTMLElement;
-    expect(gutter.dataset.orientation).toBe("horizontal");
+    expect(gutter.dataset.orientation).toBe("vertical");
 
     const gutterBar0 = mountedContainer.querySelector('[data-measure-index="0"]') as HTMLButtonElement;
     act(() => {
@@ -479,7 +482,18 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
     expect(highlightMeasure).toHaveBeenLastCalledWith(1);
     expect(scrollToMeasure).toHaveBeenLastCalledWith(1, expect.any(HTMLElement));
 
-    // Toggle layout mode to Multi-line Page -> re-renders with layoutMode: "page" and vertical gutter
+    // Toggle layout mode to Horizontal -> re-renders with layoutMode: "horizontal", then back to Multi-line Page
+    const horizontalBtn = mountedContainer.querySelector('[data-testid="layout-horizontal-btn"]') as HTMLButtonElement;
+    await act(async () => {
+      horizontalBtn.click();
+      await Promise.resolve();
+    });
+    expect(viewer.dataset.layoutMode).toBe("horizontal");
+    expect(rendererSpy.render).toHaveBeenLastCalledWith(
+      expect.any(String),
+      { layoutMode: "horizontal", zoom: 0.85 }
+    );
+
     const pageBtn = mountedContainer.querySelector('[data-testid="layout-page-btn"]') as HTMLButtonElement;
     await act(async () => {
       pageBtn.click();
@@ -488,7 +502,50 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
     expect(viewer.dataset.layoutMode).toBe("page");
     expect(rendererSpy.render).toHaveBeenLastCalledWith(
       expect.any(String),
-      { layoutMode: "page" }
+      { layoutMode: "page", zoom: 0.85 }
     );
+
+    // Zoom controls in ScoreViewer update zoom level and re-render
+    const zoomOutBtn = mountedContainer.querySelector('[data-testid="score-zoom-out-btn"]') as HTMLButtonElement;
+    const zoomLabel = mountedContainer.querySelector('[data-testid="score-zoom-label"]') as HTMLElement;
+    expect(zoomLabel.textContent).toBe("85%");
+    await act(async () => {
+      zoomOutBtn.click();
+      await Promise.resolve();
+    });
+    expect(zoomLabel.textContent).toBe("75%");
+    expect(rendererSpy.render).toHaveBeenLastCalledWith(
+      expect.any(String),
+      { layoutMode: "page", zoom: 0.75 }
+    );
+
+    // Piano SVG crops bottom edge at keybed bottom (164), hides overhead by default, and supports toggling in settings
+    const pianoSvg = mountedContainer.querySelector('[data-testid="unified-piano-88"] svg') as SVGSVGElement;
+    expect(pianoSvg.getAttribute("viewBox")).toBe("0 46 1248 118");
+    expect(mountedContainer.querySelector('[data-testid="top-status-warning-bar"]')).not.toBeNull();
+    expect(mountedContainer.querySelector('[data-testid="overhead-lane-RH"]')).toBeNull();
+
+    const settingsBtn = mountedContainer.querySelector('[data-testid="practice-settings-btn"]') as HTMLButtonElement;
+    await act(async () => {
+      settingsBtn.click();
+    });
+    const statusToggle = mountedContainer.querySelector('[data-testid="show-status-bar-toggle"]') as HTMLInputElement;
+    const overheadToggle = mountedContainer.querySelector('[data-testid="show-piano-overhead-toggle"]') as HTMLInputElement;
+    const fullPalmToggle = mountedContainer.querySelector('[data-testid="show-full-palm-toggle"]') as HTMLInputElement;
+    expect(statusToggle.checked).toBe(true);
+    expect(overheadToggle.checked).toBe(false);
+    expect(fullPalmToggle.checked).toBe(false);
+    expect(mountedContainer.querySelector('[data-layer="hand-posture-simulation"]')).not.toBeNull();
+
+    await act(async () => {
+      statusToggle.click();
+      overheadToggle.click();
+      fullPalmToggle.click();
+    });
+    expect(mountedContainer.querySelector('[data-testid="top-status-warning-bar"]')).toBeNull();
+    expect(mountedContainer.querySelector('[data-testid="overhead-lane-RH"]')).not.toBeNull();
+    expect(mountedContainer.querySelector('[data-testid="overhead-lane-LH"]')).not.toBeNull();
+    expect(mountedContainer.querySelector('[data-layer="hand-posture-simulation"]')).not.toBeNull();
+    expect(pianoSvg.getAttribute("viewBox")).toBe("0 0 1248 244");
   });
 });

@@ -152,7 +152,7 @@ export function TransportPracticeBar({
     <section
       data-testid="transport-practice-bar"
       aria-label="播放与练习控制栏"
-      className="shrink-0 border-y border-slate-200 bg-white px-4 py-1.5"
+      className="shrink-0 border-y border-slate-200 bg-white px-3 py-1 sm:px-4"
     >
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2">
         {/* Left: Transport Buttons */}

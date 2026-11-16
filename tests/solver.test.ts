@@ -5,9 +5,14 @@ import { JSDOM } from "jsdom";
 import { parseMusicXml } from "../src/musicxml/parser";
 import { readMxlContainer } from "../src/musicxml/mxl";
 import { solveFingering } from "../src/solver/solveFingering";
-import { computeHorizontalCost, generateSliceCandidates } from "../src/solver/costModel";
+import {
+  IMPOSSIBLE_COST,
+  computeHorizontalCost,
+  computeVerticalCost,
+  generateSliceCandidates,
+} from "../src/solver/costModel";
 import { DEFAULT_COST_WEIGHTS } from "../src/solver/weights";
-import { DEFAULT_HAND_SPAN_PROFILE } from "../src/domain/types";
+import { DEFAULT_HAND_SPAN_PROFILE, type Finger } from "../src/domain/types";
 import { perfBudget } from "./perfBudget";
 
 describe("solver seam: solveFingering", () => {
@@ -868,5 +873,53 @@ describe("solver seam: solveFingering", () => {
     expect(s0Fingers).toEqual([1, 3, 5]);
     expect(s1Fingers).toEqual([1, 2, 5]);
     expect(s2Fingers).toEqual([1, 2, 3, 5]);
+  });
+
+  it("forbids anatomically impossible thumb-pinky or wide held-note inversions while keeping short thumb crossings soft", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>G</step><alter>-1</alter><octave>5</octave></pitch><duration>4</duration><tie type="start"/><voice>1</voice><notations><tied type="start"/></notations></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><alter>-1</alter><octave>5</octave></pitch><duration>1</duration><tie type="stop"/><voice>1</voice><notations><tied type="stop"/></notations></note>
+      <note><pitch><step>E</step><alter>-1</alter><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><alter>-1</alter><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <backup><duration>4</duration></backup>
+      <note><pitch><step>E</step><alter>-1</alter><octave>4</octave></pitch><duration>4</duration><voice>2</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    const res = solveFingering(doc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+
+    const gb5 = doc.noteEvents.find((n) => n.midi === 78 && !n.isTieStop)!;
+    const eb4 = doc.noteEvents.find((n) => n.midi === 63)!;
+    expect(res.fingerByNoteUid[eb4.noteUid]).toBeLessThan(res.fingerByNoteUid[gb5.noteUid]);
+
+    // Verify short 1-2 held crossing remains soft while 1-5 held inversion hits IMPOSSIBLE_COST
+    const eb4Slice = doc.onsetSlices.find((s) => s.notes.some((n) => n.noteUid === eb4.noteUid))!;
+    const softCross = computeVerticalCost(
+      eb4Slice,
+      [2],
+      new Map<Finger, number>([[1, 65]]), // F4 held on thumb (1.5 white keys above Eb4)
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    expect(softCross.cost).toBeLessThan(DEFAULT_COST_WEIGHTS.vertical.overSpanBase);
+    expect(softCross.hasUnreachableSpan).toBe(false);
+
+    const impossibleInv = computeVerticalCost(
+      eb4Slice,
+      [5],
+      new Map<Finger, number>([[1, 78]]), // Gb5 held on thumb while pinky plays Eb4
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    expect(impossibleInv.cost).toBeGreaterThanOrEqual(IMPOSSIBLE_COST);
+    expect(impossibleInv.hasUnreachableSpan).toBe(true);
   });
 });

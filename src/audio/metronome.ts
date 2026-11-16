@@ -67,6 +67,11 @@ export function createMetronomeAudio(getAudioContext: () => AudioContext): Metro
       // ignore closed or mock node errors
     }
     try {
+      voice.gain.disconnect?.();
+    } catch {
+      // ignore closed or mock node errors
+    }
+    try {
       voice.osc.stop(now + 0.005);
     } catch {
       // ignore already stopped oscillator
