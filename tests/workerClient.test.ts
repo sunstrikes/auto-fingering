@@ -128,4 +128,66 @@ describe("workers seam: createSolverClient", () => {
 
     client.dispose();
   });
+
+  it("supports resolveLocal WorkerRequest for phrase & pinOnly overrides and cancels superseded requests", async () => {
+    const scale: OnsetSlice[] = [
+      makeDummySlice("s0", 60, 0),
+      makeDummySlice("s1", 62, 1),
+      makeDummySlice("s2", 64, 2),
+      makeDummySlice("s3", 65, 3),
+    ];
+
+    const timers: Array<() => void> = [];
+    const capturedTypes: Array<string | undefined> = [];
+
+    const { handleWorkerRequest } = await import("../src/workers/fingering.worker");
+
+    const fakeWorker: WorkerLike = {
+      onmessage: null,
+      onerror: null,
+      postMessage(msg: unknown) {
+        const req = msg as WorkerRequest;
+        capturedTypes.push(req.type);
+        timers.push(() => {
+          const resp = handleWorkerRequest(req);
+          fakeWorker.onmessage?.({ data: resp } as MessageEvent<WorkerResponse>);
+        });
+      },
+      terminate() {},
+    };
+
+    const client = createSolverClient(() => fakeWorker);
+    const pFull = client.solve(scale, DEFAULT_HAND_SPAN_PROFILE);
+    timers.shift()!();
+    const fullRes = await pFull;
+    expect(fullRes.fingerByNoteUid["n-s1"]).toBe(2);
+
+    const pLocal1 = client.resolveLocal!({
+      onsetSlices: scale,
+      profile: DEFAULT_HAND_SPAN_PROFILE,
+      priorFingerByNoteUid: fullRes.fingerByNoteUid,
+      targetNoteUid: "n-s1",
+      override: { finger: 4, mode: "phrase" },
+      anchors: { "n-s1": { finger: 4, mode: "phrase" } },
+    });
+    const pLocal2 = client.resolveLocal!({
+      onsetSlices: scale,
+      profile: DEFAULT_HAND_SPAN_PROFILE,
+      priorFingerByNoteUid: fullRes.fingerByNoteUid,
+      targetNoteUid: "n-s1",
+      override: { finger: 5, mode: "pinOnly" },
+      anchors: { "n-s1": { finger: 5, mode: "pinOnly" } },
+    });
+
+    await expect(pLocal1).rejects.toBeInstanceOf(SolverCancelledError);
+    timers.forEach((fn) => fn());
+    const localRes = await pLocal2;
+
+    expect(capturedTypes).toContain("local-resolve");
+    expect(localRes.fingerByNoteUid["n-s1"]).toBe(5);
+    expect(localRes.fingerByNoteUid["n-s0"]).toBe(fullRes.fingerByNoteUid["n-s0"]);
+    expect(localRes.fingerByNoteUid["n-s2"]).toBe(fullRes.fingerByNoteUid["n-s2"]);
+
+    client.dispose();
+  });
 });

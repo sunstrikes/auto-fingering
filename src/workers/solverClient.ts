@@ -1,4 +1,11 @@
-import type { HandSpanProfile, OnsetSlice, SolveOptions, SolveResult } from "../domain/types";
+import type {
+  AnchorOverride,
+  Finger,
+  HandSpanProfile,
+  OnsetSlice,
+  SolveOptions,
+  SolveResult,
+} from "../domain/types";
 import type { WorkerRequest, WorkerResponse } from "./protocol";
 
 export class SolverCancelledError extends Error {
@@ -15,12 +22,24 @@ export interface WorkerLike {
   terminate(): void;
 }
 
+export interface LocalResolveClientInput {
+  onsetSlices: OnsetSlice[];
+  profile: HandSpanProfile;
+  priorFingerByNoteUid: Record<string, Finger>;
+  targetNoteUid: string;
+  override: AnchorOverride | null;
+  anchors: Record<string, AnchorOverride>;
+  removedRawAnchorUids?: string[];
+  ignoreExistingFingerings?: boolean;
+}
+
 export interface SolverClient {
   solve(
     onsetSlices: OnsetSlice[],
     profile: HandSpanProfile,
     options?: SolveOptions
   ): Promise<SolveResult>;
+  resolveLocal?(input: LocalResolveClientInput): Promise<SolveResult>;
   dispose(): void;
 }
 
@@ -74,31 +93,49 @@ export function createSolverClient(
     return worker;
   }
 
+  function dispatch(buildRequest: (requestId: number) => WorkerRequest): Promise<SolveResult> {
+    if (activeRequest) {
+      const superseded = activeRequest;
+      activeRequest = null;
+      superseded.reject(new SolverCancelledError());
+    }
+
+    const requestId = nextRequestId++;
+    const w = ensureWorker();
+
+    return new Promise<SolveResult>((resolve, reject) => {
+      activeRequest = { requestId, resolve, reject };
+      w.postMessage(buildRequest(requestId));
+    });
+  }
+
   return {
     solve(
       onsetSlices: OnsetSlice[],
       profile: HandSpanProfile,
       options?: SolveOptions
     ): Promise<SolveResult> {
-      if (activeRequest) {
-        const superseded = activeRequest;
-        activeRequest = null;
-        superseded.reject(new SolverCancelledError());
-      }
+      return dispatch((requestId) => ({
+        requestId,
+        onsetSlices,
+        profile,
+        ignoreExistingFingerings: options?.ignoreExistingFingerings,
+      }));
+    },
 
-      const requestId = nextRequestId++;
-      const w = ensureWorker();
-
-      return new Promise<SolveResult>((resolve, reject) => {
-        activeRequest = { requestId, resolve, reject };
-        const req: WorkerRequest = {
-          requestId,
-          onsetSlices,
-          profile,
-          ignoreExistingFingerings: options?.ignoreExistingFingerings,
-        };
-        w.postMessage(req);
-      });
+    resolveLocal(input: LocalResolveClientInput): Promise<SolveResult> {
+      return dispatch((requestId) => ({
+        type: "local-resolve",
+        requestId,
+        onsetSlices: input.onsetSlices,
+        profile: input.profile,
+        priorFingerByNoteUid: input.priorFingerByNoteUid,
+        targetNoteUid: input.targetNoteUid,
+        override: input.override,
+        anchors: input.anchors,
+        removedRawAnchorUids: input.removedRawAnchorUids,
+        ignoreExistingFingerings: input.ignoreExistingFingerings,
+      }));
     },
 
     dispose() {

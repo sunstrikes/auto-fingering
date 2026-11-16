@@ -1,11 +1,33 @@
-import type { HandSpanProfile, OnsetSlice, SolveResult } from "../domain/types";
+import type {
+  AnchorOverride,
+  Finger,
+  HandSpanProfile,
+  OnsetSlice,
+  SolveResult,
+} from "../domain/types";
 
-export interface WorkerRequest {
+export interface FullSolveWorkerRequest {
+  type?: "solve";
   requestId: number;
   onsetSlices: OnsetSlice[];
   profile: HandSpanProfile;
   ignoreExistingFingerings?: boolean;
 }
+
+export interface LocalResolveWorkerRequest {
+  type: "local-resolve";
+  requestId: number;
+  onsetSlices: OnsetSlice[];
+  profile: HandSpanProfile;
+  priorFingerByNoteUid: Record<string, Finger>;
+  targetNoteUid: string;
+  override: AnchorOverride | null;
+  anchors: Record<string, AnchorOverride>;
+  removedRawAnchorUids?: string[];
+  ignoreExistingFingerings?: boolean;
+}
+
+export type WorkerRequest = FullSolveWorkerRequest | LocalResolveWorkerRequest;
 
 export type WorkerResponse =
   | {
