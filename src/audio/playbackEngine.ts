@@ -2,8 +2,19 @@ import { computeTieChainEndByRoot } from "../domain/tieUtils";
 import type { Hand, OnsetSlice, ScoreDocument } from "../domain/types";
 import type { PianoAudioEngine } from "./pianoAudio";
 
-export type PlaybackSpeed = 0.5 | 0.75 | 1.0 | 1.25;
+export const MIN_SPEED_MULTIPLIER = 0.25;
+export const MAX_SPEED_MULTIPLIER = 1.5;
+export const SPEED_PRESETS = [0.25, 0.5, 0.6, 0.75, 0.9, 1.0, 1.25, 1.5] as const;
+
+export type SpeedMultiplier = number;
+export type PlaybackSpeed = SpeedMultiplier;
 export type PlaybackState = "stopped" | "playing" | "paused";
+
+export function clampSpeedMultiplier(value: number): number {
+  if (!Number.isFinite(value)) return 1.0;
+  const clamped = Math.min(MAX_SPEED_MULTIPLIER, Math.max(MIN_SPEED_MULTIPLIER, value));
+  return Math.round(clamped * 10000) / 10000;
+}
 
 export interface CursorSyncTarget {
   sliceId: string;
@@ -40,6 +51,7 @@ export interface PlaybackSchedule {
 
 export interface PlayOptions {
   fromSliceId?: string | null;
+  fromScoreSec?: number;
   restart?: boolean;
 }
 
@@ -339,11 +351,12 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     getSpeed: () => speed,
 
     setSpeed(nextSpeed: PlaybackSpeed) {
-      if (speed === nextSpeed) return;
+      const clamped = clampSpeedMultiplier(nextSpeed);
+      if (speed === clamped) return;
       const wasPlaying = state === "playing";
       const resumeDoc = activeDoc;
       const currentScore = wasPlaying ? getCurrentScoreSec() : pausedScoreSec;
-      speed = nextSpeed;
+      speed = clamped;
 
       if (wasPlaying && resumeDoc && currentScore !== null) {
         runToken += 1;
@@ -378,6 +391,8 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
           startScoreSec = target.onsetSec;
           startSliceId = target.sliceId;
         }
+      } else if (typeof options?.fromScoreSec === "number" && Number.isFinite(options.fromScoreSec)) {
+        startScoreSec = Math.max(0, options.fromScoreSec);
       } else if (!options?.restart && state === "paused" && pausedScoreSec !== null && activeDoc === scoreDoc) {
         startScoreSec = pausedScoreSec;
       }
