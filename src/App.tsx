@@ -3,6 +3,7 @@ import {
   DEFAULT_HAND_SPAN_PROFILE,
   type Hand,
   type HandSpanProfile,
+  type ScoreDocument,
   type SolveResult,
   type SpanPreset,
 } from "./domain/types";
@@ -12,6 +13,7 @@ import { exportScoreOutput, loadScoreInput, type ExportFormat } from "./musicxml
 import { serializeScoreDocument, writeFingeringsToScore } from "./musicxml/writer";
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
 import { ScoreViewer } from "./components/ScoreViewer";
+import { DualTrackKeyboard } from "./components/DualTrackKeyboard";
 
 const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
   { preset: "S", title: "Small hand span (0.82x)" },
@@ -37,7 +39,9 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
   );
   const [ignoreExistingFingerings, setIgnoreExistingFingerings] = useState<boolean>(false);
   const [renderedXml, setRenderedXml] = useState<string | null>(null);
+  const [scoreDoc, setScoreDoc] = useState<ScoreDocument | null>(null);
   const [solveResult, setSolveResult] = useState<SolveResult | null>(null);
+  const [selectedSliceId, setSelectedSliceId] = useState<string | null>(null);
   const [noteCount, setNoteCount] = useState<number>(0);
   const [status, setStatus] = useState<string>("Ready");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -70,7 +74,13 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
     });
     const exportedXml = serializeScoreDocument(scoreDoc);
 
+    setScoreDoc(scoreDoc);
     setSolveResult(result);
+    setSelectedSliceId((prev) =>
+      prev && scoreDoc.onsetSlices.some((s) => s.sliceId === prev)
+        ? prev
+        : scoreDoc.onsetSlices[0]?.sliceId ?? null
+    );
     setRenderedXml(exportedXml);
     setStatus(`Solved ${scoreDoc.noteEvents.length} notes in ${result.solveTimeMs.toFixed(1)} ms`);
   };
@@ -127,7 +137,9 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
       setMxlContainer(undefined);
       setIsSingleStaff(false);
       setRenderedXml(null);
+      setScoreDoc(null);
       setSolveResult(null);
+      setSelectedSliceId(null);
       setScoreTitle("");
       setNoteCount(0);
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -378,6 +390,13 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
         )}
 
         <ScoreViewer xmlString={renderedXml} />
+
+        <DualTrackKeyboard
+          scoreDoc={scoreDoc}
+          solveResult={solveResult}
+          selectedSliceId={selectedSliceId}
+          onSelectSlice={setSelectedSliceId}
+        />
       </main>
     </div>
   );
