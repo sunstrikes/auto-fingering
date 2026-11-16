@@ -3,8 +3,6 @@ import {
   DEFAULT_HAND_SPAN_PROFILE,
   type Hand,
   type HandSpanProfile,
-  type NoteEvent,
-  type OnsetSlice,
   type ScoreDocument,
   type SolveResult,
   type SpanPreset,
@@ -17,6 +15,7 @@ import { serializeScoreDocument, writeFingeringsToScore } from "./musicxml/write
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
 import { buildMeasureRiskSummaries } from "./components/MarginRiskGutter";
 import { InspectorPanel } from "./components/InspectorPanel";
+import { DualTrackKeyboard } from "./components/DualTrackKeyboard";
 import {
   ScoreViewer,
   type AnchorMarkerInfo,
@@ -29,8 +28,8 @@ const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
   { preset: "L", title: "Large hand span (1.18x)" },
 ];
 
-function countMeasuresInScoreDoc(scoreDoc: ScoreDocument): number {
-  const firstPart = scoreDoc.xmlDoc.getElementsByTagName("part")[0];
+function countMeasuresInScoreDoc(doc: ScoreDocument): number {
+  const firstPart = doc.xmlDoc.getElementsByTagName("part")[0];
   if (firstPart) {
     let count = 0;
     for (let i = 0; i < firstPart.children.length; i++) {
@@ -41,7 +40,7 @@ function countMeasuresInScoreDoc(scoreDoc: ScoreDocument): number {
     }
     if (count > 0) return count;
   }
-  const maxIdx = scoreDoc.noteEvents.reduce((max, n) => Math.max(max, n.measureIndex), -1);
+  const maxIdx = doc.noteEvents.reduce((max, n) => Math.max(max, n.measureIndex), -1);
   return maxIdx + 1;
 }
 
@@ -67,10 +66,8 @@ export default function App({
   );
   const [ignoreExistingFingerings, setIgnoreExistingFingerings] = useState<boolean>(false);
   const [renderedXml, setRenderedXml] = useState<string | null>(null);
+  const [scoreDoc, setScoreDoc] = useState<ScoreDocument | null>(null);
   const [solveResult, setSolveResult] = useState<SolveResult | null>(null);
-  const [onsetSlices, setOnsetSlices] = useState<OnsetSlice[]>([]);
-  const [noteEvents, setNoteEvents] = useState<NoteEvent[]>([]);
-  const [measureCount, setMeasureCount] = useState<number>(0);
   const [selectedSliceId, setSelectedSliceId] = useState<string | null>(null);
   const [selectedMeasureIndex, setSelectedMeasureIndex] = useState<number | null>(null);
   const [status, setStatus] = useState<string>("Ready");
@@ -86,43 +83,36 @@ export default function App({
   }, [solverClientFactory]);
 
   const solveAndRender = async (
-    scoreDoc: ScoreDocument,
+    nextDoc: ScoreDocument,
     profile: HandSpanProfile,
     ignoreAnchors: boolean,
     resetSelection: boolean
   ) => {
     if (!solverClientRef.current) return;
-    setScoreTitle(scoreDoc.title);
+    setScoreTitle(nextDoc.title);
     setStatus("Solving fingerings in Web Worker...");
 
-    const result = await solverClientRef.current.solve(scoreDoc.onsetSlices, profile, {
+    const result = await solverClientRef.current.solve(nextDoc.onsetSlices, profile, {
       ignoreExistingFingerings: ignoreAnchors,
     });
 
-    writeFingeringsToScore(scoreDoc, result.fingerByNoteUid, {
+    writeFingeringsToScore(nextDoc, result.fingerByNoteUid, {
       ignoreExistingFingerings: ignoreAnchors,
     });
-    const exportedXml = serializeScoreDocument(scoreDoc);
+    const exportedXml = serializeScoreDocument(nextDoc);
 
-    setOnsetSlices(scoreDoc.onsetSlices);
-    setNoteEvents(scoreDoc.noteEvents);
-    setMeasureCount(countMeasuresInScoreDoc(scoreDoc));
+    const preserved =
+      !resetSelection && selectedSliceId !== null
+        ? nextDoc.onsetSlices.find((s) => s.sliceId === selectedSliceId)
+        : undefined;
+    const nextSlice = preserved ?? nextDoc.onsetSlices[0] ?? null;
+
+    setScoreDoc(nextDoc);
     setSolveResult(result);
+    setSelectedSliceId(nextSlice?.sliceId ?? null);
+    setSelectedMeasureIndex(nextSlice?.measureIndex ?? null);
     setRenderedXml(exportedXml);
-    setStatus(`Solved ${scoreDoc.noteEvents.length} notes in ${result.solveTimeMs.toFixed(1)} ms`);
-
-    if (resetSelection) {
-      setSelectedSliceId(null);
-      setSelectedMeasureIndex(null);
-    } else if (selectedSliceId !== null) {
-      const matchingSlice = scoreDoc.onsetSlices.find((s) => s.sliceId === selectedSliceId);
-      if (matchingSlice) {
-        setSelectedMeasureIndex(matchingSlice.measureIndex);
-      } else {
-        setSelectedSliceId(null);
-        setSelectedMeasureIndex(null);
-      }
-    }
+    setStatus(`Solved ${nextDoc.noteEvents.length} notes in ${result.solveTimeMs.toFixed(1)} ms`);
   };
 
   const reSolveScore = async (
@@ -134,11 +124,11 @@ export default function App({
   ) => {
     setErrorMsg(null);
     try {
-      const scoreDoc = parseMusicXml(
+      const nextDoc = parseMusicXml(
         xmlText,
         singleStaff ? { singleStaffHandOverride: handOverride } : undefined
       );
-      await solveAndRender(scoreDoc, profile, ignoreAnchors, false);
+      await solveAndRender(nextDoc, profile, ignoreAnchors, false);
     } catch (err) {
       if (err instanceof SolverCancelledError) {
         return;
@@ -182,10 +172,8 @@ export default function App({
       setMxlContainer(undefined);
       setIsSingleStaff(false);
       setRenderedXml(null);
+      setScoreDoc(null);
       setSolveResult(null);
-      setOnsetSlices([]);
-      setNoteEvents([]);
-      setMeasureCount(0);
       setSelectedSliceId(null);
       setSelectedMeasureIndex(null);
       setScoreTitle("");
@@ -250,6 +238,13 @@ export default function App({
     URL.revokeObjectURL(url);
   };
 
+  const onsetSlices = scoreDoc?.onsetSlices ?? [];
+  const noteEvents = scoreDoc?.noteEvents ?? [];
+  const measureCount = useMemo(
+    () => (scoreDoc ? countMeasuresInScoreDoc(scoreDoc) : 0),
+    [scoreDoc]
+  );
+
   const measureRisks = useMemo(
     () => buildMeasureRiskSummaries(measureCount, onsetSlices, solveResult?.warnings ?? []),
     [measureCount, onsetSlices, solveResult]
@@ -282,6 +277,14 @@ export default function App({
     const summary = measureRisks.find((m) => m.measureIndex === measureIndex);
     setSelectedMeasureIndex(measureIndex);
     setSelectedSliceId(summary?.firstWarningSliceId ?? summary?.firstSliceId ?? null);
+  };
+
+  const handleSelectSlice = (sliceId: string) => {
+    setSelectedSliceId(sliceId);
+    const slice = onsetSlices.find((s) => s.sliceId === sliceId);
+    if (slice) {
+      setSelectedMeasureIndex(slice.measureIndex);
+    }
   };
 
   return (
@@ -498,6 +501,13 @@ export default function App({
             onSelectWarning={handleSelectWarning}
           />
         </div>
+
+        <DualTrackKeyboard
+          scoreDoc={scoreDoc}
+          solveResult={solveResult}
+          selectedSliceId={selectedSliceId}
+          onSelectSlice={handleSelectSlice}
+        />
       </main>
     </div>
   );
