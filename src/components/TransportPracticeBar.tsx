@@ -9,7 +9,12 @@ import {
   type PlaybackState,
   type SpeedMultiplier,
 } from "../audio/playbackEngine";
-import type { MeasureTimeline } from "../domain/types";
+import {
+  createDefaultAbLoopBounds,
+  normalizeAbLoopBounds,
+  type AbLoopBounds,
+  type MeasureTimeline,
+} from "../domain/types";
 
 export interface TransportPracticeBarProps {
   hasScore: boolean;
@@ -31,6 +36,7 @@ export interface TransportPracticeBarProps {
   waitingModeEnabled?: boolean;
   skipGraceNotes?: boolean;
   midiLocalSound?: boolean;
+  abLoop?: AbLoopBounds;
   onPlay: () => void;
   onPlayFromSlice: () => void;
   onPause: () => void;
@@ -44,6 +50,10 @@ export interface TransportPracticeBarProps {
   onToggleWaitingMode?: () => void;
   onToggleSkipGraceNotes?: () => void;
   onToggleMidiLocalSound?: () => void;
+  onToggleAbLoop?: () => void;
+  onChangeAbLoopBounds?: (bounds: AbLoopBounds) => void;
+  onClearAbLoop?: () => void;
+  onToggleLoopGap?: () => void;
 }
 
 const SPEED_STEP = 0.05;
@@ -96,6 +106,7 @@ export function TransportPracticeBar({
   waitingModeEnabled = false,
   skipGraceNotes = false,
   midiLocalSound = true,
+  abLoop,
   onPlay,
   onPlayFromSlice,
   onPause,
@@ -109,6 +120,10 @@ export function TransportPracticeBar({
   onToggleWaitingMode,
   onToggleSkipGraceNotes,
   onToggleMidiLocalSound,
+  onToggleAbLoop,
+  onChangeAbLoopBounds,
+  onClearAbLoop,
+  onToggleLoopGap,
 }: TransportPracticeBarProps) {
   const [editingBpm, setEditingBpm] = useState(false);
   const [bpmDraft, setBpmDraft] = useState("");
@@ -117,6 +132,12 @@ export function TransportPracticeBar({
   const safeBaseBpm = baseBpm > 0 ? baseBpm : 100;
   const effectiveBpm = Math.max(1, Math.round(safeBaseBpm * speedMultiplier));
   const statusInfo = AUDIO_STATUS_LABELS[audioStatus];
+  const totalMeasureCount =
+    measureTimelines.length > 0 ? measureTimelines.length : measureCount;
+  const normalizedLoop = normalizeAbLoopBounds(
+    abLoop ?? createDefaultAbLoopBounds(totalMeasureCount),
+    totalMeasureCount
+  );
 
   const rulerMeasures: Array<{ measureIndex: number; isPickup: boolean; label: string }> =
     measureTimelines.length > 0
@@ -219,19 +240,41 @@ export function TransportPracticeBar({
           ) : (
             rulerMeasures.map((m) => {
               const isActive = activeMeasureIndex === m.measureIndex;
+              const inAbLoop =
+                normalizedLoop.enabled &&
+                m.measureIndex >= normalizedLoop.startMeasureIndex &&
+                m.measureIndex <= normalizedLoop.endMeasureIndex;
               return (
                 <button
                   key={m.measureIndex}
                   type="button"
                   data-testid={`measure-ruler-item-${m.measureIndex}`}
-                  title={m.label}
-                  onClick={() => onJumpToMeasure(m.measureIndex)}
+                  data-in-ab-loop={inAbLoop ? "true" : "false"}
+                  title={`${m.label}${inAbLoop ? " (in A-B Loop)" : ""} · Shift+click to set A-B Loop`}
+                  onClick={(e) => {
+                    if (e.shiftKey && onChangeAbLoopBounds) {
+                      onChangeAbLoopBounds(
+                        normalizeAbLoopBounds(
+                          {
+                            ...normalizedLoop,
+                            endMeasureIndex: m.measureIndex,
+                            enabled: true,
+                          },
+                          totalMeasureCount
+                        )
+                      );
+                      return;
+                    }
+                    onJumpToMeasure(m.measureIndex);
+                  }}
                   className={`shrink-0 rounded px-2 py-0.5 text-[11px] font-medium transition ${
                     isActive
                       ? "bg-blue-600 text-white shadow-sm"
-                      : m.isPickup
-                        ? "border border-dashed border-slate-300 bg-white text-slate-600 hover:bg-slate-100"
-                        : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-100"
+                      : inAbLoop
+                        ? "border border-indigo-400 bg-indigo-50 text-indigo-800 hover:bg-indigo-100"
+                        : m.isPickup
+                          ? "border border-dashed border-slate-300 bg-white text-slate-600 hover:bg-slate-100"
+                          : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-100"
                   }`}
                 >
                   {m.measureIndex + 1}
@@ -393,6 +436,87 @@ export function TransportPracticeBar({
             Waiting Mode
           </button>
 
+          <div className="flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5">
+            <button
+              type="button"
+              data-testid="ab-loop-toggle-btn"
+              aria-pressed={normalizedLoop.enabled}
+              disabled={!hasScore}
+              onClick={onToggleAbLoop}
+              title="Toggle whole-measure A-B Loop"
+              className={`rounded px-2 py-0.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
+                normalizedLoop.enabled
+                  ? "bg-indigo-600 text-white hover:bg-indigo-700"
+                  : "bg-white text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              A-B Loop
+            </button>
+
+            <label className="flex items-center gap-0.5 text-[11px] text-slate-600">
+              <span>A:</span>
+              <select
+                data-testid="ab-loop-start-select"
+                aria-label="Loop start measure A"
+                disabled={!hasScore}
+                value={normalizedLoop.startMeasureIndex}
+                onChange={(e) => {
+                  const nextA = Number.parseInt(e.target.value, 10);
+                  onChangeAbLoopBounds?.(
+                    normalizeAbLoopBounds(
+                      { ...normalizedLoop, startMeasureIndex: nextA },
+                      totalMeasureCount
+                    )
+                  );
+                }}
+                className="rounded border border-slate-300 bg-white px-1 py-0.5 text-[11px] text-slate-800 disabled:opacity-45"
+              >
+                {rulerMeasures.map((m) => (
+                  <option key={m.measureIndex} value={m.measureIndex}>
+                    m.{m.measureIndex + 1}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex items-center gap-0.5 text-[11px] text-slate-600">
+              <span>B:</span>
+              <select
+                data-testid="ab-loop-end-select"
+                aria-label="Loop end measure B"
+                disabled={!hasScore}
+                value={normalizedLoop.endMeasureIndex}
+                onChange={(e) => {
+                  const nextB = Number.parseInt(e.target.value, 10);
+                  onChangeAbLoopBounds?.(
+                    normalizeAbLoopBounds(
+                      { ...normalizedLoop, endMeasureIndex: nextB },
+                      totalMeasureCount
+                    )
+                  );
+                }}
+                className="rounded border border-slate-300 bg-white px-1 py-0.5 text-[11px] text-slate-800 disabled:opacity-45"
+              >
+                {rulerMeasures.map((m) => (
+                  <option key={m.measureIndex} value={m.measureIndex}>
+                    m.{m.measureIndex + 1}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <button
+              type="button"
+              data-testid="ab-loop-clear-btn"
+              disabled={!hasScore}
+              onClick={onClearAbLoop}
+              title="Clear and reset A-B Loop"
+              className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              Clear
+            </button>
+          </div>
+
           <button
             type="button"
             data-testid="practice-settings-btn"
@@ -438,6 +562,23 @@ export function TransportPracticeBar({
                   aria-label="One-Measure Count-In"
                   checked={countInEnabled}
                   onChange={() => onToggleCountIn?.()}
+                  className="h-4 w-4 accent-blue-600"
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div>
+                  <div className="font-medium text-slate-900">Loop Gap (1-Measure Count-In)</div>
+                  <div className="text-[11px] text-slate-500">
+                    Insert one full measure of Count-In clicks at measure A&apos;s meter before each A-B Loop restart
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  data-testid="loop-gap-toggle"
+                  aria-label="Loop Gap (1-Measure Count-In)"
+                  checked={normalizedLoop.loopGap}
+                  onChange={() => onToggleLoopGap?.()}
                   className="h-4 w-4 accent-blue-600"
                 />
               </div>

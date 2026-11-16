@@ -1,10 +1,12 @@
-import type {
-  NoteEvent,
-  OnsetSlice,
-  PracticeMode,
-  PracticeStep,
-  ScoreDocument,
-  WaitingModeState,
+import {
+  normalizeAbLoopBounds,
+  type AbLoopBounds,
+  type NoteEvent,
+  type OnsetSlice,
+  type PracticeMode,
+  type PracticeStep,
+  type ScoreDocument,
+  type WaitingModeState,
 } from "../domain/types";
 
 export interface BuildPracticeStepsOptions {
@@ -17,6 +19,30 @@ export interface WaitingNoteOnResult {
   completedStep: PracticeStep | null;
   advancedToStep: PracticeStep | null;
   completedScore: boolean;
+  loopWrapped: boolean;
+}
+
+/**
+ * Finds the `[startStepIndex, endStepIndex]` range of `PracticeStep`s falling
+ * inside an enabled `AbLoopBounds` `[startMeasureIndex, endMeasureIndex]`.
+ */
+export function findAbLoopStepRange(
+  steps: PracticeStep[],
+  abLoop?: AbLoopBounds | null
+): { startStepIndex: number; endStepIndex: number } | null {
+  if (!abLoop?.enabled || steps.length === 0) return null;
+  const norm = normalizeAbLoopBounds(abLoop);
+  let startStepIndex = -1;
+  let endStepIndex = -1;
+  for (let i = 0; i < steps.length; i++) {
+    const m = steps[i].measureIndex;
+    if (m >= norm.startMeasureIndex && m <= norm.endMeasureIndex) {
+      if (startStepIndex === -1) startStepIndex = i;
+      endStepIndex = i;
+    }
+  }
+  if (startStepIndex === -1 || endStepIndex === -1) return null;
+  return { startStepIndex, endStepIndex };
 }
 
 function isTargetHand(hand: NoteEvent["hand"], mode: PracticeMode): boolean {
@@ -161,7 +187,8 @@ export function createWaitingModeState(startStepIndex = 0): WaitingModeState {
 export function handleWaitingNoteOn(
   state: WaitingModeState,
   steps: PracticeStep[],
-  midi: number
+  midi: number,
+  abLoop?: AbLoopBounds | null
 ): WaitingNoteOnResult {
   const step = steps[state.currentStepIndex];
   if (!step) {
@@ -171,6 +198,7 @@ export function handleWaitingNoteOn(
       completedStep: null,
       advancedToStep: null,
       completedScore: false,
+      loopWrapped: false,
     };
   }
 
@@ -186,6 +214,7 @@ export function handleWaitingNoteOn(
       completedStep: null,
       advancedToStep: null,
       completedScore: false,
+      loopWrapped: false,
     };
   }
 
@@ -203,6 +232,19 @@ export function handleWaitingNoteOn(
       completedStep: null,
       advancedToStep: null,
       completedScore: false,
+      loopWrapped: false,
+    };
+  }
+
+  const loopRange = findAbLoopStepRange(steps, abLoop);
+  if (loopRange && state.currentStepIndex === loopRange.endStepIndex) {
+    return {
+      nextState: createWaitingModeState(loopRange.startStepIndex),
+      matched: true,
+      completedStep: step,
+      advancedToStep: steps[loopRange.startStepIndex],
+      completedScore: false,
+      loopWrapped: true,
     };
   }
 
@@ -214,6 +256,7 @@ export function handleWaitingNoteOn(
       completedStep: step,
       advancedToStep: steps[nextIndex],
       completedScore: false,
+      loopWrapped: false,
     };
   }
 
@@ -223,6 +266,7 @@ export function handleWaitingNoteOn(
     completedStep: step,
     advancedToStep: null,
     completedScore: true,
+    loopWrapped: false,
   };
 }
 

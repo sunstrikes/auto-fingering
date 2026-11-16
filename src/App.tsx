@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
+  createDefaultAbLoopBounds,
+  normalizeAbLoopBounds,
+  type AbLoopBounds,
   type AnchorOverride,
   type AnchorOverrideMode,
   type Finger,
@@ -16,6 +19,7 @@ import {
   buildPracticeSteps,
   createWaitingModeState,
   doesNoteOnMatchPausedStep,
+  findAbLoopStepRange,
   handleWaitingNoteOff,
   handleWaitingNoteOn,
 } from "./practice/waitingMode";
@@ -113,6 +117,8 @@ export default function App({
   const [waitingModeEnabled, setWaitingModeEnabled] = useState<boolean>(false);
   const [skipGraceNotes, setSkipGraceNotes] = useState<boolean>(false);
   const [waitingState, setWaitingState] = useState<WaitingModeState>(() => createWaitingModeState(0));
+  const [abLoop, setAbLoop] = useState<AbLoopBounds>(() => createDefaultAbLoopBounds(0));
+  const waitingLoopGapActiveRef = useRef<boolean>(false);
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
   const [playbackFrame, setPlaybackFrame] = useState<PlaybackFrame | null>(null);
@@ -310,6 +316,11 @@ export default function App({
       solveResult: result,
       resetHistory,
     });
+    if (resetHistory) {
+      const nextLoop = createDefaultAbLoopBounds(nextDoc.measureCount);
+      setAbLoop(nextLoop);
+      playbackEngineRef.current?.setAbLoop(nextLoop);
+    }
   };
 
   const reSolveScore = async (
@@ -755,6 +766,7 @@ export default function App({
 
   const processWaitingNoteOn = (midi: number) => {
     if (!waitingModeEnabled || practiceSteps.length === 0) return;
+    if (waitingLoopGapActiveRef.current) return;
 
     let isPlayingNow = playbackState === "playing";
     if (playbackState === "paused") {
@@ -770,12 +782,25 @@ export default function App({
 
     if (!isPlayingNow) return;
 
-    const result = handleWaitingNoteOn(waitingState, practiceSteps, midi);
+    const result = handleWaitingNoteOn(waitingState, practiceSteps, midi, abLoop);
     setWaitingState(result.nextState);
 
     if (result.completedStep) {
       playAccompanimentNotes(result.completedStep);
-      if (result.advancedToStep) {
+      if (result.loopWrapped && result.advancedToStep) {
+        if (abLoop.loopGap && scoreDoc && playbackEngineRef.current) {
+          waitingLoopGapActiveRef.current = true;
+          const norm = normalizeAbLoopBounds(abLoop, scoreDoc.measureCount);
+          syncToPracticeStep(result.advancedToStep, "playing");
+          void playbackEngineRef.current.playCountIn(scoreDoc, norm.startMeasureIndex, () => {
+            waitingLoopGapActiveRef.current = false;
+            playbackEngineRef.current?.setMetronomePaused(true);
+          });
+        } else {
+          triggerStepAdvanceMetronome(result.advancedToStep);
+          syncToPracticeStep(result.advancedToStep, "playing");
+        }
+      } else if (result.advancedToStep) {
         triggerStepAdvanceMetronome(result.advancedToStep);
         syncToPracticeStep(result.advancedToStep, "playing");
       } else if (result.completedScore) {
@@ -879,9 +904,13 @@ export default function App({
     setPopoverOpen(false);
     if (waitingModeEnabled) {
       if (practiceSteps.length === 0) return;
+      waitingLoopGapActiveRef.current = false;
+      const loopRange = findAbLoopStepRange(practiceSteps, abLoop);
       let startIdx = 0;
       if (playbackState === "paused" && waitingState.currentStepIndex < practiceSteps.length) {
         startIdx = waitingState.currentStepIndex;
+      } else if (loopRange) {
+        startIdx = loopRange.startStepIndex;
       } else if (selectedMeasureIndex !== null && selectedMeasureIndex > 0) {
         const idx = practiceSteps.findIndex((s) => s.measureIndex >= selectedMeasureIndex);
         startIdx = idx >= 0 ? idx : 0;
@@ -937,6 +966,7 @@ export default function App({
   };
 
   const handleStop = () => {
+    waitingLoopGapActiveRef.current = false;
     playbackEngineRef.current?.stop();
     playbackEngineRef.current?.setMetronomePaused(false);
     setWaitingState(createWaitingModeState(0));
@@ -946,6 +976,31 @@ export default function App({
       setPlaybackFrame(null);
       setActiveMetronomeBeat(null);
     }
+  };
+
+  const updateAbLoop = (next: AbLoopBounds) => {
+    const normalized = normalizeAbLoopBounds(next, measureCount);
+    setAbLoop(normalized);
+    playbackEngineRef.current?.setAbLoop(normalized);
+  };
+
+  const handleToggleAbLoop = () => {
+    updateAbLoop({ ...abLoop, enabled: !abLoop.enabled });
+  };
+
+  const handleChangeAbLoopBounds = (bounds: AbLoopBounds) => {
+    updateAbLoop(bounds);
+  };
+
+  const handleClearAbLoop = () => {
+    updateAbLoop({
+      ...createDefaultAbLoopBounds(measureCount),
+      loopGap: abLoop.loopGap,
+    });
+  };
+
+  const handleToggleLoopGap = () => {
+    updateAbLoop({ ...abLoop, loopGap: !abLoop.loopGap });
   };
 
   const handleToggleWaitingMode = () => {
@@ -1425,6 +1480,7 @@ export default function App({
         waitingModeEnabled={waitingModeEnabled}
         skipGraceNotes={skipGraceNotes}
         midiLocalSound={midiLocalSound}
+        abLoop={abLoop}
         onPlay={handlePlay}
         onPlayFromSlice={handlePlayFromSlice}
         onPause={handlePause}
@@ -1438,6 +1494,10 @@ export default function App({
         onToggleWaitingMode={handleToggleWaitingMode}
         onToggleSkipGraceNotes={handleToggleSkipGraceNotes}
         onToggleMidiLocalSound={handleToggleMidiLocalSound}
+        onToggleAbLoop={handleToggleAbLoop}
+        onChangeAbLoopBounds={handleChangeAbLoopBounds}
+        onClearAbLoop={handleClearAbLoop}
+        onToggleLoopGap={handleToggleLoopGap}
       />
 
       {/* Bottom Pane: Full-Width 88-Key Physical Piano & Dual-Hand Posture Simulation */}
@@ -1484,11 +1544,13 @@ export default function App({
         speedMultiplier={playbackSpeed}
         baseBpm={scoreDoc?.tempoPoints[0]?.bpm ?? 100}
         countInEnabled={countInEnabled}
+        loopGapEnabled={abLoop.loopGap}
         metronomeVolume={metronomeVolume}
         skipGraceNotes={skipGraceNotes}
         onSelectDevice={(deviceId) => midiControllerRef.current?.setSelectedDeviceId(deviceId)}
         onToggleLocalSound={setMidiLocalSound}
         onToggleCountIn={handleToggleCountIn}
+        onToggleLoopGap={handleToggleLoopGap}
         onChangeMetronomeVolume={handleChangeMetronomeVolume}
         onToggleSkipGraceNotes={handleToggleSkipGraceNotes}
         onClose={() => setSettingsOpen(false)}
