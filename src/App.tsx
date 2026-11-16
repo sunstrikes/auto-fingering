@@ -1042,10 +1042,6 @@ export default function App({
     setWaitingState(createWaitingModeState(0));
   };
 
-  const handleToggleMidiLocalSound = () => {
-    setMidiLocalSound((prev) => !prev);
-  };
-
   const handleSpeedChange = (nextSpeed: SpeedMultiplier) => {
     setPlaybackSpeed(nextSpeed);
     playbackEngineRef.current?.setSpeed(nextSpeed);
@@ -1480,12 +1476,8 @@ export default function App({
         onOpenSettings={() => setSettingsOpen(true)}
         metronomeEnabled={metronomeEnabled}
         metronomePaused={waitingModeEnabled && playbackState === "playing"}
-        metronomeVolume={metronomeVolume}
-        countInEnabled={countInEnabled}
         activeMetronomeBeat={activeMetronomeBeat}
         waitingModeEnabled={waitingModeEnabled}
-        skipGraceNotes={skipGraceNotes}
-        midiLocalSound={midiLocalSound}
         abLoop={abLoop}
         onPlay={handlePlay}
         onPlayFromSlice={handlePlayFromSlice}
@@ -1495,15 +1487,10 @@ export default function App({
         onJumpToMeasure={handleSelectMeasure}
         onChangeSpeed={handleSpeedChange}
         onToggleMetronome={handleToggleMetronome}
-        onChangeMetronomeVolume={handleChangeMetronomeVolume}
-        onToggleCountIn={handleToggleCountIn}
         onToggleWaitingMode={handleToggleWaitingMode}
-        onToggleSkipGraceNotes={handleToggleSkipGraceNotes}
-        onToggleMidiLocalSound={handleToggleMidiLocalSound}
         onToggleAbLoop={handleToggleAbLoop}
         onChangeAbLoopBounds={handleChangeAbLoopBounds}
         onClearAbLoop={handleClearAbLoop}
-        onToggleLoopGap={handleToggleLoopGap}
       />
 
       {/* Bottom Pane: Full-Width 88-Key Physical Piano & Dual-Hand Posture Simulation */}
