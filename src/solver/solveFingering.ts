@@ -24,30 +24,34 @@ interface BeamNode {
   prevIdx: number;
 }
 
-function buildHeldFingerMap(
+function buildHeldFingerMapFromBeam(
   slice: OnsetSlice,
-  historySlices: OnsetSlice[],
-  historyFingers: Finger[][]
+  slices: OnsetSlice[],
+  layers: BeamNode[][],
+  t: number,
+  pIdx: number
 ): Map<Finger, number> {
   const heldMap = new Map<Finger, number>();
-  if (slice.heldNotes.length === 0) {
+  if (slice.heldNotes.length === 0 || t === 0) {
     return heldMap;
   }
   const heldByUid = new Map<string, number>();
   for (const h of slice.heldNotes) {
     heldByUid.set(h.noteUid, h.midi);
   }
-  for (let s = historySlices.length - 1; s >= 0 && heldByUid.size > 0; s--) {
-    const prevSlice = historySlices[s];
-    const prevFingers = historyFingers[s];
+  let cursor = pIdx;
+  for (let back = t - 1; back >= 0 && heldByUid.size > 0; back--) {
+    const prevSlice = slices[back];
+    const node = layers[back][cursor];
     for (let i = 0; i < prevSlice.notes.length; i++) {
       const uid = prevSlice.notes[i].noteUid;
       const midi = heldByUid.get(uid);
       if (midi !== undefined) {
-        heldMap.set(prevFingers[i], midi);
+        heldMap.set(node.fingers[i], midi);
         heldByUid.delete(uid);
       }
     }
+    cursor = node.prevIdx;
   }
   return heldMap;
 }
@@ -87,24 +91,27 @@ function solvePhraseSegment(
       const prevBeam = layers[t - 1];
       const prevSlice = slices[t - 1];
 
+      // Precompute vertical cost once per candidate when no held notes exist
+      const cachedVertCosts =
+        slice.heldNotes.length === 0
+          ? candidates.map(
+              (cand) => computeVerticalCost(slice, cand, new Map<Finger, number>(), profile).cost
+            )
+          : null;
+
       for (let pIdx = 0; pIdx < prevBeam.length; pIdx++) {
         const prevNode = prevBeam[pIdx];
-        // Reconstruct recent history only when heldNotes exist
         const heldFingers =
           slice.heldNotes.length > 0
-            ? (() => {
-                const histFingers: Finger[][] = new Array(t);
-                let cursor = pIdx;
-                for (let back = t - 1; back >= 0; back--) {
-                  histFingers[back] = layers[back][cursor].fingers;
-                  cursor = layers[back][cursor].prevIdx;
-                }
-                return buildHeldFingerMap(slice, slices.slice(0, t), histFingers);
-              })()
-            : new Map<Finger, number>();
+            ? buildHeldFingerMapFromBeam(slice, slices, layers, t, pIdx)
+            : null;
 
-        for (const cand of candidates) {
-          const vert = computeVerticalCost(slice, cand, heldFingers, profile);
+        for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
+          const cand = candidates[cIdx];
+          const vertCost =
+            cachedVertCosts !== null
+              ? cachedVertCosts[cIdx]
+              : computeVerticalCost(slice, cand, heldFingers!, profile).cost;
           const horiz = computeHorizontalCost(
             prevSlice,
             prevNode.fingers,
@@ -112,7 +119,7 @@ function solvePhraseSegment(
             cand,
             profile
           );
-          const totalCost = prevNode.totalCost + vert.cost + horiz.cost;
+          const totalCost = prevNode.totalCost + vertCost + horiz.cost;
           nextBeam.push({
             fingers: cand,
             totalCost,
@@ -222,13 +229,11 @@ function derivePositionsAndCues(
         });
       }
 
-      // Check vertical chord span warnings
+      // Check vertical chord & active held+struck span warnings
       for (let i = 0; i < slice.notes.length; i++) {
+        const posI = toHandFramePos(slice.notes[i].midi, hand);
         for (let j = i + 1; j < slice.notes.length; j++) {
-          const dist = Math.abs(
-            toHandFramePos(slice.notes[j].midi, hand) -
-              toHandFramePos(slice.notes[i].midi, hand)
-          );
+          const dist = Math.abs(toHandFramePos(slice.notes[j].midi, hand) - posI);
           const maxSpan = getMaxSpan(fingers[i], fingers[j], scale);
           if (dist > maxSpan) {
             transitionCues.push({
@@ -249,6 +254,34 @@ function derivePositionsAndCues(
               severity: "warn",
               cost: dist / maxSpan,
               label: "Wide stretch",
+            });
+          }
+        }
+
+        for (const held of slice.heldNotes) {
+          const heldFinger = fingerByNoteUid[held.noteUid];
+          if (!heldFinger || heldFinger === fingers[i]) continue;
+          const dist = Math.abs(posI - toHandFramePos(held.midi, hand));
+          const maxSpan = getMaxSpan(heldFinger, fingers[i], scale);
+          if (dist > maxSpan) {
+            transitionCues.push({
+              sliceId: slice.sliceId,
+              hand,
+              measureIndex: slice.measureIndex,
+              type: "unreachable-span",
+              severity: "danger",
+              cost: dist - maxSpan,
+              label: "Unreachable span (held)",
+            });
+          } else if (dist > maxSpan * 0.85) {
+            transitionCues.push({
+              sliceId: slice.sliceId,
+              hand,
+              measureIndex: slice.measureIndex,
+              type: "wide-stretch",
+              severity: "warn",
+              cost: dist / maxSpan,
+              label: "Wide stretch (held)",
             });
           }
         }

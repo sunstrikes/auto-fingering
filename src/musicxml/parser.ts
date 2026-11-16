@@ -5,6 +5,10 @@ export interface XmlDomDeps {
   XMLSerializer?: typeof XMLSerializer;
 }
 
+export interface ParseMusicXmlOptions extends XmlDomDeps {
+  singleStaffHandOverride?: Hand;
+}
+
 const STEP_TO_SEMITONE: Record<string, number> = {
   C: 0,
   D: 2,
@@ -62,6 +66,54 @@ function extractXmlDeclaration(xmlText: string): string {
   return match ? match[0] : '<?xml version="1.0" encoding="UTF-8"?>';
 }
 
+interface TempoPoint {
+  tick: number;
+  bpm: number;
+}
+
+function buildTickToSecMapper(
+  tempoPoints: TempoPoint[],
+  ticksPerQuarter: number
+): (tick: number) => number {
+  const sorted = [...tempoPoints].sort((a, b) => a.tick - b.tick);
+  // Deduplicate same-tick points keeping the latest one encountered
+  const timeline: TempoPoint[] = [{ tick: 0, bpm: 100 }];
+  for (const pt of sorted) {
+    const last = timeline[timeline.length - 1];
+    if (pt.tick <= last.tick) {
+      last.bpm = pt.bpm;
+    } else {
+      timeline.push({ tick: pt.tick, bpm: pt.bpm });
+    }
+  }
+
+  // Precompute cumulative seconds at each tempo change point
+  const prefixSec: number[] = [0];
+  for (let i = 1; i < timeline.length; i++) {
+    const prev = timeline[i - 1];
+    const curr = timeline[i];
+    const deltaQuarters = (curr.tick - prev.tick) / ticksPerQuarter;
+    prefixSec.push(prefixSec[i - 1] + deltaQuarters * (60 / prev.bpm));
+  }
+
+  return (tick: number): number => {
+    if (tick <= 0) return 0;
+    let lo = 0;
+    let hi = timeline.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (timeline[mid].tick <= tick) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    const seg = timeline[lo];
+    const deltaQuarters = (tick - seg.tick) / ticksPerQuarter;
+    return prefixSec[lo] + deltaQuarters * (60 / seg.bpm);
+  };
+}
+
 function computeDivisionsLcm(parts: Element[]): number {
   let currentLcm = 1;
   for (const part of parts) {
@@ -110,11 +162,50 @@ function extractAnchorFinger(noteEl: Element): Finger | undefined {
   return undefined;
 }
 
+function extractTieState(noteEl: Element): { isTieStop: boolean; isTieStart: boolean } {
+  const tieEls = directChildrenByTag(noteEl, "tie");
+  if (tieEls.length > 0) {
+    return {
+      isTieStop: tieEls.some((t) => t.getAttribute("type") === "stop"),
+      isTieStart: tieEls.some((t) => t.getAttribute("type") === "start"),
+    };
+  }
+  const tiedEls: Element[] = [];
+  for (const notations of directChildrenByTag(noteEl, "notations")) {
+    for (const tied of directChildrenByTag(notations, "tied")) {
+      tiedEls.push(tied);
+    }
+  }
+  return {
+    isTieStop: tiedEls.some((t) => {
+      const type = t.getAttribute("type");
+      return type === "stop" || type === "continue";
+    }),
+    isTieStart: tiedEls.some((t) => {
+      const type = t.getAttribute("type");
+      return type === "start" || type === "continue";
+    }),
+  };
+}
+
+function getFirstMeasureClefSign(part: Element): string | null {
+  const firstMeasure = firstDirectChild(part, "measure");
+  if (!firstMeasure) return null;
+  for (const attrs of directChildrenByTag(firstMeasure, "attributes")) {
+    const clef = firstDirectChild(attrs, "clef");
+    if (clef) {
+      const sign = textOfChild(clef, "sign");
+      if (sign) return sign.toUpperCase();
+    }
+  }
+  return null;
+}
+
 /**
  * Parse a MusicXML string into a lossless ScoreDocument containing the DOM tree,
  * extracted NoteEvents, and grouped OnsetSlices.
  */
-export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument {
+export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): ScoreDocument {
   const ParserCtor = deps?.DOMParser ?? globalThis.DOMParser;
   if (!ParserCtor) {
     throw new Error("DOMParser is not available in this environment.");
@@ -155,12 +246,23 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
           }
         }
       }
+      for (const noteEl of directChildrenByTag(measure, "note")) {
+        const staffText = textOfChild(noteEl, "staff");
+        if (staffText) {
+          const parsed = Number.parseInt(staffText, 10);
+          if (Number.isFinite(parsed) && parsed > partStaves) {
+            partStaves = parsed;
+          }
+        }
+      }
     }
     totalStaves += partStaves;
   }
 
   if (totalStaves > 2) {
-    throw new Error(`Unsupported piano staff count (${totalStaves}). Maximum 2 staves supported.`);
+    throw new Error(
+      `Unsupported score with ${totalStaves} staves. Only 1- or 2-staff piano <score-partwise> documents (maximum 2 staves) are supported.`
+    );
   }
 
   const isSingleStaff = totalStaves === 1;
@@ -169,56 +271,64 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
   const title = titleEl?.textContent?.trim() || "Untitled Score";
 
   let defaultSingleStaffHand: Hand = "RH";
-  const firstClefSign = textOfChild(
-    root.querySelector("measure > attributes > clef") ?? root,
-    "sign"
-  );
+  const firstClefSign = getFirstMeasureClefSign(parts[0]);
   if (isSingleStaff && firstClefSign === "F") {
     defaultSingleStaffHand = "LH";
   }
+  const activeSingleStaffHand: Hand =
+    deps?.singleStaffHandOverride ?? defaultSingleStaffHand;
+
+  const swapDualParts =
+    parts.length === 2 &&
+    getFirstMeasureClefSign(parts[0]) === "F" &&
+    getFirstMeasureClefSign(parts[1]) === "G";
 
   const noteElementsByUid = new Map<string, Element>();
   const noteEvents: NoteEvent[] = [];
 
   let noteSeq = 0;
-  let globalTempoBpm = 100;
+  const tempoPoints: TempoPoint[] = [];
+  const measureBoundaryBefore = new Set<number>();
 
   // Phrase tracking per hand across measures
   const phraseIdByHand: Record<Hand, number> = { RH: 0, LH: 0 };
-  const pendingPhraseBump: Record<Hand, boolean> = { RH: false, LH: false };
   const lastEndSecByHand: Record<Hand, number | null> = { RH: null, LH: null };
+  const lastMeasureByHand: Record<Hand, number | null> = { RH: null, LH: null };
   const onsetSlices: OnsetSlice[] = [];
 
   const partCount = parts.length;
+  const rawNotes: Array<{
+    partId: string;
+    event: NoteEvent;
+    endTick: number;
+    restBefore: boolean;
+  }> = [];
 
   parts.forEach((part, partIndex) => {
     const partId = part.getAttribute("id") ?? `P${partIndex + 1}`;
     let divisions = 1;
     let measureStartTick = 0;
-    let measureStartSec = 0;
     const handForPart: Hand =
       partCount === 1
-        ? defaultSingleStaffHand
-        : partIndex === 0
-          ? "RH"
-          : "LH";
+        ? activeSingleStaffHand
+        : swapDualParts
+          ? partIndex === 0
+            ? "LH"
+            : "RH"
+          : partIndex === 0
+            ? "RH"
+            : "LH";
 
     const measures = directChildrenByTag(part, "measure");
-    const rawPartNotes: Array<{
-      event: NoteEvent;
-      restBefore: boolean;
-    }> = [];
-
-    let sawRestSinceLastNote = false;
+    const sawRestByStaff = new Map<number, boolean>();
 
     measures.forEach((measure, measureIndex) => {
       let cursorTick = measureStartTick;
-      let cursorSec = measureStartSec;
       let lastNonChordOnsetTick = cursorTick;
-      let lastNonChordOnsetSec = cursorSec;
+      let lastGraceOnsetTick = cursorTick;
       let maxMeasureEndTick = measureStartTick;
-      let maxMeasureEndSec = measureStartSec;
       let pendingGraceOrder = 0;
+      let lastGraceOrder = 0;
 
       for (let i = 0; i < measure.children.length; i++) {
         const child = measure.children[i];
@@ -232,35 +342,46 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
               divisions = parsed;
             }
           }
+        } else if (tag === "barline") {
+          const repeatEl = firstDirectChild(child, "repeat");
+          if (repeatEl && repeatEl.getAttribute("direction") === "backward") {
+            measureBoundaryBefore.add(measureIndex + 1);
+          }
+          const endingEl = firstDirectChild(child, "ending");
+          if (endingEl) {
+            const endingType = endingEl.getAttribute("type");
+            if (endingType === "start" && measureIndex > 0) {
+              measureBoundaryBefore.add(measureIndex);
+            } else if (endingType === "stop" || endingType === "discontinue") {
+              measureBoundaryBefore.add(measureIndex + 1);
+            }
+          }
         } else if (tag === "direction") {
           const sound = child.querySelector("sound[tempo]");
           if (sound) {
             const tempoAttr = sound.getAttribute("tempo");
             const parsedTempo = tempoAttr ? Number.parseFloat(tempoAttr) : NaN;
             if (Number.isFinite(parsedTempo) && parsedTempo > 0) {
-              globalTempoBpm = parsedTempo;
+              tempoPoints.push({ tick: cursorTick, bpm: parsedTempo });
             }
           }
         } else if (tag === "sound") {
           const tempoAttr = child.getAttribute("tempo");
           const parsedTempo = tempoAttr ? Number.parseFloat(tempoAttr) : NaN;
           if (Number.isFinite(parsedTempo) && parsedTempo > 0) {
-            globalTempoBpm = parsedTempo;
+            tempoPoints.push({ tick: cursorTick, bpm: parsedTempo });
           }
         } else if (tag === "backup" || tag === "forward") {
           const durText = textOfChild(child, "duration");
           const rawDur = durText ? Number.parseInt(durText, 10) : 0;
           const scaledDur = rawDur * (globalLcm / divisions);
-          const deltaSec = (rawDur / divisions) * (60 / globalTempoBpm);
+          pendingGraceOrder = 0;
           if (tag === "backup") {
             cursorTick = Math.max(measureStartTick, cursorTick - scaledDur);
-            cursorSec = Math.max(measureStartSec, cursorSec - deltaSec);
           } else {
             cursorTick += scaledDur;
-            cursorSec += deltaSec;
             if (cursorTick > maxMeasureEndTick) {
               maxMeasureEndTick = cursorTick;
-              maxMeasureEndSec = cursorSec;
             }
           }
         } else if (tag === "note") {
@@ -270,24 +391,37 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
           const durText = textOfChild(child, "duration");
           const rawDur = isGrace ? 0 : durText ? Number.parseInt(durText, 10) : 0;
           const scaledDur = isGrace ? 0 : rawDur * (globalLcm / divisions);
-          const durSec = isGrace ? 0 : (rawDur / divisions) * (60 / globalTempoBpm);
 
-          const onsetTick = isChord ? lastNonChordOnsetTick : cursorTick;
-          const onsetSec = isChord ? lastNonChordOnsetSec : cursorSec;
+          let onsetTick: number;
+          let graceOrder: number | undefined;
 
-          if (!isChord && !isGrace) {
-            lastNonChordOnsetTick = cursorTick;
-            lastNonChordOnsetSec = cursorSec;
-            cursorTick += scaledDur;
-            cursorSec += durSec;
-            if (cursorTick > maxMeasureEndTick) {
-              maxMeasureEndTick = cursorTick;
-              maxMeasureEndSec = cursorSec;
+          if (isGrace) {
+            if (isChord) {
+              onsetTick = lastGraceOnsetTick;
+              graceOrder = lastGraceOrder;
+            } else {
+              onsetTick = cursorTick;
+              lastGraceOnsetTick = cursorTick;
+              lastGraceOrder = pendingGraceOrder;
+              graceOrder = pendingGraceOrder++;
             }
+          } else {
+            onsetTick = isChord ? lastNonChordOnsetTick : cursorTick;
+            if (!isChord) {
+              lastNonChordOnsetTick = cursorTick;
+              cursorTick += scaledDur;
+              if (cursorTick > maxMeasureEndTick) {
+                maxMeasureEndTick = cursorTick;
+              }
+            }
+            pendingGraceOrder = 0;
           }
 
+          const staffText = textOfChild(child, "staff");
+          const staff = staffText ? Number.parseInt(staffText, 10) : 1;
+
           if (isRest) {
-            sawRestSinceLastNote = true;
+            sawRestByStaff.set(staff, true);
             pendingGraceOrder = 0;
             continue;
           }
@@ -297,8 +431,6 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
             continue;
           }
 
-          const staffText = textOfChild(child, "staff");
-          const staff = staffText ? Number.parseInt(staffText, 10) : 1;
           const voice = textOfChild(child, "voice") ?? "1";
           const hand: Hand =
             partCount === 1 && !isSingleStaff
@@ -307,17 +439,10 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
                 : "RH"
               : handForPart;
 
-          const tieEls = directChildrenByTag(child, "tie");
-          const isTieStop = tieEls.some((t) => t.getAttribute("type") === "stop");
-          const isTieStart = tieEls.some((t) => t.getAttribute("type") === "start");
+          const { isTieStop, isTieStart } = extractTieState(child);
 
           const noteUid = `${partId}-m${measureIndex}-n${noteSeq++}`;
           noteElementsByUid.set(noteUid, child);
-
-          const graceOrder = isGrace ? pendingGraceOrder++ : undefined;
-          if (!isGrace) {
-            pendingGraceOrder = 0;
-          }
 
           const anchorFinger = extractAnchorFinger(child);
 
@@ -326,8 +451,8 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
             measureIndex,
             onsetTick,
             durationTick: scaledDur,
-            onsetSec,
-            durationSec: durSec,
+            onsetSec: 0,
+            durationSec: 0,
             midi: pitchToMidi(pitchEl),
             hand,
             voice,
@@ -340,26 +465,74 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
             anchorRawPreserved: anchorFinger !== undefined,
           };
 
-          rawPartNotes.push({
+          rawNotes.push({
+            partId,
             event,
-            restBefore: sawRestSinceLastNote,
+            endTick: onsetTick + scaledDur,
+            restBefore: sawRestByStaff.get(staff) ?? false,
           });
-          sawRestSinceLastNote = false;
+          sawRestByStaff.set(staff, false);
         }
       }
 
       measureStartTick = maxMeasureEndTick;
-      measureStartSec = maxMeasureEndSec;
     });
-
-    for (const item of rawPartNotes) {
-      const ev = item.event;
-      if (item.restBefore && noteEvents.length > 0) {
-        pendingPhraseBump[ev.hand] = true;
-      }
-      noteEvents.push(ev);
-    }
   });
+
+  // Cross-staff >= 70% primary staff rule per (partId, voice) on single-part 2-staff scores
+  if (partCount === 1 && !isSingleStaff) {
+    const voiceStats = new Map<
+      string,
+      { dur1: number; dur2: number; count1: number; count2: number }
+    >();
+    for (const item of rawNotes) {
+      const key = `${item.partId}:${item.event.voice}`;
+      let st = voiceStats.get(key);
+      if (!st) {
+        st = { dur1: 0, dur2: 0, count1: 0, count2: 0 };
+        voiceStats.set(key, st);
+      }
+      if (item.event.staff === 2) {
+        st.dur2 += item.event.durationTick;
+        st.count2 += 1;
+      } else {
+        st.dur1 += item.event.durationTick;
+        st.count1 += 1;
+      }
+    }
+
+    const dominantHandByVoice = new Map<string, Hand>();
+    for (const [key, st] of voiceStats.entries()) {
+      const totalDur = st.dur1 + st.dur2;
+      const totalCount = st.count1 + st.count2;
+      const share1 = totalDur > 0 ? st.dur1 / totalDur : st.count1 / Math.max(1, totalCount);
+      const share2 = totalDur > 0 ? st.dur2 / totalDur : st.count2 / Math.max(1, totalCount);
+      if (share1 >= 0.7) {
+        dominantHandByVoice.set(key, "RH");
+      } else if (share2 >= 0.7) {
+        dominantHandByVoice.set(key, "LH");
+      }
+    }
+
+    for (const item of rawNotes) {
+      const key = `${item.partId}:${item.event.voice}`;
+      const domHand = dominantHandByVoice.get(key);
+      if (domHand) {
+        item.event.hand = domHand;
+      }
+    }
+  }
+
+  const tickToSec = buildTickToSecMapper(tempoPoints, globalLcm);
+  const restBeforeByUid = new Map<string, boolean>();
+  for (const item of rawNotes) {
+    const startSec = tickToSec(item.event.onsetTick);
+    const endSec = tickToSec(item.endTick);
+    item.event.onsetSec = startSec;
+    item.event.durationSec = Math.max(0, endSec - startSec);
+    noteEvents.push(item.event);
+    restBeforeByUid.set(item.event.noteUid, item.restBefore);
+  }
 
   // Sort noteEvents by onsetTick, grace order, and midi ascending
   noteEvents.sort((a, b) => {
@@ -371,11 +544,57 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
     return a.midi - b.midi;
   });
 
-  // Reset phrase tracking and build OnsetSlices cleanly
-  phraseIdByHand.RH = 0;
-  phraseIdByHand.LH = 0;
-  lastEndSecByHand.RH = null;
-  lastEndSecByHand.LH = null;
+  // Link TieContinuation chains to their struck root NoteEvent and compute full sustain endTick/endSec
+  interface TieChain {
+    rootUid: string;
+    voiceKey: string;
+    handKey: string;
+    endTick: number;
+    endSec: number;
+  }
+  const openTieByVoice = new Map<string, TieChain>();
+  const openTieByHand = new Map<string, TieChain>();
+  const chainEndTickByRootUid = new Map<string, number>();
+  const chainEndSecByRootUid = new Map<string, number>();
+
+  for (const ev of noteEvents) {
+    if (ev.isGrace) continue;
+    const voiceKey = `${ev.hand}:${ev.voice}:${ev.midi}`;
+    const handKey = `${ev.hand}:${ev.midi}`;
+    const evEndTick = ev.onsetTick + ev.durationTick;
+    const evEndSec = ev.onsetSec + ev.durationSec;
+
+    if (ev.isTieStop) {
+      const chain = openTieByVoice.get(voiceKey) ?? openTieByHand.get(handKey);
+      if (chain) {
+        ev.tieChainRootUid = chain.rootUid;
+        chain.endTick = Math.max(chain.endTick, evEndTick);
+        chain.endSec = Math.max(chain.endSec, evEndSec);
+        chainEndTickByRootUid.set(chain.rootUid, chain.endTick);
+        chainEndSecByRootUid.set(chain.rootUid, chain.endSec);
+        if (!ev.isTieStart) {
+          if (openTieByVoice.get(chain.voiceKey) === chain) {
+            openTieByVoice.delete(chain.voiceKey);
+          }
+          if (openTieByHand.get(chain.handKey) === chain) {
+            openTieByHand.delete(chain.handKey);
+          }
+        }
+      }
+    } else if (ev.isTieStart) {
+      const chain: TieChain = {
+        rootUid: ev.noteUid,
+        voiceKey,
+        handKey,
+        endTick: evEndTick,
+        endSec: evEndSec,
+      };
+      openTieByVoice.set(voiceKey, chain);
+      openTieByHand.set(handKey, chain);
+      chainEndTickByRootUid.set(ev.noteUid, evEndTick);
+      chainEndSecByRootUid.set(ev.noteUid, evEndSec);
+    }
+  }
 
   const sliceBuckets = new Map<string, NoteEvent[]>();
   const sliceOrder: string[] = [];
@@ -395,11 +614,6 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
     bucket.push(ev);
   }
 
-  // Track rest gaps by comparing expected continuous timeline or silence gap >= 1.5s,
-  // plus explicit rests detected in the score.
-  // For single-staff / general slices: if gap between previous note endSec and next onsetSec > 0.05s
-  // (meaning an explicit rest occurred or silence >= 1.5s), increment phraseId when a rest occurred or gap >= 1.5s.
-  // Let's detect explicit rest intervals accurately using noteEvents vs measure timeline:
   const activeNotes: Array<{ noteUid: string; hand: Hand; midi: number; endTick: number; endSec: number }> = [];
 
   sliceOrder.forEach((key, idx) => {
@@ -422,29 +636,46 @@ export function parseMusicXml(xmlText: string, deps?: XmlDomDeps): ScoreDocument
       }
     }
 
-    const prevEnd = lastEndSecByHand[hand];
-    if (prevEnd !== null && heldNotes.length === 0) {
-      const silenceGapSec = first.onsetSec - prevEnd;
-      // An un-held gap > 1e-4 seconds indicates a rest or silence between phrases
-      if (silenceGapSec >= 1.5 || (pendingPhraseBump[hand] && silenceGapSec > 1e-4)) {
-        phraseIdByHand[hand] += 1;
-        pendingPhraseBump[hand] = false;
+    const prevMeasure = lastMeasureByHand[hand];
+    let hasMeasureBoundary = false;
+    if (prevMeasure !== null && first.measureIndex > prevMeasure) {
+      for (let m = prevMeasure + 1; m <= first.measureIndex; m++) {
+        if (measureBoundaryBefore.has(m)) {
+          hasMeasureBoundary = true;
+          break;
+        }
       }
     }
 
-    const maxEndSec = Math.max(...notes.map((n) => n.onsetSec + n.durationSec));
+    const prevEnd = lastEndSecByHand[hand];
+    const hadRestBefore = notes.some((n) => restBeforeByUid.get(n.noteUid));
+    if (hasMeasureBoundary) {
+      phraseIdByHand[hand] += 1;
+    } else if (prevEnd !== null && heldNotes.length === 0) {
+      const silenceGapSec = first.onsetSec - prevEnd;
+      if (silenceGapSec >= 1.5 || (hadRestBefore && silenceGapSec > 1e-4)) {
+        phraseIdByHand[hand] += 1;
+      }
+    }
+
+    lastMeasureByHand[hand] = first.measureIndex;
+    const maxEndSec = Math.max(
+      ...notes.map((n) => chainEndSecByRootUid.get(n.noteUid) ?? n.onsetSec + n.durationSec)
+    );
     if (prevEnd === null || maxEndSec > prevEnd) {
       lastEndSecByHand[hand] = maxEndSec;
     }
 
     for (const n of notes) {
       if (n.durationTick > 0) {
+        const endTick = chainEndTickByRootUid.get(n.noteUid) ?? n.onsetTick + n.durationTick;
+        const endSec = chainEndSecByRootUid.get(n.noteUid) ?? n.onsetSec + n.durationSec;
         activeNotes.push({
           noteUid: n.noteUid,
           hand: n.hand,
           midi: n.midi,
-          endTick: n.onsetTick + n.durationTick,
-          endSec: n.onsetSec + n.durationSec,
+          endTick,
+          endSec,
         });
       }
     }
