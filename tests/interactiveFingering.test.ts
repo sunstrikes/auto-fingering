@@ -12,7 +12,7 @@ import {
   matchMeasureGraphicalNotes,
   type ScoreRendererHandle,
 } from "../src/components/ScoreViewer";
-import { InspectorPanel } from "../src/components/InspectorPanel";
+import { NoteAnchorPopover } from "../src/components/NoteAnchorPopover";
 import App from "../src/App";
 import { createSolverClient, type WorkerLike } from "../src/workers/solverClient";
 import { handleWorkerRequest } from "../src/workers/fingering.worker";
@@ -151,34 +151,37 @@ describe("Seam 3a: ScoreViewer OSMD note hit-testing & purple Diff badges", () =
       await Promise.resolve();
     });
 
-    // Purple Diff badge rendered in ScoreViewer and via renderer seam
-    const diffStrip = mountedContainer.querySelector('[data-testid="diff-indicators"]');
-    expect(diffStrip).not.toBeNull();
-    expect(diffStrip!.textContent).toContain("Diff");
-    expect(diffStrip!.textContent).toContain("G4");
-    expect(diffStrip!.textContent).toContain("4 → 5");
+    // Purple Diff marker synced via renderer seam
     expect(markDiffNotes).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ noteUid: g4.noteUid, before: 4, after: 5 })])
     );
 
-    // Click on OSMD canvas -> invokes hitTestNoteAtClientPoint -> selects G4, then TieContinuation F4
+    // Click on OSMD canvas -> invokes hitTestNoteAtClientPoint -> selects G4, then TieContinuation F4 with popover anchor rect
     const osmdSurface = mountedContainer.querySelector('[data-testid="osmd-canvas-surface"]') as HTMLElement;
     expect(osmdSurface).not.toBeNull();
 
     act(() => {
       osmdSurface.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 120, clientY: 80 }));
     });
-    expect(onSelectNote).toHaveBeenNthCalledWith(1, g4.noteUid);
+    expect(onSelectNote).toHaveBeenNthCalledWith(
+      1,
+      g4.noteUid,
+      expect.objectContaining({ left: 120, top: 80 })
+    );
 
     act(() => {
       osmdSurface.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 240, clientY: 85 }));
     });
-    expect(onSelectNote).toHaveBeenNthCalledWith(2, tieF4.noteUid);
+    expect(onSelectNote).toHaveBeenNthCalledWith(
+      2,
+      tieF4.noteUid,
+      expect.objectContaining({ left: 240, top: 85 })
+    );
   });
 });
 
-describe("Seam 3b: InspectorPanel note editor (1-5, pinOnly, remove, TieContinuation, Diff card)", () => {
-  it("supports 1-5 phrase overrides, pinOnly toggle, Remove Anchor, Before -> After Diff card, and TieContinuation explanation", () => {
+describe("Seam 3b: Inline NoteAnchorPopover (1-5, pinOnly, unpin, TieContinuation, Play here)", () => {
+  it("supports 1-5 phrase overrides, pinOnly toggle, Unpin, Play here, and TieContinuation notice", () => {
     const { DOMParser } = new JSDOM("").window;
     const doc = parseMusicXml(SCORE_WITH_TIE_AND_CHORD, { DOMParser });
     const res = solveFingering(doc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
@@ -188,8 +191,8 @@ describe("Seam 3b: InspectorPanel note editor (1-5, pinOnly, remove, TieContinua
 
     const onSetAnchor = vi.fn();
     const onRemoveAnchor = vi.fn();
-    const onUndo = vi.fn();
-    const onRedo = vi.fn();
+    const onPlayFromHere = vi.fn();
+    const onClose = vi.fn();
 
     mountedContainer = document.createElement("div");
     document.body.appendChild(mountedContainer);
@@ -197,42 +200,21 @@ describe("Seam 3b: InspectorPanel note editor (1-5, pinOnly, remove, TieContinua
 
     act(() => {
       mountedRoot!.render(
-        createElement(InspectorPanel, {
-          warnings: res.warnings,
-          onsetSlices: doc.onsetSlices,
-          noteEvents: doc.noteEvents,
+        createElement(NoteAnchorPopover, {
+          note: e4,
           fingerByNoteUid: res.fingerByNoteUid,
-          handSpanProfile: DEFAULT_HAND_SPAN_PROFILE,
-          selectedSliceId: doc.onsetSlices[1].sliceId,
-          selectedMeasureIndex: 0,
-          selectedNoteUid: e4.noteUid,
           anchors: { [e4.noteUid]: { finger: 3, mode: "phrase" } },
-          lastDiff: [
-            {
-              noteUid: e4.noteUid,
-              measureIndex: 0,
-              midi: 64,
-              pitchLabel: "E4",
-              hand: "RH",
-              before: 2,
-              after: 3,
-            },
-          ],
-          canUndo: true,
-          canRedo: false,
           ignoreExistingFingerings: false,
-          hasScore: true,
-          onSelectWarning: vi.fn(),
           onSetAnchor,
           onRemoveAnchor,
-          onUndo,
-          onRedo,
+          onPlayFromHere,
+          onClose,
         })
       );
     });
 
-    const editor = mountedContainer.querySelector('[data-testid="selected-note-editor"]')!;
-    expect(editor.textContent).toContain("E4");
+    const popover = mountedContainer.querySelector('[data-testid="note-anchor-popover"]')!;
+    expect(popover.textContent).toContain("E4");
 
     // Default mode is phrase: clicking finger 4 sends mode="phrase"
     const btn4 = mountedContainer.querySelector('[data-testid="finger-btn-4"]') as HTMLButtonElement;
@@ -256,7 +238,7 @@ describe("Seam 3b: InspectorPanel note editor (1-5, pinOnly, remove, TieContinua
     });
     expect(onSetAnchor).toHaveBeenLastCalledWith(e4.noteUid, 5, "pinOnly");
 
-    // Remove Anchor button
+    // Unpin button
     const removeBtn = mountedContainer.querySelector('[data-testid="remove-anchor-btn"]') as HTMLButtonElement;
     expect(removeBtn.disabled).toBe(false);
     act(() => {
@@ -264,45 +246,36 @@ describe("Seam 3b: InspectorPanel note editor (1-5, pinOnly, remove, TieContinua
     });
     expect(onRemoveAnchor).toHaveBeenCalledWith(e4.noteUid);
 
-    // Before -> After Diff card
-    const diffCard = mountedContainer.querySelector('[data-testid="diff-card"]')!;
-    expect(diffCard.textContent).toContain("E4");
-    expect(diffCard.textContent).toContain("2 → 3");
+    // Play here button
+    const playBtn = mountedContainer.querySelector('[data-testid="popover-play-from-btn"]') as HTMLButtonElement;
+    act(() => {
+      playBtn.click();
+    });
+    expect(onPlayFromHere).toHaveBeenCalledTimes(1);
 
-    // Re-render with TieContinuation selected -> explains no independent <fingering>
+    // Re-render with TieContinuation selected -> explains no independent strike
     act(() => {
       mountedRoot!.render(
-        createElement(InspectorPanel, {
-          warnings: res.warnings,
-          onsetSlices: doc.onsetSlices,
-          noteEvents: doc.noteEvents,
+        createElement(NoteAnchorPopover, {
+          note: tieF4,
           fingerByNoteUid: res.fingerByNoteUid,
-          handSpanProfile: DEFAULT_HAND_SPAN_PROFILE,
-          selectedSliceId: doc.onsetSlices[3].sliceId,
-          selectedMeasureIndex: 1,
-          selectedNoteUid: tieF4.noteUid,
           anchors: {},
-          lastDiff: [],
-          canUndo: false,
-          canRedo: false,
           ignoreExistingFingerings: false,
-          hasScore: true,
-          onSelectWarning: vi.fn(),
           onSetAnchor,
           onRemoveAnchor,
+          onClose,
         })
       );
     });
 
-    const tieNotice = mountedContainer.querySelector('[data-testid="tie-continuation-notice"]')!;
-    expect(tieNotice.textContent).toMatch(/Tie Continuation/i);
-    expect(tieNotice.textContent).toContain("<fingering>");
+    const tieNotice = mountedContainer.querySelector('[data-testid="popover-tie-notice"]')!;
+    expect(tieNotice.textContent).toMatch(/Tie continuation/i);
     expect(mountedContainer.querySelector('[data-testid="finger-btn-1"]')).toBeNull();
   });
 });
 
-describe("Seam 3c: Full App integration (OSMD click -> local resolve -> Diff/Keyboard/XML -> Undo/Redo)", () => {
-  it("connects OSMD note click, phrase/pinOnly/remove overrides, purple Diff badges, DualTrackKeyboard, XML export, and Undo/Redo", async () => {
+describe("Seam 3c: Full App integration (OSMD click -> popover resolve -> Diff pill / 88-key / XML -> Undo/Redo)", () => {
+  it("connects OSMD note click, inline popover overrides, Diff dropdown, 88-key hands, XML export, and Undo/Redo", async () => {
     const inProcessWorkerFactory = (): WorkerLike => {
       const worker: WorkerLike = {
         onmessage: null,
@@ -383,7 +356,7 @@ describe("Seam 3c: Full App integration (OSMD click -> local resolve -> Diff/Key
       await Promise.resolve();
     });
 
-    expect(mountedContainer.querySelector('[data-testid="selected-note-editor"]')?.textContent).toContain("E4");
+    expect(mountedContainer.querySelector('[data-testid="note-anchor-popover"]')?.textContent).toContain("E4");
 
     // Apply phrase override: E4 -> finger 4
     await act(async () => {
@@ -391,12 +364,16 @@ describe("Seam 3c: Full App integration (OSMD click -> local resolve -> Diff/Key
       await new Promise((r) => setTimeout(r, 25));
     });
 
-    // Purple Diff badge & Inspector Diff card updated
-    expect(mountedContainer.querySelector('[data-testid="diff-indicators"]')?.textContent).toContain("E4");
-    expect(mountedContainer.querySelector('[data-testid="diff-card"]')?.textContent).toContain("→ 4");
-    // DualTrackKeyboard RH track reflects updated finger 4 on midi 64
-    const rhTrack = mountedContainer.querySelector('[data-testid="keyboard-track-RH"]')!;
-    expect(rhTrack.querySelector('[data-midi="64"]')?.textContent).toContain("4");
+    // Expandable Diff summary pill reflects change; UnifiedPiano88 reflects finger 4 on midi 64
+    const diffPill = mountedContainer.querySelector('[data-testid="diff-summary-pill"]') as HTMLButtonElement;
+    expect(diffPill).not.toBeNull();
+    await act(async () => {
+      diffPill.click();
+    });
+    expect(mountedContainer.querySelector('[data-testid="diff-dropdown"]')?.textContent).toContain("→ 4");
+
+    const rhFinger4 = mountedContainer.querySelector('[data-testid="hand-RH-finger-4"]')!;
+    expect(rhFinger4.getAttribute("data-press-depth")).not.toBe("0.00");
     // Exported/rendered XML updated immediately
     const xmlAfterPhrase = renderedXmlHistory[renderedXmlHistory.length - 1];
     expect(xmlAfterPhrase).toContain("<fingering placement=\"above\">4</fingering>");
@@ -406,7 +383,7 @@ describe("Seam 3c: Full App integration (OSMD click -> local resolve -> Diff/Key
       osmdSurface.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 50, clientY: 60 }));
       await Promise.resolve();
     });
-    expect(mountedContainer.querySelector('[data-testid="selected-note-editor"]')?.textContent).toContain("C4");
+    expect(mountedContainer.querySelector('[data-testid="note-anchor-popover"]')?.textContent).toContain("C4");
 
     await act(async () => {
       (mountedContainer!.querySelector('[data-testid="pin-only-toggle"]') as HTMLButtonElement).click();
@@ -416,8 +393,9 @@ describe("Seam 3c: Full App integration (OSMD click -> local resolve -> Diff/Key
       await new Promise((r) => setTimeout(r, 25));
     });
 
-    expect(mountedContainer.querySelector('[data-testid="diff-card"]')?.textContent).toContain("C4");
-    expect(mountedContainer.querySelector('[data-testid="diff-card"]')?.textContent).toContain("1 → 2");
+    const diffDropdownText1 = mountedContainer.querySelector('[data-testid="diff-dropdown"]')?.textContent ?? "";
+    expect(diffDropdownText1).toContain("C4");
+    expect(diffDropdownText1).toContain("1 → 2");
 
     // Remove anchor on C4 -> restores solver freedom
     await act(async () => {
@@ -436,23 +414,22 @@ describe("Seam 3c: Full App integration (OSMD click -> local resolve -> Diff/Key
       undoBtn.click();
       await Promise.resolve();
     });
-    expect(mountedContainer.querySelector('[data-testid="diff-card"]')?.textContent).toContain("C4");
-    expect(mountedContainer.querySelector('[data-testid="diff-card"]')?.textContent).toContain("1 → 2");
+    expect(mountedContainer.querySelector('[data-testid="diff-dropdown"]')?.textContent).toContain("1 → 2");
 
     await act(async () => {
       redoBtn.click();
       await Promise.resolve();
     });
-    expect(mountedContainer.querySelector('[data-testid="diff-card"]')?.textContent).toContain("2 → 1");
+    expect(mountedContainer.querySelector('[data-testid="diff-dropdown"]')?.textContent).toContain("2 → 1");
 
-    // Click TieContinuation F4 -> Inspector explains no independent <fingering>
+    // Click TieContinuation F4 -> Popover explains no independent finger strike
     await act(async () => {
       osmdSurface.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 200, clientY: 60 }));
       await Promise.resolve();
     });
-    const tieNotice = mountedContainer.querySelector('[data-testid="tie-continuation-notice"]');
+    const tieNotice = mountedContainer.querySelector('[data-testid="popover-tie-notice"]');
     expect(tieNotice).not.toBeNull();
-    expect(tieNotice!.textContent).toContain("<fingering>");
+    expect(tieNotice!.textContent).toMatch(/Tie continuation/i);
   });
 });
 

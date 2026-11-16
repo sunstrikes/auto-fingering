@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { OpenSheetMusicDisplay, PointF2D, type Cursor } from "opensheetmusicdisplay";
-import type { CursorSyncTarget } from "../audio/playbackEngine";
-import type { Finger, Hand, NoteEvent } from "../domain/types";
+import type { CursorSyncTarget, PlaybackFrame } from "../audio/playbackEngine";
+import type { Finger, Hand, NoteEvent, ScoreDocument } from "../domain/types";
 import type { NoteDiffEntry } from "../store/useStudioStore";
 import { midiToPitchLabel } from "../solver/keyboard";
 import {
@@ -9,6 +9,9 @@ import {
   type MeasureGeometry,
   type MeasureRiskSummary,
 } from "./MarginRiskGutter";
+import type { PopoverAnchorRect } from "./NoteAnchorPopover";
+
+export type ScoreLayoutMode = "horizontal" | "page";
 
 export interface AnchorMarkerInfo {
   noteUid: string;
@@ -31,7 +34,10 @@ export interface OsmdNoteHit {
 }
 
 export interface ScoreRendererHandle {
-  render(xmlString: string): Promise<{
+  render(
+    xmlString: string,
+    options?: { layoutMode?: ScoreLayoutMode }
+  ): Promise<{
     measureCount: number;
     measureGeometry: MeasureGeometry[];
   }>;
@@ -41,6 +47,8 @@ export interface ScoreRendererHandle {
   markDiffNotes?(diffs: NoteDiffEntry[]): void;
   highlightSelectedNote?(note: NoteEvent | null): void;
   hitTestNoteAtClientPoint?(clientX: number, clientY: number): OsmdNoteHit | null;
+  getCursorOffsetX?(): number | null;
+  getSelectedNoteRect?(): PopoverAnchorRect | null;
   scrollToMeasure(measureIndex: number, scrollContainer: HTMLElement | null): void;
   syncCursor?: (target: CursorSyncTarget | null) => void;
   dispose(): void;
@@ -345,13 +353,19 @@ export function matchMeasureGraphicalNotes<T extends MatchableScoreItem>(
  * SVG measure highlighting, anchor/diff/selection markers, click hit-testing, playback cursor sync, and scrolling.
  */
 export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHandle {
-  const osmd = new OpenSheetMusicDisplay(container, {
-    autoResize: true,
-    backend: "svg",
-    drawFingerings: true,
-    fingeringPosition: "aboveorbelow",
-    followCursor: true,
-  });
+  let activeLayoutMode: ScoreLayoutMode = "horizontal";
+  const buildOsmd = (mode: ScoreLayoutMode) =>
+    new OpenSheetMusicDisplay(container, {
+      autoResize: mode === "page",
+      backend: "svg",
+      drawFingerings: true,
+      fingeringPosition: "aboveorbelow",
+      followCursor: mode === "page",
+      renderSingleHorizontalStaffline: mode === "horizontal",
+      drawTitle: mode === "page",
+    });
+
+  let osmd = buildOsmd(activeLayoutMode);
   let lastCursorKey: { measureIndex: number; onsetTick: number; isGrace: boolean } | null = null;
   let currentNoteEvents: NoteEvent[] = [];
 
@@ -398,18 +412,29 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       if (els.length === 0) continue;
       let minTop = Infinity;
       let maxBottom = -Infinity;
+      let minLeft = Infinity;
+      let maxRight = -Infinity;
       for (const el of els) {
         const rect = el.getBoundingClientRect();
-        if (rect.height <= 0) continue;
+        if (rect.height <= 0 && rect.width <= 0) continue;
         const relTop = rect.top - containerRect.top + container.scrollTop;
-        minTop = Math.min(minTop, relTop);
-        maxBottom = Math.max(maxBottom, relTop + rect.height);
+        const relLeft = rect.left - containerRect.left + container.scrollLeft;
+        if (rect.height > 0) {
+          minTop = Math.min(minTop, relTop);
+          maxBottom = Math.max(maxBottom, relTop + rect.height);
+        }
+        if (rect.width > 0) {
+          minLeft = Math.min(minLeft, relLeft);
+          maxRight = Math.max(maxRight, relLeft + rect.width);
+        }
       }
       if (Number.isFinite(minTop) && maxBottom > minTop) {
         geometry.push({
           measureIndex: m,
           top: minTop,
           height: maxBottom - minTop,
+          left: Number.isFinite(minLeft) ? minLeft : undefined,
+          width: Number.isFinite(minLeft) && maxRight > minLeft ? maxRight - minLeft : undefined,
         });
       }
     }
@@ -417,7 +442,20 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
   };
 
   return {
-    async render(xmlString: string) {
+    async render(xmlString: string, options?: { layoutMode?: ScoreLayoutMode }) {
+      const nextMode = options?.layoutMode ?? activeLayoutMode;
+      if (nextMode !== activeLayoutMode) {
+        activeLayoutMode = nextMode;
+        container.innerHTML = "";
+        osmd = buildOsmd(nextMode);
+      }
+      if (activeLayoutMode === "horizontal") {
+        container.style.width = "max-content";
+        container.style.minWidth = "100%";
+      } else {
+        container.style.width = "";
+        container.style.minWidth = "";
+      }
       await osmd.load(xmlString);
       osmd.render();
       lastCursorKey = null;
@@ -573,15 +611,33 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       const els = getMeasureSvgElements(measureIndex);
       const target = els[0];
       if (target && typeof target.scrollIntoView === "function") {
-        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
         return;
       }
       const fallback = scrollContainer?.querySelector<HTMLElement>(
         `[data-score-measure-anchor="${measureIndex}"]`
       );
       if (fallback && typeof fallback.scrollIntoView === "function") {
-        fallback.scrollIntoView({ behavior: "smooth", block: "center" });
+        fallback.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
       }
+    },
+
+    getCursorOffsetX() {
+      const el = osmd.cursor?.cursorElement;
+      if (!el || osmd.cursor?.Hidden) return null;
+      const left = el.offsetLeft;
+      if (typeof left === "number" && left > 0) return left;
+      const containerRect = container.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      if (elRect.width <= 0 && elRect.height <= 0) return null;
+      return elRect.left - containerRect.left;
+    },
+
+    getSelectedNoteRect() {
+      const el = container.querySelector<SVGGElement>("[data-selected-note]");
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      return { left: rect.left + rect.width / 2, top: rect.top, height: Math.max(14, rect.height) };
     },
 
     syncCursor(target: CursorSyncTarget | null) {
@@ -675,6 +731,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
 
 export interface ScoreViewerProps {
   xmlString: string | null;
+  scoreDoc?: ScoreDocument | null;
   noteEvents?: NoteEvent[];
   measureRisks?: MeasureRiskSummary[];
   anchoredNotes?: AnchorMarkerInfo[];
@@ -683,17 +740,21 @@ export interface ScoreViewerProps {
   selectedSliceId?: string | null;
   selectedNoteUid?: string | null;
   cursorTarget?: CursorSyncTarget | null;
+  playbackFrame?: PlaybackFrame | null;
+  layoutMode?: ScoreLayoutMode;
+  onLayoutModeChange?: (mode: ScoreLayoutMode) => void;
   onSelectMeasure?: (measureIndex: number) => void;
-  onSelectNote?: (noteUid: string) => void;
+  onSelectNote?: (noteUid: string, anchorRect?: PopoverAnchorRect) => void;
   rendererFactory?: ScoreRendererFactory;
 }
 
 /**
- * Renders the MusicXML score canvas via OSMD paired with the left-edge MarginRiskGutter,
- * anchor & purple Diff indicators, OSMD click hit-testing, active measure highlights, playback cursor sync, and scroll support.
+ * Renders the MusicXML score canvas via OSMD paired with the horizontal/vertical MarginRiskGutter,
+ * anchor & purple Diff indicators, OSMD click hit-testing, continuous horizontal auto-scroll with manual pause, and playback cursor sync.
  */
 export function ScoreViewer({
   xmlString,
+  scoreDoc = null,
   noteEvents = [],
   measureRisks = [],
   anchoredNotes = [],
@@ -702,6 +763,9 @@ export function ScoreViewer({
   selectedSliceId = null,
   selectedNoteUid = null,
   cursorTarget = null,
+  playbackFrame = null,
+  layoutMode = "horizontal",
+  onLayoutModeChange,
   onSelectMeasure,
   onSelectNote,
   rendererFactory = createOsmdScoreRenderer,
@@ -710,9 +774,37 @@ export function ScoreViewer({
   const osmdContainerRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<ScoreRendererHandle | null>(null);
   const lastScrolledMeasureRef = useRef<number | null>(null);
+  const programmaticScrollUntilRef = useRef<number>(0);
+
   const [renderError, setRenderError] = useState<string | null>(null);
   const [measureGeometry, setMeasureGeometry] = useState<MeasureGeometry[]>([]);
   const [isRendered, setIsRendered] = useState<boolean>(false);
+  const [manualScrollPaused, setManualScrollPaused] = useState<boolean>(false);
+
+  // Build per-measure [startSec, endSec] lookup for smooth intra-measure continuous horizontal scrolling
+  const measureTimeBounds = useRef<Map<number, { startSec: number; endSec: number }>>(new Map());
+  useEffect(() => {
+    const map = new Map<number, { startSec: number; endSec: number }>();
+    if (scoreDoc) {
+      for (const ev of scoreDoc.noteEvents) {
+        const end = ev.onsetSec + Math.max(0.05, ev.durationSec);
+        const cur = map.get(ev.measureIndex);
+        if (!cur) {
+          map.set(ev.measureIndex, { startSec: ev.onsetSec, endSec: end });
+        } else {
+          cur.startSec = Math.min(cur.startSec, ev.onsetSec);
+          cur.endSec = Math.max(cur.endSec, end);
+        }
+      }
+    }
+    measureTimeBounds.current = map;
+  }, [scoreDoc]);
+
+  useEffect(() => {
+    if (!playbackFrame || playbackFrame.state === "stopped") {
+      setManualScrollPaused(false);
+    }
+  }, [playbackFrame?.state]);
 
   useEffect(() => {
     const container = osmdContainerRef.current;
@@ -735,7 +827,7 @@ export function ScoreViewer({
         if (!rendererRef.current) {
           rendererRef.current = rendererFactory(container);
         }
-        const info = await rendererRef.current.render(xmlString);
+        const info = await rendererRef.current.render(xmlString, { layoutMode });
         if (!cancelled) {
           setMeasureGeometry(info.measureGeometry);
           setIsRendered(true);
@@ -752,7 +844,7 @@ export function ScoreViewer({
     return () => {
       cancelled = true;
     };
-  }, [xmlString, rendererFactory]);
+  }, [xmlString, layoutMode, rendererFactory]);
 
   useEffect(() => {
     return () => {
@@ -786,11 +878,15 @@ export function ScoreViewer({
   useEffect(() => {
     if (!isRendered || !rendererRef.current) return;
     rendererRef.current.highlightMeasure(selectedMeasureIndex);
-    if (selectedMeasureIndex !== null && lastScrolledMeasureRef.current !== selectedMeasureIndex) {
+    if (
+      selectedMeasureIndex !== null &&
+      lastScrolledMeasureRef.current !== selectedMeasureIndex &&
+      playbackFrame?.state !== "playing"
+    ) {
       lastScrolledMeasureRef.current = selectedMeasureIndex;
       rendererRef.current.scrollToMeasure(selectedMeasureIndex, scrollContainerRef.current);
     }
-  }, [isRendered, selectedMeasureIndex]);
+  }, [isRendered, selectedMeasureIndex, playbackFrame?.state]);
 
   const handleSurfaceClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!onSelectNote || !rendererRef.current?.hitTestNoteAtClientPoint) return;
@@ -798,7 +894,11 @@ export function ScoreViewer({
     if (!hit) return;
     const matched = matchHitToNoteEvent(hit, noteEvents);
     if (matched) {
-      onSelectNote(matched.noteUid);
+      onSelectNote(matched.noteUid, {
+        left: event.clientX,
+        top: event.clientY,
+        height: 18,
+      });
     }
   };
 
@@ -807,13 +907,58 @@ export function ScoreViewer({
     rendererRef.current.syncCursor?.(cursorTarget ?? null);
   }, [isRendered, cursorTarget]);
 
+  // Continuous smooth horizontal scroll tracking during playback (~30% from left edge)
+  useEffect(() => {
+    if (
+      !isRendered ||
+      layoutMode !== "horizontal" ||
+      !playbackFrame ||
+      playbackFrame.state !== "playing" ||
+      manualScrollPaused
+    ) {
+      return;
+    }
+    const scroller = scrollContainerRef.current;
+    if (!scroller) return;
+
+    let targetX: number | null = rendererRef.current?.getCursorOffsetX?.() ?? null;
+
+    if (cursorTarget) {
+      const geo = measureGeometry.find((g) => g.measureIndex === cursorTarget.measureIndex);
+      const bounds = measureTimeBounds.current.get(cursorTarget.measureIndex);
+      if (geo && geo.left !== undefined && geo.width !== undefined && geo.width > 0 && bounds) {
+        const span = Math.max(0.1, bounds.endSec - bounds.startSec);
+        const ratio = Math.max(0, Math.min(1, (playbackFrame.scoreSec - bounds.startSec) / span));
+        const interpX = geo.left + ratio * geo.width;
+        targetX = targetX !== null ? targetX * 0.35 + interpX * 0.65 : interpX;
+      }
+    }
+
+    if (targetX === null) return;
+    const desiredScrollLeft = Math.max(0, targetX - scroller.clientWidth * 0.3);
+    programmaticScrollUntilRef.current = Date.now() + 80;
+    scroller.scrollLeft = desiredScrollLeft;
+  }, [isRendered, layoutMode, playbackFrame, manualScrollPaused, cursorTarget, measureGeometry]);
+
+  const markManualScroll = () => {
+    if (layoutMode === "horizontal" && playbackFrame?.state === "playing") {
+      setManualScrollPaused(true);
+    }
+  };
+
+  const handleContainerScroll = () => {
+    if (Date.now() <= programmaticScrollUntilRef.current) return;
+    markManualScroll();
+  };
+
   if (!xmlString) {
     return (
       <div
         data-testid="score-viewer"
-        className="flex min-h-80 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500"
+        data-layout-mode={layoutMode}
+        className="flex h-full min-h-60 flex-1 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500"
       >
-        Upload a <code>.musicxml</code>, <code>.xml</code>, or <code>.mxl</code> file to deduce and preview piano fingerings.
+        Upload a <code>.musicxml</code>, <code>.xml</code>, or <code>.mxl</code> file to deduce, scroll, and simulate two-hand piano fingerings.
       </div>
     );
   }
@@ -821,12 +966,13 @@ export function ScoreViewer({
   return (
     <div
       data-testid="score-viewer"
+      data-layout-mode={layoutMode}
       data-active-measure={selectedMeasureIndex !== null ? String(selectedMeasureIndex) : undefined}
       data-selected-slice={selectedSliceId ?? undefined}
       data-selected-note={selectedNoteUid ?? undefined}
-      className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
+      className="flex min-h-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white p-3 shadow-sm"
     >
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2 text-xs">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1.5 text-xs">
         <div className="flex flex-wrap items-center gap-2 text-slate-600">
           <span className="font-semibold text-slate-800">Score Canvas</span>
           <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800">
@@ -844,22 +990,70 @@ export function ScoreViewer({
           <span className="text-[11px] text-slate-400">Click any notehead to edit fingering</span>
         </div>
 
-        {selectedMeasureIndex !== null && (
-          <span
-            data-testid="active-measure-badge"
-            className="rounded-full border border-blue-200 bg-blue-50 px-2.5 py-0.5 font-semibold text-blue-700"
-          >
-            Active: m.{selectedMeasureIndex + 1}
-          </span>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {manualScrollPaused && playbackFrame?.state === "playing" && (
+            <button
+              type="button"
+              data-testid="recenter-cursor-btn"
+              onClick={() => setManualScrollPaused(false)}
+              className="rounded-full border border-blue-300 bg-blue-600 px-2.5 py-0.5 text-[11px] font-semibold text-white shadow-xs hover:bg-blue-700"
+            >
+              回到游标 · Recenter
+            </button>
+          )}
+
+          {onLayoutModeChange && (
+            <div
+              className="inline-flex rounded-md border border-slate-300 bg-slate-100 p-0.5 text-[11px] font-medium"
+              role="group"
+              aria-label="Score layout mode"
+            >
+              <button
+                type="button"
+                data-testid="layout-horizontal-btn"
+                aria-pressed={layoutMode === "horizontal"}
+                onClick={() => onLayoutModeChange("horizontal")}
+                className={`rounded px-2 py-0.5 transition ${
+                  layoutMode === "horizontal"
+                    ? "bg-white text-slate-900 shadow-xs"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                横向卷轴
+              </button>
+              <button
+                type="button"
+                data-testid="layout-page-btn"
+                aria-pressed={layoutMode === "page"}
+                onClick={() => onLayoutModeChange("page")}
+                className={`rounded px-2 py-0.5 transition ${
+                  layoutMode === "page"
+                    ? "bg-white text-slate-900 shadow-xs"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                多行分页
+              </button>
+            </div>
+          )}
+
+          {selectedMeasureIndex !== null && (
+            <span
+              data-testid="active-measure-badge"
+              className="rounded-full border border-blue-200 bg-blue-50 px-2.5 py-0.5 font-semibold text-blue-700"
+            >
+              Active: m.{selectedMeasureIndex + 1}
+            </span>
+          )}
+        </div>
       </div>
 
       {anchoredNotes.length > 0 && (
         <div
           data-testid="anchor-indicators"
-          className="mb-3 flex flex-wrap items-center gap-1.5 rounded-lg border border-red-100 bg-red-50/50 px-3 py-2 text-xs"
+          className="mb-2 flex items-center gap-1.5 overflow-x-auto rounded-lg border border-red-100 bg-red-50/50 px-2.5 py-1 text-xs"
         >
-          <span className="font-semibold text-red-700">
+          <span className="shrink-0 font-semibold text-red-700">
             Anchors ({anchoredNotes.length}):
           </span>
           {anchoredNotes.map((anchor) => (
@@ -874,7 +1068,7 @@ export function ScoreViewer({
                   onSelectMeasure?.(anchor.measureIndex);
                 }
               }}
-              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition ${
+              className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition ${
                 anchor.isConflict
                   ? "border-red-400 bg-red-100 text-red-800"
                   : "border-red-200 bg-white text-red-700 hover:bg-red-50"
@@ -890,59 +1084,52 @@ export function ScoreViewer({
         </div>
       )}
 
-      {diffNotes.length > 0 && (
-        <div
-          data-testid="diff-indicators"
-          className="mb-3 flex flex-wrap items-center gap-1.5 rounded-lg border border-violet-200 bg-violet-50/70 px-3 py-2 text-xs"
-        >
-          <span className="rounded bg-violet-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
-            Diff
-          </span>
-          <span className="font-semibold text-violet-900">
-            Changed ({diffNotes.length}):
-          </span>
-          {diffNotes.map((d) => (
-            <button
-              key={d.noteUid}
-              type="button"
-              data-diff-note-uid={d.noteUid}
-              onClick={() => onSelectNote?.(d.noteUid)}
-              className="inline-flex items-center gap-1 rounded-full border border-violet-300 bg-white px-2 py-0.5 text-[11px] font-medium text-violet-800 hover:bg-violet-100"
-            >
-              <span>
-                m.{d.measureIndex + 1} {d.pitchLabel} ({d.hand}): {d.before ?? "—"} → {d.after ?? "—"}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
-
       {renderError && (
-        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           Render error: {renderError}
         </div>
       )}
 
-      <div className="flex items-start gap-2.5">
-        {measureRisks.length > 0 && (
-          <MarginRiskGutter
-            measures={measureRisks}
-            selectedMeasureIndex={selectedMeasureIndex}
-            measureGeometry={measureGeometry}
-            onSelectMeasure={(m) => onSelectMeasure?.(m)}
-          />
+      <div className="flex min-h-0 flex-1 items-stretch gap-2">
+        {layoutMode === "page" && measureRisks.length > 0 && (
+          <div className="max-h-full overflow-y-auto py-1">
+            <MarginRiskGutter
+              measures={measureRisks}
+              selectedMeasureIndex={selectedMeasureIndex}
+              measureGeometry={measureGeometry}
+              orientation="vertical"
+              onSelectMeasure={(m) => onSelectMeasure?.(m)}
+            />
+          </div>
         )}
 
         <div
           ref={scrollContainerRef}
           data-testid="score-scroll-container"
-          className="relative max-h-[75vh] min-w-0 flex-1 overflow-auto rounded-lg border border-slate-100"
+          onWheel={markManualScroll}
+          onPointerDown={markManualScroll}
+          onScroll={handleContainerScroll}
+          className={`relative min-h-0 min-w-0 flex-1 rounded-lg border border-slate-100 ${
+            layoutMode === "horizontal" ? "overflow-x-auto overflow-y-auto" : "overflow-auto"
+          }`}
         >
+          {layoutMode === "horizontal" && measureRisks.length > 0 && (
+            <div className="sticky top-0 z-10 border-b border-slate-100 bg-white/90 px-2 py-1 backdrop-blur-xs">
+              <MarginRiskGutter
+                measures={measureRisks}
+                selectedMeasureIndex={selectedMeasureIndex}
+                measureGeometry={measureGeometry}
+                orientation="horizontal"
+                onSelectMeasure={(m) => onSelectMeasure?.(m)}
+              />
+            </div>
+          )}
+
           <div
             ref={osmdContainerRef}
             data-testid="osmd-canvas-surface"
             onClick={handleSurfaceClick}
-            className="w-full cursor-pointer"
+            className={layoutMode === "horizontal" ? "min-w-full cursor-pointer" : "w-full cursor-pointer"}
           />
         </div>
       </div>

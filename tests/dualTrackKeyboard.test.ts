@@ -9,7 +9,7 @@ import { createSolverClient, type WorkerLike } from "../src/workers/solverClient
 import type { WorkerRequest, WorkerResponse } from "../src/workers/protocol";
 import App from "../src/App";
 import { projectDualTrackState } from "../src/components/dualTrackModel";
-import { DualTrackKeyboard } from "../src/components/DualTrackKeyboard";
+import { UnifiedPiano88 } from "../src/components/UnifiedPiano88";
 
 const { DOMParser } = new JSDOM("").window;
 
@@ -190,8 +190,8 @@ describe("dualTrackModel", () => {
   });
 });
 
-describe("DualTrackKeyboard component", () => {
-  it("renders separate Right Hand above Left Hand tracks with non-overlapping 3-layer SVG (TransitionCue, HandPosition, active & held badges)", () => {
+describe("UnifiedPiano88 component", () => {
+  it("renders all 88 physical keys (A0..C8), dual overhead HandPosition/TransitionCue lanes, and translucent 2D LH/RH hands", () => {
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="4.0">
   <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
@@ -224,7 +224,7 @@ describe("DualTrackKeyboard component", () => {
     )!;
 
     const html = renderToStaticMarkup(
-      createElement(DualTrackKeyboard, {
+      createElement(UnifiedPiano88, {
         scoreDoc,
         solveResult,
         selectedSliceId: f4Slice.sliceId,
@@ -234,44 +234,29 @@ describe("DualTrackKeyboard component", () => {
     const dom = new JSDOM(html);
     const doc = dom.window.document;
 
-    const rhTrack = doc.querySelector('[data-testid="keyboard-track-RH"]');
-    const lhTrack = doc.querySelector('[data-testid="keyboard-track-LH"]');
-    expect(rhTrack).not.toBeNull();
-    expect(lhTrack).not.toBeNull();
+    // Physical 88 keys: 52 white + 36 black = 88
+    const allKeys = doc.querySelectorAll('[data-testid^="piano-key-"]');
+    expect(allKeys).toHaveLength(88);
+    expect(doc.querySelector('[data-midi="21"]')).not.toBeNull();
+    expect(doc.querySelector('[data-midi="108"]')).not.toBeNull();
 
-    // Right Hand appears before Left Hand in vertical DOM order
-    const allTracks = Array.from(doc.querySelectorAll('[data-testid^="keyboard-track-"]'));
-    expect(allTracks.map((el) => el.getAttribute("data-testid"))).toEqual([
-      "keyboard-track-RH",
-      "keyboard-track-LH",
-    ]);
+    // Overhead RH and LH lanes + TransitionCue badge
+    const rhLane = doc.querySelector('[data-testid="overhead-lane-RH"]');
+    const lhLane = doc.querySelector('[data-testid="overhead-lane-LH"]');
+    expect(rhLane?.textContent).toContain("Thumb-under");
+    expect(lhLane).not.toBeNull();
 
-    // RH track has all 3 non-overlapping layers + Thumb-under cue + active finger 1
-    const rhCueLayer = rhTrack!.querySelector('[data-layer="transition-cue"]');
-    const rhPosLayer = rhTrack!.querySelector('[data-layer="hand-position"]');
-    const rhKeysLayer = rhTrack!.querySelector('[data-layer="keyboard-keys"]');
-    expect(rhCueLayer?.textContent).toContain("Thumb-under");
-    expect(rhPosLayer?.querySelector("rect")).not.toBeNull();
-    expect(rhKeysLayer?.querySelectorAll('[data-key-state="active"]')).toHaveLength(1);
-
-    // Check strictly disjoint Y-coordinates across the 3 layers on RH
-    const cueTextY = Number(rhCueLayer!.querySelector("text")!.getAttribute("y"));
-    const posRectY = Number(rhPosLayer!.querySelector("rect")!.getAttribute("y"));
-    const posTextY = Number(rhPosLayer!.querySelector("text")!.getAttribute("y"));
-    const firstKeyY = Number(rhKeysLayer!.querySelector("rect")!.getAttribute("y"));
-    expect(cueTextY).toBeLessThan(posRectY);
-    expect(posTextY).toBeLessThan(firstKeyY);
-
-    // LH track shows dimmed HeldFinger sustain badge for C3 across beat 4
-    const lhKeysLayer = lhTrack!.querySelector('[data-layer="keyboard-keys"]');
-    const lhHeldKeys = lhKeysLayer!.querySelectorAll('[data-key-state="held"]');
-    expect(lhHeldKeys).toHaveLength(1);
-    expect(lhHeldKeys[0].textContent).toContain(
-      String(solveResult.fingerByNoteUid[scoreDoc.onsetSlices[0].notes[0].noteUid])
-    );
+    // Both 2D hand overlays present; RH shows thumb-under crossing style
+    const rhOverlay = doc.querySelector('[data-testid="hand-overlay-RH"]')!;
+    const lhOverlay = doc.querySelector('[data-testid="hand-overlay-LH"]')!;
+    expect(rhOverlay.getAttribute("data-crossing-style")).toBe("thumb-under");
+    expect(rhOverlay.querySelector('[data-testid="hand-RH-finger-1"]')?.getAttribute("data-layer-offset")).toBe("-1");
+    expect(lhOverlay.querySelector('[data-midi="48"]')).toBeNull(); // key lives on physical key layer
+    expect(doc.querySelector('[data-midi="48"]')?.getAttribute("data-key-lh")).toBe("held");
+    expect(doc.querySelector('[data-midi="65"]')?.getAttribute("data-key-rh")).toBe("active");
   });
 
-  it("steps between OnsetSlices via Prev/Next controls with boundary disabling and immediate track updates", async () => {
+  it("steps between OnsetSlices via Prev/Next controls and auditions clicked keys", async () => {
     const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
       url: "http://localhost/",
     });
@@ -314,14 +299,16 @@ describe("DualTrackKeyboard component", () => {
 
       const scoreDoc = parseMusicXml(xml, { DOMParser });
       const solveResult = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+      const auditioned: number[] = [];
 
       function Harness() {
         const [sliceId, setSliceId] = useState<string | null>(scoreDoc.onsetSlices[0].sliceId);
-        return createElement(DualTrackKeyboard, {
+        return createElement(UnifiedPiano88, {
           scoreDoc,
           solveResult,
           selectedSliceId: sliceId,
           onSelectSlice: setSliceId,
+          onAuditionMidi: (m) => auditioned.push(m),
         });
       }
 
@@ -332,45 +319,36 @@ describe("DualTrackKeyboard component", () => {
         root.render(createElement(Harness));
       });
 
-      const getPrevBtn = () =>
-        Array.from(container.querySelectorAll("button")).find((b) =>
-          b.textContent?.includes("Prev slice")
-        )!;
-      const getNextBtn = () =>
-        Array.from(container.querySelectorAll("button")).find((b) =>
-          b.textContent?.includes("Next slice")
-        )!;
+      const prevBtn = container.querySelector('[data-testid="slice-prev-btn"]') as HTMLButtonElement;
+      const nextBtn = container.querySelector('[data-testid="slice-next-btn"]') as HTMLButtonElement;
 
-      // Initially at slice 0 (LH G2 + simultaneous RH C5): Prev disabled, Next enabled
-      expect(getPrevBtn().disabled).toBe(true);
-      expect(getNextBtn().disabled).toBe(false);
-      expect(container.textContent).toContain(`Slice 1 / ${scoreDoc.onsetSlices.length}`);
+      expect(prevBtn.disabled).toBe(true);
+      expect(nextBtn.disabled).toBe(false);
+      expect(container.textContent).toContain(`Slice 1/${scoreDoc.onsetSlices.length}`);
 
-      // Step forward through all remaining slices and confirm cross-over cue appears when descending
       let sawCrossOver = false;
       for (let i = 1; i < scoreDoc.onsetSlices.length; i++) {
         await act(async () => {
-          getNextBtn().click();
+          nextBtn.click();
         });
-        expect(container.textContent).toContain(`Slice ${i + 1} / ${scoreDoc.onsetSlices.length}`);
-        expect(getPrevBtn().disabled).toBe(false);
-        const rhCue = container.querySelector('[data-testid="keyboard-track-RH"] [data-layer="transition-cue"]')?.textContent ?? "";
-        if (rhCue.includes("Cross-over")) {
+        expect(container.textContent).toContain(`Slice ${i + 1}/${scoreDoc.onsetSlices.length}`);
+        expect(prevBtn.disabled).toBe(false);
+        const rhOverlay = container.querySelector('[data-testid="hand-overlay-RH"]');
+        if (rhOverlay?.getAttribute("data-crossing-style") === "cross-over") {
           sawCrossOver = true;
         }
       }
 
       expect(sawCrossOver).toBe(true);
-      expect(getNextBtn().disabled).toBe(true);
+      expect(nextBtn.disabled).toBe(true);
 
-      // Step backward once
+      // Click middle C (MIDI 60) -> triggers key audition
       await act(async () => {
-        getPrevBtn().click();
+        container.querySelector('[data-testid="piano-key-60"]')!.dispatchEvent(
+          new dom.window.MouseEvent("click", { bubbles: true })
+        );
       });
-      expect(container.textContent).toContain(
-        `Slice ${scoreDoc.onsetSlices.length - 1} / ${scoreDoc.onsetSlices.length}`
-      );
-      expect(getNextBtn().disabled).toBe(false);
+      expect(auditioned).toEqual([60]);
 
       await act(async () => {
         root.unmount();
@@ -383,8 +361,8 @@ describe("DualTrackKeyboard component", () => {
   });
 });
 
-describe("App DualTrackKeyboard integration", () => {
-  it("mounts DualTrackKeyboard in bottom dock defaulting to slice 1 and steps slices interactively", async () => {
+describe("App UnifiedPiano88 bottom-dock integration", () => {
+  it("mounts UnifiedPiano88 in bottom dock defaulting to slice 1 and steps slices interactively", async () => {
     const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
       url: "http://localhost/",
     });
@@ -466,23 +444,17 @@ describe("App DualTrackKeyboard integration", () => {
         await new Promise((r) => setTimeout(r, 10));
       });
 
-      const dock = container.querySelector('[data-testid="dual-track-keyboard"]');
+      const dock = container.querySelector('[data-testid="unified-piano-88"]')!;
       expect(dock).not.toBeNull();
-      expect(dock!.textContent).toContain("Slice 1 / 3");
-      expect(dock!.querySelector('[data-testid="keyboard-track-RH"]')).not.toBeNull();
-      expect(dock!.querySelector('[data-testid="keyboard-track-LH"]')).not.toBeNull();
+      expect(dock.textContent).toContain("Slice 1/3");
+      expect(dock.querySelector('[data-testid="hand-overlay-RH"]')).not.toBeNull();
+      expect(dock.querySelector('[data-testid="hand-overlay-LH"]')).not.toBeNull();
 
-      // Beat 1 (slice-0 LH C3 + slice-1 RH C4): RH C4 active, LH C3 active
-      expect(
-        dock!.querySelector('[data-testid="keyboard-track-RH"] [data-midi="60"]')?.getAttribute(
-          "data-key-state"
-        )
-      ).toBe("active");
+      // Beat 1: RH C4 active, LH C3 active
+      expect(dock.querySelector('[data-midi="60"]')?.getAttribute("data-key-rh")).toBe("active");
+      expect(dock.querySelector('[data-midi="48"]')?.getAttribute("data-key-lh")).toBe("active");
 
-      const nextBtn = Array.from(dock!.querySelectorAll("button")).find((b) =>
-        b.textContent?.includes("Next slice")
-      )!;
-      // Step to slice-2 (RH E4 at beat 2; LH C3 held)
+      const nextBtn = dock.querySelector('[data-testid="slice-next-btn"]') as HTMLButtonElement;
       await act(async () => {
         nextBtn.click();
       });
@@ -490,17 +462,9 @@ describe("App DualTrackKeyboard integration", () => {
         nextBtn.click();
       });
 
-      expect(dock!.textContent).toContain("Slice 3 / 3");
-      expect(
-        dock!.querySelector('[data-testid="keyboard-track-RH"] [data-midi="64"]')?.getAttribute(
-          "data-key-state"
-        )
-      ).toBe("active");
-      expect(
-        dock!.querySelector('[data-testid="keyboard-track-LH"] [data-midi="48"]')?.getAttribute(
-          "data-key-state"
-        )
-      ).toBe("held");
+      expect(dock.textContent).toContain("Slice 3/3");
+      expect(dock.querySelector('[data-midi="64"]')?.getAttribute("data-key-rh")).toBe("active");
+      expect(dock.querySelector('[data-midi="48"]')?.getAttribute("data-key-lh")).toBe("held");
 
       await act(async () => {
         root.unmount();

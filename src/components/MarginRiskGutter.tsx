@@ -15,12 +15,15 @@ export interface MeasureGeometry {
   measureIndex: number;
   top: number;
   height: number;
+  left?: number;
+  width?: number;
 }
 
 export interface MarginRiskGutterProps {
   measures: MeasureRiskSummary[];
   selectedMeasureIndex: number | null;
   measureGeometry?: MeasureGeometry[];
+  orientation?: "vertical" | "horizontal";
   onSelectMeasure: (measureIndex: number) => void;
 }
 
@@ -166,15 +169,18 @@ export function MarginRiskGutter({
   measures,
   selectedMeasureIndex,
   measureGeometry = [],
+  orientation = "vertical",
   onSelectMeasure,
 }: MarginRiskGutterProps) {
   if (measures.length === 0) {
     return null;
   }
 
-  const alignedBars = computeAlignedBars(measures, measureGeometry);
-
-  const renderBarButton = (summary: MeasureRiskSummary, style?: { top: number; height: number }) => {
+  const renderBarButton = (
+    summary: MeasureRiskSummary,
+    style?: { top?: number; height?: number; left?: number; width?: number },
+    isHorizontal = false
+  ) => {
     const isSelected = selectedMeasureIndex === summary.measureIndex;
     const titleParts = [`Measure ${summary.measureIndex + 1}`];
     if (summary.warningCount > 0) {
@@ -182,6 +188,12 @@ export function MarginRiskGutter({
     } else {
       titleParts.push("No risk warnings");
     }
+
+    const posStyle: React.CSSProperties | undefined = style
+      ? isHorizontal
+        ? { position: "absolute", left: `${style.left ?? 0}px`, width: `${style.width ?? 24}px`, top: 0, bottom: 0 }
+        : { position: "absolute", top: `${style.top ?? 0}px`, height: `${style.height ?? 16}px`, left: 0, right: 0 }
+      : undefined;
 
     return (
       <button
@@ -195,27 +207,79 @@ export function MarginRiskGutter({
         }`}
         title={titleParts.join(" · ")}
         onClick={() => onSelectMeasure(summary.measureIndex)}
-        style={
-          style
-            ? { position: "absolute", top: `${style.top}px`, height: `${style.height}px`, left: 0, right: 0 }
-            : undefined
-        }
-        className={`flex w-5 items-center justify-center rounded text-[10px] font-bold transition focus:outline-none ${
+        style={posStyle}
+        className={`flex items-center justify-center rounded text-[10px] font-bold transition focus:outline-none ${
           BAR_STYLE[summary.highestSeverity]
-        } ${style ? "" : "min-h-6 flex-1 py-1"} ${
-          isSelected ? "ring-2 ring-blue-600 ring-offset-1" : ""
-        }`}
+        } ${
+          isHorizontal
+            ? style
+              ? "h-5"
+              : "h-5 min-w-6 flex-1 px-1"
+            : style
+              ? "w-5"
+              : "min-h-6 w-5 flex-1 py-1"
+        } ${isSelected ? "ring-2 ring-blue-600 ring-offset-1" : ""}`}
       >
         {summary.measureIndex + 1}
       </button>
     );
   };
 
+  if (orientation === "horizontal") {
+    const geoByMeasure = new Map(measureGeometry.map((g) => [g.measureIndex, g]));
+    const hasHorizontalGeo =
+      measureGeometry.length === measures.length &&
+      measures.every((m) => {
+        const g = geoByMeasure.get(m.measureIndex);
+        return Boolean(g && g.left !== undefined && g.width !== undefined && g.width > 0);
+      });
+
+    if (hasHorizontalGeo) {
+      const totalWidth = measures.reduce((max, m) => {
+        const g = geoByMeasure.get(m.measureIndex)!;
+        return Math.max(max, (g.left ?? 0) + (g.width ?? 0));
+      }, 240);
+
+      return (
+        <nav
+          data-testid="margin-risk-gutter"
+          data-orientation="horizontal"
+          aria-label="Measure risk strip"
+          className="relative h-5 shrink-0 select-none"
+          style={{ width: `${Math.ceil(totalWidth)}px` }}
+        >
+          {measures.map((summary) => {
+            const g = geoByMeasure.get(summary.measureIndex)!;
+            return renderBarButton(
+              summary,
+              { left: g.left ?? 0, width: Math.max(16, (g.width ?? 24) - 2) },
+              true
+            );
+          })}
+        </nav>
+      );
+    }
+
+    return (
+      <nav
+        data-testid="margin-risk-gutter"
+        data-orientation="horizontal"
+        aria-label="Measure risk strip"
+        className="flex h-5 w-full items-center gap-1 select-none"
+      >
+        {measures.map((summary) => renderBarButton(summary, undefined, true))}
+      </nav>
+    );
+  }
+
+  const alignedBars = computeAlignedBars(measures, measureGeometry);
+
   if (alignedBars) {
     const maxBottom = alignedBars.reduce((acc, b) => Math.max(acc, b.top + b.height), 120);
     return (
       <nav
         data-testid="margin-risk-gutter"
+        data-orientation="vertical"
         aria-label="Measure risk gutter"
         className="relative w-5 shrink-0 select-none"
         style={{ minHeight: `${Math.ceil(maxBottom)}px` }}
@@ -228,6 +292,7 @@ export function MarginRiskGutter({
   return (
     <nav
       data-testid="margin-risk-gutter"
+      data-orientation="vertical"
       aria-label="Measure risk gutter"
       className="flex w-5 shrink-0 flex-col gap-1 select-none"
     >

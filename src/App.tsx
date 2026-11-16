@@ -16,11 +16,13 @@ import { applyAnchorOverridesToSlices, localResolveFingering } from "./solver/lo
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
 import { computeNextAnchorState, useStudioStore } from "./store/useStudioStore";
 import { buildMeasureRiskSummaries } from "./components/MarginRiskGutter";
-import { InspectorPanel } from "./components/InspectorPanel";
-import { DualTrackKeyboard } from "./components/DualTrackKeyboard";
+import { NoteAnchorPopover, type PopoverAnchorRect } from "./components/NoteAnchorPopover";
+import { UnifiedPiano88 } from "./components/UnifiedPiano88";
+import { sortWarningsForNavigation } from "./components/warningUtils";
 import {
   ScoreViewer,
   type AnchorMarkerInfo,
+  type ScoreLayoutMode,
   type ScoreRendererFactory,
 } from "./components/ScoreViewer";
 import { AudioControls } from "./components/AudioControls";
@@ -28,11 +30,13 @@ import {
   createPianoAudioEngine,
   type AudioEngineStatus,
   type PianoAudioDeps,
+  type PianoAudioEngine,
 } from "./audio/pianoAudio";
 import {
   createPlaybackEngine,
   type CursorSyncTarget,
   type PlaybackEngine,
+  type PlaybackFrame,
   type PlaybackSpeed,
   type PlaybackState,
 } from "./audio/playbackEngine";
@@ -60,12 +64,19 @@ export default function App({
   audioDeps,
 }: AppProps) {
   const solverClientRef = useRef<SolverClient | null>(null);
+  const audioEngineRef = useRef<PianoAudioEngine | null>(null);
   const playbackEngineRef = useRef<PlaybackEngine | null>(null);
   const [isResolving, setIsResolving] = useState<boolean>(false);
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
   const [playbackSpeed, setPlaybackSpeed] = useState<PlaybackSpeed>(1.0);
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
+  const [playbackFrame, setPlaybackFrame] = useState<PlaybackFrame | null>(null);
+  const [layoutMode, setLayoutMode] = useState<ScoreLayoutMode>("horizontal");
+  const [popoverOpen, setPopoverOpen] = useState<boolean>(false);
+  const [popoverAnchorRect, setPopoverAnchorRect] = useState<PopoverAnchorRect | null>(null);
+  const [diffDropdownOpen, setDiffDropdownOpen] = useState<boolean>(false);
+  const [warningNavIndex, setWarningNavIndex] = useState<number>(-1);
 
   const fileName = useStudioStore((s) => s.fileName);
   const scoreTitle = useStudioStore((s) => s.scoreTitle);
@@ -114,6 +125,7 @@ export default function App({
         audioDeps?.onStatusChange?.(nextStatus);
       },
     });
+    audioEngineRef.current = audioEngine;
     const engine = createPlaybackEngine({
       audioEngine,
       requestAnimationFrame: audioDeps?.requestAnimationFrame,
@@ -123,11 +135,13 @@ export default function App({
         useStudioStore.getState().selectSlice(slice.sliceId);
       },
       onCursorSync: setCursorTarget,
+      onFrame: setPlaybackFrame,
     });
     playbackEngineRef.current = engine;
     return () => {
       engine.dispose();
       playbackEngineRef.current = null;
+      audioEngineRef.current = null;
     };
   }, [audioDeps]);
 
@@ -392,8 +406,42 @@ export default function App({
     return markers;
   }, [noteEvents, solveResult, anchors, removedRawAnchorUids, ignoreExistingFingerings]);
 
+  const sortedWarnings = useMemo(
+    () => sortWarningsForNavigation(solveResult?.warnings ?? [], onsetSlices),
+    [solveResult?.warnings, onsetSlices]
+  );
+  const dangerCount = useMemo(
+    () => sortedWarnings.filter((w) => w.severity === "danger").length,
+    [sortedWarnings]
+  );
+  const warnCount = sortedWarnings.length - dangerCount;
+
+  const selectedNote = useMemo(() => {
+    if (!selectedNoteUid) return null;
+    return noteEvents.find((n) => n.noteUid === selectedNoteUid) ?? null;
+  }, [selectedNoteUid, noteEvents]);
+
+  useEffect(() => {
+    setWarningNavIndex(-1);
+  }, [solveResult]);
+
+  useEffect(() => {
+    if (lastDiff.length === 0) {
+      setDiffDropdownOpen(false);
+    }
+  }, [lastDiff]);
+
   const handleSelectWarning = (cue: TransitionCue) => {
     useStudioStore.getState().selectWarning(cue);
+    setPopoverOpen(false);
+  };
+
+  const handleStepWarning = (delta: -1 | 1) => {
+    if (sortedWarnings.length === 0) return;
+    const base = warningNavIndex >= 0 ? warningNavIndex : delta > 0 ? -1 : 0;
+    const nextIdx = (base + delta + sortedWarnings.length) % sortedWarnings.length;
+    setWarningNavIndex(nextIdx);
+    handleSelectWarning(sortedWarnings[nextIdx]);
   };
 
   const handleSelectMeasure = (measureIndex: number) => {
@@ -401,26 +449,65 @@ export default function App({
     useStudioStore
       .getState()
       .selectMeasure(measureIndex, summary?.firstWarningSliceId ?? summary?.firstSliceId ?? null);
+    setPopoverOpen(false);
   };
 
   const handleSelectSlice = (sliceId: string) => {
     useStudioStore.getState().selectSlice(sliceId);
   };
 
-  const handleSelectNote = (noteUid: string) => {
+  const handleSelectNote = (noteUid: string, anchorRect?: PopoverAnchorRect) => {
     useStudioStore.getState().selectNote(noteUid);
+    setPopoverAnchorRect(anchorRect ?? null);
+    setPopoverOpen(true);
   };
+
+  const handleAuditionMidi = (midi: number) => {
+    const audio = audioEngineRef.current;
+    if (!audio) return;
+    void audio.prepare().then(() => {
+      const ctx = audio.getAudioContext();
+      audio.triggerNote({
+        midi,
+        time: ctx.currentTime,
+        duration: 0.35,
+      });
+    });
+  };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "Escape") {
+        setPopoverOpen(false);
+        setDiffDropdownOpen(false);
+        return;
+      }
+      if (selectedNote && !selectedNote.isTieStop && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (e.key >= "1" && e.key <= "5") {
+          const finger = Number(e.key) as Finger;
+          const mode = anchors[selectedNote.noteUid]?.mode ?? "phrase";
+          handleSetAnchor(selectedNote.noteUid, finger, mode);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedNote, anchors]);
 
   const canUndo = history.past.length > 0;
   const canRedo = history.future.length > 0;
 
   const handlePlay = () => {
     if (!scoreDoc || !playbackEngineRef.current) return;
+    setPopoverOpen(false);
     void playbackEngineRef.current.play(scoreDoc);
   };
 
   const handlePlayFromSlice = () => {
     if (!scoreDoc || !selectedSliceId || !playbackEngineRef.current) return;
+    setPopoverOpen(false);
     void playbackEngineRef.current.play(scoreDoc, { fromSliceId: selectedSliceId });
   };
 
@@ -438,15 +525,15 @@ export default function App({
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="border-b border-slate-200 bg-white px-6 py-4">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
+    <div className="flex h-screen flex-col overflow-hidden bg-slate-50 text-slate-900">
+      <header className="shrink-0 border-b border-slate-200 bg-white px-4 py-2.5">
+        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-lg font-semibold tracking-tight text-slate-900">
+            <h1 className="text-base font-semibold tracking-tight text-slate-900">
               MusicXML Auto-Fingering
             </h1>
-            <p className="text-xs text-slate-500">
-              100% browser-local Beam Search DP piano fingering &amp; lossless MusicXML / .mxl export
+            <p className="text-[11px] text-slate-500">
+              Browser-local Beam Search DP piano fingering &amp; real-time dual-hand rehearsal
             </p>
           </div>
 
@@ -618,9 +705,12 @@ export default function App({
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl space-y-4 px-6 py-6">
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs text-slate-600">
-          <div className="flex items-center gap-4">
+      <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-2 px-4 pt-2 pb-1">
+        <div
+          data-testid="top-status-warning-bar"
+          className="relative flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
+        >
+          <div className="flex flex-wrap items-center gap-3">
             <span>
               <strong>Status:</strong> {status}
             </span>
@@ -635,82 +725,174 @@ export default function App({
               </span>
             )}
             {solveResult && (
-              <>
-                <span>
-                  <strong>Transitions:</strong> {solveResult.transitionCues.length}
-                </span>
-                <span className={solveResult.warnings.length > 0 ? "text-red-600" : undefined}>
-                  <strong>Warnings:</strong> {solveResult.warnings.length}
-                </span>
-              </>
+              <span>
+                <strong>Transitions:</strong> {solveResult.transitionCues.length}
+              </span>
             )}
           </div>
-          <span className="text-slate-400">Zero backend calls · Web Worker DP</span>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {solveResult && (
+              <div
+                data-testid="compact-warning-bar"
+                className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px]"
+              >
+                <span className="font-semibold text-red-700">Danger {dangerCount}</span>
+                <span className="text-slate-300">·</span>
+                <span className="font-semibold text-amber-700">Warn {warnCount}</span>
+                {sortedWarnings.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      data-testid="warning-prev-btn"
+                      aria-label="Previous warning"
+                      onClick={() => handleStepWarning(-1)}
+                      className="ml-1 rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] font-bold text-slate-700 hover:bg-slate-100"
+                    >
+                      &lt;
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="warning-next-btn"
+                      aria-label="Next warning"
+                      onClick={() => handleStepWarning(1)}
+                      className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] font-bold text-slate-700 hover:bg-slate-100"
+                    >
+                      &gt;
+                    </button>
+                    {warningNavIndex >= 0 && sortedWarnings[warningNavIndex] && (
+                      <span
+                        data-testid="active-warning-label"
+                        className="max-w-52 truncate font-medium text-slate-700"
+                      >
+                        m.{sortedWarnings[warningNavIndex].measureIndex + 1}{" "}
+                        {sortedWarnings[warningNavIndex].label}
+                      </span>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {lastDiff.length > 0 && (
+              <div className="relative">
+                <button
+                  type="button"
+                  data-testid="diff-summary-pill"
+                  onClick={() => setDiffDropdownOpen((v) => !v)}
+                  className="inline-flex items-center gap-1 rounded-full border border-violet-300 bg-violet-50 px-2.5 py-0.5 text-[11px] font-semibold text-violet-800 hover:bg-violet-100"
+                >
+                  <span className="h-2 w-2 rounded-full bg-violet-600" />
+                  Updated {lastDiff.length} note{lastDiff.length === 1 ? "" : "s"}
+                </button>
+                {diffDropdownOpen && (
+                  <div
+                    data-testid="diff-dropdown"
+                    className="absolute right-0 top-7 z-40 max-h-56 w-64 overflow-y-auto rounded-lg border border-violet-200 bg-white p-2 shadow-lg"
+                  >
+                    <div className="mb-1 flex items-center justify-between text-[11px] font-semibold text-violet-900">
+                      <span>Before → After Diff</span>
+                      <button
+                        type="button"
+                        onClick={() => setDiffDropdownOpen(false)}
+                        className="text-slate-400 hover:text-slate-700"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div className="space-y-1">
+                      {lastDiff.map((d) => (
+                        <button
+                          key={d.noteUid}
+                          type="button"
+                          data-diff-note-uid={d.noteUid}
+                          onClick={() => {
+                            handleSelectNote(d.noteUid);
+                            setDiffDropdownOpen(false);
+                          }}
+                          className="flex w-full items-center justify-between rounded border border-violet-100 bg-violet-50/50 px-2 py-1 text-left text-[11px] text-violet-900 hover:bg-violet-100"
+                        >
+                          <span>
+                            m.{d.measureIndex + 1} {d.pitchLabel} ({d.hand})
+                          </span>
+                          <span className="font-bold">
+                            {d.before ?? "—"} → {d.after ?? "—"}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <span className="hidden text-slate-400 xl:inline">Zero backend · Web Worker DP</span>
+          </div>
         </div>
 
         {errorMsg && (
           <div
             role="alert"
-            className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+            className="shrink-0 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700"
           >
             <strong>Unable to load score:</strong> {errorMsg}
           </div>
         )}
 
+        {/* Top Pane: Continuous Scrolling Score Canvas + Inline Note Anchor Popover */}
         <div
-          data-testid="split-studio-workspace"
-          className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,13fr)_minmax(320px,7fr)]"
+          data-testid="top-score-pane"
+          className="relative flex min-h-0 flex-1 flex-col"
         >
-          <div className="min-w-0">
-            <ScoreViewer
-              xmlString={renderedXml}
-              noteEvents={noteEvents}
-              measureRisks={measureRisks}
-              anchoredNotes={anchoredNotes}
-              diffNotes={lastDiff}
-              selectedMeasureIndex={selectedMeasureIndex}
-              selectedSliceId={selectedSliceId}
-              selectedNoteUid={selectedNoteUid}
-              cursorTarget={cursorTarget}
-              onSelectMeasure={handleSelectMeasure}
-              onSelectNote={handleSelectNote}
-              rendererFactory={scoreRendererFactory}
-            />
-          </div>
-
-          <InspectorPanel
-            warnings={solveResult?.warnings ?? []}
-            onsetSlices={onsetSlices}
+          <ScoreViewer
+            xmlString={renderedXml}
+            scoreDoc={scoreDoc}
             noteEvents={noteEvents}
-            fingerByNoteUid={fingerByNoteUid}
-            handSpanProfile={handSpanProfile}
-            selectedSliceId={selectedSliceId}
+            measureRisks={measureRisks}
+            anchoredNotes={anchoredNotes}
+            diffNotes={lastDiff}
             selectedMeasureIndex={selectedMeasureIndex}
+            selectedSliceId={selectedSliceId}
             selectedNoteUid={selectedNoteUid}
-            anchors={anchors}
-            removedRawAnchorUids={removedRawAnchorUids}
-            lastDiff={lastDiff}
-            canUndo={canUndo}
-            canRedo={canRedo}
-            isResolving={isResolving}
-            ignoreExistingFingerings={ignoreExistingFingerings}
-            hasScore={Boolean(renderedXml)}
-            onSelectWarning={handleSelectWarning}
+            cursorTarget={cursorTarget}
+            playbackFrame={playbackFrame}
+            layoutMode={layoutMode}
+            onLayoutModeChange={setLayoutMode}
+            onSelectMeasure={handleSelectMeasure}
             onSelectNote={handleSelectNote}
-            onSetAnchor={handleSetAnchor}
-            onRemoveAnchor={handleRemoveAnchor}
-            onUndo={() => useStudioStore.getState().undo()}
-            onRedo={() => useStudioStore.getState().redo()}
+            rendererFactory={scoreRendererFactory}
           />
-        </div>
 
-        <DualTrackKeyboard
+          {popoverOpen && selectedNote && (
+            <NoteAnchorPopover
+              note={selectedNote}
+              fingerByNoteUid={fingerByNoteUid}
+              anchors={anchors}
+              removedRawAnchorUids={removedRawAnchorUids}
+              repairedAnchorUids={solveResult?.repairedAnchorUids ?? []}
+              ignoreExistingFingerings={ignoreExistingFingerings}
+              isResolving={isResolving}
+              anchorRect={popoverAnchorRect}
+              onSetAnchor={handleSetAnchor}
+              onRemoveAnchor={handleRemoveAnchor}
+              onPlayFromHere={handlePlayFromSlice}
+              onClose={() => setPopoverOpen(false)}
+            />
+          )}
+        </div>
+      </main>
+
+      {/* Bottom Pane: Full-Width 88-Key Physical Piano & Dual-Hand Posture Simulation */}
+      <div data-testid="bottom-piano-pane" className="shrink-0">
+        <UnifiedPiano88
           scoreDoc={scoreDoc}
           solveResult={solveResult}
           selectedSliceId={selectedSliceId}
+          playbackFrame={playbackFrame}
           onSelectSlice={handleSelectSlice}
+          onAuditionMidi={handleAuditionMidi}
         />
-      </main>
+      </div>
     </div>
   );
 }

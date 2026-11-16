@@ -613,9 +613,10 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     });
 
     const viewer = mountedContainer.querySelector('[data-testid="score-viewer"]') as HTMLElement;
-    const keyboard = mountedContainer.querySelector('[data-testid="dual-track-keyboard"]')!;
+    const piano = mountedContainer.querySelector('[data-testid="unified-piano-88"]')!;
     expect(viewer.dataset.activeMeasure).toBe("1");
-    expect(keyboard.textContent).toContain("Measure 2 · RH · Slice 3 / 4");
+    expect(piano.textContent).toContain("m.2 · RH");
+    expect(piano.textContent).toContain("Slice 3/4");
     expect(syncCursor).toHaveBeenLastCalledWith(
       expect.objectContaining({ measureIndex: 1, midis: [64] })
     );
@@ -628,8 +629,9 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
       for (const [, cb] of pending) cb(3100);
       await Promise.resolve();
     });
-    expect(keyboard.textContent).toContain("Measure 2 · RH · Slice 4 / 4");
-    expect(keyboard.textContent).toContain("Hand Position:");
+    expect(piano.textContent).toContain("m.2 · RH");
+    expect(piano.textContent).toContain("Slice 4/4");
+    expect(piano.querySelector('[data-testid="hand-overlay-RH"]')).not.toBeNull();
 
     // Press Stop -> stops playback and hides cursor
     const stopBtn = mountedContainer.querySelector('[data-testid="audio-stop-btn"]') as HTMLButtonElement;

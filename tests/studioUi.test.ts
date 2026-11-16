@@ -2,12 +2,12 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createElement, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { DEFAULT_HAND_SPAN_PROFILE, type OnsetSlice, type TransitionCue } from "../src/domain/types";
+import { type OnsetSlice, type TransitionCue } from "../src/domain/types";
 import {
   MarginRiskGutter,
   buildMeasureRiskSummaries,
 } from "../src/components/MarginRiskGutter";
-import { InspectorPanel } from "../src/components/InspectorPanel";
+import { sortWarningsForNavigation } from "../src/components/warningUtils";
 import {
   ScoreViewer,
   type AnchorMarkerInfo,
@@ -171,8 +171,8 @@ describe("Slice 1: MarginRiskGutter & measure risk aggregation", () => {
   });
 });
 
-describe("Slice 2: InspectorPanel warning & TransitionCue navigation", () => {
-  it("lists warn/danger cues ordered chronologically by measure and onset with metadata, and selects on click", () => {
+describe("Slice 2: Warning sorting for compact chronological navigation", () => {
+  it("lists warn/danger cues ordered chronologically by measure and onset for < > stepping", () => {
     const slices: OnsetSlice[] = [
       makeSlice("s-lh-early", "LH", 0, 2, 43, 5),
       makeSlice("s-rh-m1", "RH", 0, 4, 76),
@@ -180,7 +180,6 @@ describe("Slice 2: InspectorPanel warning & TransitionCue navigation", () => {
       makeSlice("s-lh-m2", "LH", 1, 10, 40),
     ];
 
-    // Intentionally unsorted (RH warnings before LH warnings, later measure before earlier)
     const cues: TransitionCue[] = [
       {
         sliceId: "s-rh-m2",
@@ -229,56 +228,14 @@ describe("Slice 2: InspectorPanel warning & TransitionCue navigation", () => {
       },
     ];
 
-    const onSelectWarning = vi.fn();
-    const container = mount(
-      createElement(InspectorPanel, {
-        warnings: cues,
-        onsetSlices: slices,
-        fingerByNoteUid: {
-          "n-s-lh-early": 5,
-          "n-s-rh-m1": 4,
-          "n-s-rh-m2": 5,
-          "n-s-lh-m2": 1,
-        },
-        handSpanProfile: DEFAULT_HAND_SPAN_PROFILE,
-        selectedSliceId: "s-rh-m1",
-        selectedMeasureIndex: 0,
-        ignoreExistingFingerings: false,
-        hasScore: true,
-        onSelectWarning,
-      })
-    );
-
-    const items = Array.from(container.querySelectorAll<HTMLButtonElement>("[data-warning-item]"));
-    // Info cue excluded; 4 warn/danger cues sorted by (measureIndex, onsetTick)
-    expect(items).toHaveLength(4);
-    expect(items.map((el) => el.dataset.sliceId)).toEqual([
+    const sorted = sortWarningsForNavigation(cues, slices);
+    expect(sorted).toHaveLength(4);
+    expect(sorted.map((el) => el.sliceId)).toEqual([
       "s-lh-early", // m.1 tick 2
       "s-rh-m1",    // m.1 tick 4
       "s-rh-m2",    // m.2 tick 8
       "s-lh-m2",    // m.2 tick 10
     ]);
-
-    // Check metadata rendered on items (1-based measure number, hand, severity, type/description, cost)
-    expect(items[0].textContent).toContain("m.1");
-    expect(items[0].textContent).toContain("LH");
-    expect(items[0].textContent).toContain("danger");
-    expect(items[0].textContent).toContain("Anchor conflict");
-    expect(items[0].textContent).toContain("anchor-conflict");
-    expect(items[0].textContent).toContain("100.0");
-
-    expect(items[1].getAttribute("aria-pressed")).toBe("true");
-    expect(items[2].textContent).toContain("m.2");
-    expect(items[2].textContent).toContain("Fast position shift");
-    expect(items[2].textContent).toContain("7.4");
-
-    act(() => {
-      items[3].click();
-    });
-    expect(onSelectWarning).toHaveBeenCalledTimes(1);
-    expect(onSelectWarning).toHaveBeenCalledWith(
-      expect.objectContaining({ sliceId: "s-lh-m2", measureIndex: 1, type: "unreachable-span" })
-    );
   });
 });
 
@@ -350,7 +307,7 @@ describe("Slice 3: ScoreViewer OSMD/scroll seam, anchor indicators & active meas
       await Promise.resolve();
     });
 
-    expect(fakeRenderer.render).toHaveBeenCalledWith("<score-partwise/>");
+    expect(fakeRenderer.render).toHaveBeenCalledWith("<score-partwise/>", { layoutMode: "horizontal" });
     expect(markAnchoredNotes).toHaveBeenCalledWith(anchoredNotes);
     expect(highlightMeasure).toHaveBeenCalledWith(1);
     expect(scrollToMeasure).toHaveBeenCalledWith(1, expect.any(HTMLElement));
@@ -361,8 +318,12 @@ describe("Slice 3: ScoreViewer OSMD/scroll seam, anchor indicators & active meas
     expect(anchorStrip!.textContent).toContain("1");
 
     const viewer = mountedContainer.querySelector('[data-testid="score-viewer"]') as HTMLElement;
+    expect(viewer.dataset.layoutMode).toBe("horizontal");
     expect(viewer.dataset.activeMeasure).toBe("1");
     expect(viewer.dataset.selectedSlice).toBe("s1");
+
+    const gutter = mountedContainer.querySelector('[data-testid="margin-risk-gutter"]') as HTMLElement;
+    expect(gutter.dataset.orientation).toBe("horizontal");
 
     const gutterBar0 = mountedContainer.querySelector('[data-measure-index="0"]') as HTMLButtonElement;
     act(() => {
@@ -372,8 +333,8 @@ describe("Slice 3: ScoreViewer OSMD/scroll seam, anchor indicators & active meas
   });
 });
 
-describe("Slice 4: App Split Studio layout & Studio UI interaction seam", () => {
-  it("renders two-column Split Studio, Margin Risk Gutter, anchor indicators, and syncs warning/gutter clicks to slice selection & scroll", async () => {
+describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction seam", () => {
+  it("renders top scrolling score, bottom 88-key piano, horizontal risk bar, and syncs < > warning & gutter clicks", async () => {
     const inProcessWorkerFactory = (): WorkerLike => {
       const worker: WorkerLike = {
         onmessage: null,
@@ -400,9 +361,9 @@ describe("Slice 4: App Split Studio layout & Studio UI interaction seam", () => 
       render: vi.fn(async () => ({
         measureCount: 3,
         measureGeometry: [
-          { measureIndex: 0, top: 0, height: 100 },
-          { measureIndex: 1, top: 0, height: 100 },
-          { measureIndex: 2, top: 110, height: 100 },
+          { measureIndex: 0, top: 0, height: 100, left: 0, width: 120 },
+          { measureIndex: 1, top: 0, height: 100, left: 120, width: 120 },
+          { measureIndex: 2, top: 0, height: 100, left: 240, width: 120 },
         ],
       })),
       highlightMeasure,
@@ -424,10 +385,11 @@ describe("Slice 4: App Split Studio layout & Studio UI interaction seam", () => 
       );
     });
 
-    const workspace = mountedContainer.querySelector('[data-testid="split-studio-workspace"]');
-    expect(workspace).not.toBeNull();
-    expect(mountedContainer.querySelector('[data-testid="inspector-panel"]')).not.toBeNull();
+    expect(mountedContainer.querySelector('[data-testid="top-score-pane"]')).not.toBeNull();
+    expect(mountedContainer.querySelector('[data-testid="bottom-piano-pane"]')).not.toBeNull();
+    expect(mountedContainer.querySelector('[data-testid="unified-piano-88"]')).not.toBeNull();
     expect(mountedContainer.querySelector('[data-testid="score-viewer"]')).not.toBeNull();
+    expect(mountedContainer.querySelector('[data-testid="inspector-panel"]')).toBeNull();
 
     const multiMeasureXml = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="4.0">
@@ -483,7 +445,7 @@ describe("Slice 4: App Split Studio layout & Studio UI interaction seam", () => 
       expect.objectContaining({ measureIndex: 0, midi: 64, hand: "RH", finger: 2 }),
     ]);
 
-    // Margin Risk Gutter shows 3 measures: m.1 none, m.2 warn/danger, m.3 danger
+    // Horizontal risk gutter shows 3 measures: m.1 none, m.2 warn/danger, m.3 danger
     const gutterBars = Array.from(
       mountedContainer.querySelectorAll<HTMLButtonElement>("[data-testid='margin-risk-gutter'] [data-measure-index]")
     );
@@ -492,47 +454,41 @@ describe("Slice 4: App Split Studio layout & Studio UI interaction seam", () => 
     expect(["warn", "danger"]).toContain(gutterBars[1].dataset.severity);
     expect(gutterBars[2].dataset.severity).toBe("danger");
 
-    // Inspector lists warnings chronologically (m.2 then m.3)
-    const warningItems = Array.from(
-      mountedContainer.querySelectorAll<HTMLButtonElement>("[data-warning-item]")
-    );
-    expect(warningItems.length).toBeGreaterThanOrEqual(2);
-    expect(warningItems.map((w) => Number(w.dataset.measureIndex))).toEqual(
-      warningItems.map((w) => Number(w.dataset.measureIndex)).slice().sort((a, b) => a - b)
-    );
-
-    // Click last warning (measureIndex = 2, LH unreachable-span) -> selects slice, highlights measure 2, scrolls
-    const m3Warning = warningItems.find((w) => w.dataset.measureIndex === "2")!;
+    // Step Prev warning from -1 wraps to last warning (m.3)
+    const prevWarnBtn = mountedContainer.querySelector('[data-testid="warning-prev-btn"]') as HTMLButtonElement;
     await act(async () => {
-      m3Warning.click();
+      prevWarnBtn.click();
       await Promise.resolve();
     });
 
     const viewer = mountedContainer.querySelector('[data-testid="score-viewer"]') as HTMLElement;
     expect(viewer.dataset.activeMeasure).toBe("2");
-    expect(viewer.dataset.selectedSlice).toBe(m3Warning.dataset.sliceId);
     expect(gutterBars[2].getAttribute("aria-pressed")).toBe("true");
     expect(highlightMeasure).toHaveBeenLastCalledWith(2);
     expect(scrollToMeasure).toHaveBeenLastCalledWith(2, expect.any(HTMLElement));
-    expect(
-      mountedContainer.querySelector('[data-testid="selected-slice-summary"]')?.textContent
-    ).toContain("m.3 · LH");
+    expect(mountedContainer.querySelector('[data-testid="active-warning-label"]')?.textContent).toContain("m.3");
+    expect(mountedContainer.querySelector('[data-testid="piano-slice-summary"]')?.textContent).toContain("m.3");
 
-    // Click Margin Risk Gutter bar for m.2 (measureIndex = 1) -> selects slice in m.2, highlights matching warning, scrolls
+    // Click risk bar for m.2 -> selects slice in m.2 and scrolls
     await act(async () => {
       gutterBars[1].click();
       await Promise.resolve();
     });
-
     expect(viewer.dataset.activeMeasure).toBe("1");
     expect(gutterBars[1].getAttribute("aria-pressed")).toBe("true");
     expect(highlightMeasure).toHaveBeenLastCalledWith(1);
     expect(scrollToMeasure).toHaveBeenLastCalledWith(1, expect.any(HTMLElement));
 
-    const m2Warning = Array.from(
-      mountedContainer.querySelectorAll<HTMLButtonElement>("[data-warning-item]")
-    ).find((w) => w.dataset.measureIndex === "1")!;
-    expect(m2Warning.getAttribute("aria-pressed")).toBe("true");
-    expect(viewer.dataset.selectedSlice).toBe(m2Warning.dataset.sliceId);
+    // Toggle layout mode to Multi-line Page -> re-renders with layoutMode: "page" and vertical gutter
+    const pageBtn = mountedContainer.querySelector('[data-testid="layout-page-btn"]') as HTMLButtonElement;
+    await act(async () => {
+      pageBtn.click();
+      await Promise.resolve();
+    });
+    expect(viewer.dataset.layoutMode).toBe("page");
+    expect(rendererSpy.render).toHaveBeenLastCalledWith(
+      expect.any(String),
+      { layoutMode: "page" }
+    );
   });
 });

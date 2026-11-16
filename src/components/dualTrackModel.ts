@@ -75,7 +75,7 @@ function emptyHandTrack(hand: Hand): HandTrackState {
   };
 }
 
-function findHandPositionForSlice(
+export function findHandPositionForSlice(
   hand: Hand,
   sliceId: string,
   handPositions: HandPosition[],
@@ -173,7 +173,7 @@ const SEVERITY_RANK: Record<TransitionCue["severity"], number> = {
   info: 1,
 };
 
-function buildTransitionCueArcs(
+export function buildTransitionCueArcs(
   hand: Hand,
   activeSlice: OnsetSlice | null,
   onsetSlices: OnsetSlice[],

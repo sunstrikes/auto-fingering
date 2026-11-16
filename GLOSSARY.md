@@ -42,7 +42,11 @@ _Avoid_: Finger index, key label
 
 **Hand Position**:
 The five-key resting span `[thumbKey .. pinkyKey]` implied by a phrase's Finger Assignments, indicating where all five fingers hover over the keyboard.
-_Avoid_: Hand posture, finger window, zone
+_Avoid_: Finger window, zone, keyboard box
+
+**Hand Posture**:
+The instantaneous physical pose of one hand at a given score moment—comprising palm/wrist center, five individual finger key positions, active key-strike depths, Held Finger anchors, and cross-over or thumb-under offsets—derived from Hand Position and Transition Cues.
+_Avoid_: Hand shape, fake hand, animation pose, hand shadow
 
 **Transition Cue**:
 A visual indicator marking a technique change or reach warning between consecutive Onset Slices, such as thumb-under, cross-over, wide stretch, or full position shift.

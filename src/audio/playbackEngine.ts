@@ -13,6 +13,12 @@ export interface CursorSyncTarget {
   midis: number[];
 }
 
+export interface PlaybackFrame {
+  scoreSec: number;
+  totalDurationSec: number;
+  state: PlaybackState;
+}
+
 export interface ScheduledPlaybackNote {
   noteUid: string;
   sliceId: string;
@@ -45,6 +51,7 @@ export interface PlaybackEngineDeps {
   onStateChange?: (state: PlaybackState) => void;
   onSliceChange?: (slice: OnsetSlice) => void;
   onCursorSync?: (target: CursorSyncTarget | null) => void;
+  onFrame?: (frame: PlaybackFrame | null) => void;
 }
 
 export interface PlaybackEngine {
@@ -246,8 +253,18 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     }
   };
 
+  const emitFrameForState = (scoreSec: number, nextState: PlaybackState) => {
+    if (!activeSchedule) return;
+    deps.onFrame?.({
+      scoreSec,
+      totalDurationSec: activeSchedule.totalDurationSec,
+      state: nextState,
+    });
+  };
+
   const emitSyncForScoreSec = (scoreSec: number) => {
     if (!activeSchedule) return;
+    emitFrameForState(scoreSec, "playing");
     const activeSlice = findActiveSliceAtScoreSec(activeSchedule.slices, scoreSec, minSliceIndex);
     if (!activeSlice) return;
 
@@ -306,6 +323,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
         pausedScoreSec = null;
         setState("stopped");
         deps.onCursorSync?.(null);
+        deps.onFrame?.(null);
         return;
       }
 
@@ -375,6 +393,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       deps.audioEngine.stopAll();
       pausedScoreSec = scoreSec;
       setState("paused");
+      emitFrameForState(scoreSec, "paused");
     },
 
     stop() {
@@ -387,6 +406,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       lastCursorBeatKey = null;
       setState("stopped");
       deps.onCursorSync?.(null);
+      deps.onFrame?.(null);
     },
 
     dispose() {

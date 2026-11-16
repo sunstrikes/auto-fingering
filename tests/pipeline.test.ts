@@ -302,7 +302,7 @@ describe("walking skeleton end-to-end headless pipeline", () => {
 
       expect(seenProfiles).toHaveLength(1);
       expect(seenProfiles[0]).toEqual({ preset: "M", avoidThumbOnBlack: true, preferStablePosition: false });
-      expect(container.textContent).toContain("Warnings: 1");
+      expect(container.textContent).toContain("Danger 1");
 
       // Rapidly click S then L without awaiting S in between -> S gets cancelled, L completes cleanly
       const btnS = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "S")!;
@@ -327,7 +327,7 @@ describe("walking skeleton end-to-end headless pipeline", () => {
       expect(seenProfiles[2].preset).toBe("L");
       // No error banner shown for cancelled S request, and L shows 1 wide-stretch warning
       expect(container.querySelector('[role="alert"]')).toBeNull();
-      expect(container.textContent).toContain("Warnings: 1");
+      expect(container.textContent).toContain("Warn 1");
 
       // Toggle avoidThumbOnBlack & preferStablePosition -> triggers new worker solves
       const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
