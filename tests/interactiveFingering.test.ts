@@ -269,7 +269,7 @@ describe("Seam 3b: Inline NoteAnchorPopover (1-5, pinOnly, unpin, TieContinuatio
     });
 
     const tieNotice = mountedContainer.querySelector('[data-testid="popover-tie-notice"]')!;
-    expect(tieNotice.textContent).toMatch(/Tie continuation/i);
+    expect(tieNotice.textContent).toMatch(/连音线延音音符/);
     expect(mountedContainer.querySelector('[data-testid="finger-btn-1"]')).toBeNull();
   });
 });
@@ -429,7 +429,7 @@ describe("Seam 3c: Full App integration (OSMD click -> popover resolve -> Diff p
     });
     const tieNotice = mountedContainer.querySelector('[data-testid="popover-tie-notice"]');
     expect(tieNotice).not.toBeNull();
-    expect(tieNotice!.textContent).toMatch(/Tie continuation/i);
+    expect(tieNotice!.textContent).toMatch(/连音线延音音符/);
   });
 });
 

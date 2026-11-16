@@ -212,11 +212,11 @@ describe("walking skeleton end-to-end headless pipeline", () => {
     // 4. App UI renders .musicxml/.xml/.mxl upload, export format, HandSpanProfile controls, and ignore-original-fingerings toggle
     const appHtml = renderToStaticMarkup(createElement(App));
     expect(appHtml).toContain('accept=".musicxml,.xml,.mxl"');
-    expect(appHtml).toContain('aria-label="Export format"');
-    expect(appHtml).toContain('aria-label="Hand Span Profile"');
-    expect(appHtml).toContain("Avoid thumb on black");
-    expect(appHtml).toContain("Prefer stable position");
-    expect(appHtml).toMatch(/ignore original fingerings/i);
+    expect(appHtml).toContain('aria-label="导出格式"');
+    expect(appHtml).toContain('aria-label="手型跨度预设"');
+    expect(appHtml).toContain("尽量避免大拇指弹黑键");
+    expect(appHtml).toContain("优先保持手位稳定");
+    expect(appHtml).toContain("忽略原谱已有指法");
   });
 
   it("triggers Worker re-solve when HandSpanProfile controls change and cancels superseded in-flight requests", async () => {
@@ -302,7 +302,7 @@ describe("walking skeleton end-to-end headless pipeline", () => {
 
       expect(seenProfiles).toHaveLength(1);
       expect(seenProfiles[0]).toEqual({ preset: "M", avoidThumbOnBlack: true, preferStablePosition: false });
-      expect(container.textContent).toContain("Danger 1");
+      expect(container.textContent).toContain("高风险 1");
 
       // Rapidly click S then L without awaiting S in between -> S gets cancelled, L completes cleanly
       const btnS = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "S")!;
@@ -327,7 +327,7 @@ describe("walking skeleton end-to-end headless pipeline", () => {
       expect(seenProfiles[2].preset).toBe("L");
       // No error banner shown for cancelled S request, and L shows 1 wide-stretch warning
       expect(container.querySelector('[role="alert"]')).toBeNull();
-      expect(container.textContent).toContain("Warn 1");
+      expect(container.textContent).toContain("警告 1");
 
       // Toggle avoidThumbOnBlack & preferStablePosition -> triggers new worker solves
       const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];

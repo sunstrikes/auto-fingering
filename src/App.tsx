@@ -75,9 +75,9 @@ import {
 } from "./audio/playbackEngine";
 
 const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
-  { preset: "S", title: "Small hand span (0.82x)" },
-  { preset: "M", title: "Medium hand span (1.00x)" },
-  { preset: "L", title: "Large hand span (1.18x)" },
+  { preset: "S", title: "小手跨度 (0.82x)" },
+  { preset: "M", title: "标准手跨度 (1.00x)" },
+  { preset: "L", title: "大手跨度 (1.18x)" },
 ];
 
 export interface AppAudioDeps extends PianoAudioDeps {
@@ -292,7 +292,7 @@ export default function App({
     if (!solverClientRef.current) return;
     playbackEngineRef.current?.stop();
     const store = useStudioStore.getState();
-    store.setStatus("Solving fingerings in Web Worker...");
+    store.setStatus("正在计算指法...");
 
     const slicesToSolve = resetHistory
       ? nextDoc.onsetSlices
@@ -352,7 +352,7 @@ export default function App({
         return;
       }
       store.setErrorMsg(err instanceof Error ? err.message : String(err));
-      store.setStatus("Error");
+      store.setStatus("错误");
     }
   };
 
@@ -363,7 +363,7 @@ export default function App({
     playbackEngineRef.current?.stop();
     const store = useStudioStore.getState();
     store.setErrorMsg(null);
-    store.setStatus("Parsing MusicXML...");
+    store.setStatus("正在解析 MusicXML...");
 
     try {
       const isMxl = file.name.toLowerCase().endsWith(".mxl");
@@ -1075,16 +1075,16 @@ export default function App({
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-base font-semibold tracking-tight text-slate-900">
-              MusicXML Auto-Fingering
+              MusicXML 钢琴自动指法
             </h1>
             <p className="text-[11px] text-slate-500">
-              Browser-local Beam Search DP piano fingering &amp; real-time dual-hand rehearsal
+              纯浏览器端 Beam Search DP 钢琴指法推导与双轨实时演练
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
             <label className="cursor-pointer rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800">
-              Upload .musicxml / .mxl
+              上传 .musicxml / .mxl
               <input
                 type="file"
                 accept=".musicxml,.xml,.mxl"
@@ -1097,13 +1097,13 @@ export default function App({
               data-testid="practice-mode-selector"
               className="inline-flex rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-xs font-medium"
               role="group"
-              aria-label="Practice Mode"
+              aria-label="练习模式"
             >
               {(
                 [
-                  { mode: "both" as const, label: "Both Hands" },
-                  { mode: "rh-only" as const, label: "Right Hand Only" },
-                  { mode: "lh-only" as const, label: "Left Hand Only" },
+                  { mode: "both" as const, label: "双手" },
+                  { mode: "rh-only" as const, label: "仅右手" },
+                  { mode: "lh-only" as const, label: "仅左手" },
                 ] as const
               ).map(({ mode, label }) => {
                 const isActive = effectivePracticeMode === mode;
@@ -1135,7 +1135,7 @@ export default function App({
               <div
                 className="inline-flex rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-xs font-medium"
                 role="group"
-                aria-label="Single-staff hand assignment"
+                aria-label="单谱表声部手别"
               >
                 <button
                   type="button"
@@ -1146,7 +1146,7 @@ export default function App({
                       : "text-slate-600 hover:text-slate-900"
                   }`}
                 >
-                  Right Hand
+                  右手
                 </button>
                 <button
                   type="button"
@@ -1157,7 +1157,7 @@ export default function App({
                       : "text-slate-600 hover:text-slate-900"
                   }`}
                 >
-                  Left Hand
+                  左手
                 </button>
               </div>
             )}
@@ -1166,7 +1166,7 @@ export default function App({
               <div
                 className="inline-flex rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-xs font-medium"
                 role="group"
-                aria-label="Hand Span Profile"
+                aria-label="手型跨度预设"
               >
                 {SPAN_PRESETS.map(({ preset, title }) => (
                   <button
@@ -1200,7 +1200,7 @@ export default function App({
                   }
                   className="rounded border-slate-300 text-slate-900"
                 />
-                Avoid thumb on black
+                尽量避免大拇指弹黑键
               </label>
 
               <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-slate-700">
@@ -1215,7 +1215,7 @@ export default function App({
                   }
                   className="rounded border-slate-300 text-slate-900"
                 />
-                Prefer stable position
+                优先保持手位稳定
               </label>
 
               <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50">
@@ -1225,7 +1225,7 @@ export default function App({
                   onChange={(e) => handleIgnoreExistingToggle(e.target.checked)}
                   className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900"
                 />
-                Ignore original fingerings
+                忽略原谱已有指法
               </label>
             </div>
 
@@ -1237,7 +1237,7 @@ export default function App({
                 onClick={() => useStudioStore.getState().undo()}
                 className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
               >
-                Undo
+                撤销
               </button>
               <button
                 type="button"
@@ -1246,13 +1246,13 @@ export default function App({
                 onClick={() => useStudioStore.getState().redo()}
                 className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
               >
-                Redo
+                重做
               </button>
             </div>
 
             <div className="flex items-center gap-1.5">
               <select
-                aria-label="Export format"
+                aria-label="导出格式"
                 value={exportFormat}
                 onChange={(e) => useStudioStore.getState().setExportFormat(e.target.value as ExportFormat)}
                 disabled={!renderedXml}
@@ -1268,7 +1268,7 @@ export default function App({
                 onClick={() => void handleDownload()}
                 className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Download .{exportFormat}
+                下载 .{exportFormat}
               </button>
 
               <button
@@ -1277,7 +1277,7 @@ export default function App({
                 onClick={() => setSettingsOpen(true)}
                 className={`rounded-lg border px-3 py-2 text-xs font-medium transition hover:opacity-90 ${getMidiStatusBadgeClass(midiState)}`}
               >
-                {formatMidiStatusLabel(midiState)} · Settings
+                {formatMidiStatusLabel(midiState)} · 设置
               </button>
             </div>
           </div>
@@ -1291,21 +1291,21 @@ export default function App({
         >
           <div className="flex flex-wrap items-center gap-3">
             <span>
-              <strong>Status:</strong> {status}
+              <strong>状态:</strong> {status}
             </span>
             {scoreTitle && (
               <span>
-                <strong>Score:</strong> {scoreTitle}
+                <strong>乐谱:</strong> {scoreTitle}
               </span>
             )}
             {noteEvents.length > 0 && (
               <span>
-                <strong>Notes:</strong> {noteEvents.length}
+                <strong>音符:</strong> {noteEvents.length}
               </span>
             )}
             {solveResult && (
               <span>
-                <strong>Transitions:</strong> {solveResult.transitionCues.length}
+                <strong>换指提示:</strong> {solveResult.transitionCues.length}
               </span>
             )}
           </div>
@@ -1316,15 +1316,15 @@ export default function App({
                 data-testid="compact-warning-bar"
                 className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px]"
               >
-                <span className="font-semibold text-red-700">Danger {dangerCount}</span>
+                <span className="font-semibold text-red-700">高风险 {dangerCount}</span>
                 <span className="text-slate-300">·</span>
-                <span className="font-semibold text-amber-700">Warn {warnCount}</span>
+                <span className="font-semibold text-amber-700">警告 {warnCount}</span>
                 {sortedWarnings.length > 0 && (
                   <>
                     <button
                       type="button"
                       data-testid="warning-prev-btn"
-                      aria-label="Previous warning"
+                      aria-label="上一条警告"
                       onClick={() => handleStepWarning(-1)}
                       className="ml-1 rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] font-bold text-slate-700 hover:bg-slate-100"
                     >
@@ -1333,7 +1333,7 @@ export default function App({
                     <button
                       type="button"
                       data-testid="warning-next-btn"
-                      aria-label="Next warning"
+                      aria-label="下一条警告"
                       onClick={() => handleStepWarning(1)}
                       className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] font-bold text-slate-700 hover:bg-slate-100"
                     >
@@ -1344,7 +1344,7 @@ export default function App({
                         data-testid="active-warning-label"
                         className="max-w-52 truncate font-medium text-slate-700"
                       >
-                        m.{sortedWarnings[warningNavIndex].measureIndex + 1}{" "}
+                        第{sortedWarnings[warningNavIndex].measureIndex + 1}小节{" "}
                         {sortedWarnings[warningNavIndex].label}
                       </span>
                     )}
@@ -1362,7 +1362,7 @@ export default function App({
                   className="inline-flex items-center gap-1 rounded-full border border-violet-300 bg-violet-50 px-2.5 py-0.5 text-[11px] font-semibold text-violet-800 hover:bg-violet-100"
                 >
                   <span className="h-2 w-2 rounded-full bg-violet-600" />
-                  Updated {lastDiff.length} note{lastDiff.length === 1 ? "" : "s"}
+                  已更新 {lastDiff.length} 个音符
                 </button>
                 {diffDropdownOpen && (
                   <div
@@ -1370,7 +1370,7 @@ export default function App({
                     className="absolute right-0 top-7 z-40 max-h-56 w-64 overflow-y-auto rounded-lg border border-violet-200 bg-white p-2 shadow-lg"
                   >
                     <div className="mb-1 flex items-center justify-between text-[11px] font-semibold text-violet-900">
-                      <span>Before → After Diff</span>
+                      <span>指法变更对照</span>
                       <button
                         type="button"
                         onClick={() => setDiffDropdownOpen(false)}
@@ -1392,7 +1392,7 @@ export default function App({
                           className="flex w-full items-center justify-between rounded border border-violet-100 bg-violet-50/50 px-2 py-1 text-left text-[11px] text-violet-900 hover:bg-violet-100"
                         >
                           <span>
-                            m.{d.measureIndex + 1} {d.pitchLabel} ({d.hand})
+                            第{d.measureIndex + 1}小节 {d.pitchLabel} ({d.hand === "RH" ? "右手" : "左手"})
                           </span>
                           <span className="font-bold">
                             {d.before ?? "—"} → {d.after ?? "—"}
@@ -1405,7 +1405,7 @@ export default function App({
               </div>
             )}
 
-            <span className="hidden text-slate-400 xl:inline">Zero backend · Web Worker DP</span>
+            <span className="hidden text-slate-400 xl:inline">纯本地运算 · Web Worker DP</span>
           </div>
         </div>
 
@@ -1414,7 +1414,7 @@ export default function App({
             role="alert"
             className="shrink-0 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700"
           >
-            <strong>Unable to load score:</strong> {errorMsg}
+            <strong>无法加载乐谱:</strong> {errorMsg}
           </div>
         )}
 

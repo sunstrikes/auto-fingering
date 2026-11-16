@@ -5,3 +5,4 @@ coverage/
 .worktrees/
 .DS_Store
 *.local
+.edgeone/

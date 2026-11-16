@@ -579,7 +579,7 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     // Zero sample loads on initial page load or score import
     expect(loadSmplrPiano).not.toHaveBeenCalled();
     const statusBadge = mountedContainer.querySelector('[data-testid="audio-engine-status"]')!;
-    expect(statusBadge.textContent).toContain("Idle");
+    expect(statusBadge.textContent).toContain("待机");
 
     // Set playback speed to 0.5x via Transport & Practice Bar preset
     const speed05Btn = mountedContainer.querySelector('[data-testid="speed-preset-0.5"]') as HTMLButtonElement;
@@ -595,7 +595,7 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     });
 
     expect(loadSmplrPiano).toHaveBeenCalledTimes(1);
-    expect(statusBadge.textContent).toContain("Synth Fallback");
+    expect(statusBadge.textContent).toContain("合成器回退");
 
     // At t=0s (0.5x speed), measure 0 C4 is active
     expect(syncCursor).toHaveBeenLastCalledWith(
@@ -614,8 +614,8 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     const viewer = mountedContainer.querySelector('[data-testid="score-viewer"]') as HTMLElement;
     const piano = mountedContainer.querySelector('[data-testid="unified-piano-88"]')!;
     expect(viewer.dataset.activeMeasure).toBe("1");
-    expect(piano.textContent).toContain("m.2 · RH");
-    expect(piano.textContent).toContain("Slice 3/4");
+    expect(piano.textContent).toContain("第2小节 · 右手");
+    expect(piano.textContent).toContain("切片 3/4");
     expect(syncCursor).toHaveBeenLastCalledWith(
       expect.objectContaining({ measureIndex: 1, midis: [64] })
     );
@@ -628,8 +628,8 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
       for (const [, cb] of pending) cb(3100);
       await Promise.resolve();
     });
-    expect(piano.textContent).toContain("m.2 · RH");
-    expect(piano.textContent).toContain("Slice 4/4");
+    expect(piano.textContent).toContain("第2小节 · 右手");
+    expect(piano.textContent).toContain("切片 4/4");
     expect(piano.querySelector('[data-testid="hand-overlay-RH"]')).not.toBeNull();
 
     // Press Stop -> stops playback and hides cursor

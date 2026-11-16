@@ -358,7 +358,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     new OpenSheetMusicDisplay(container, {
       autoResize: mode === "page",
       backend: "svg",
-      drawFingerings: true,
+      drawFingerings: false,
       fingeringPosition: "aboveorbelow",
       followCursor: mode === "page",
       renderSingleHorizontalStaffline: mode === "horizontal",
@@ -958,7 +958,7 @@ export function ScoreViewer({
         data-layout-mode={layoutMode}
         className="flex h-full min-h-60 flex-1 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500"
       >
-        Upload a <code>.musicxml</code>, <code>.xml</code>, or <code>.mxl</code> file to deduce, scroll, and simulate two-hand piano fingerings.
+        请上传 <code>.musicxml</code>、<code>.xml</code> 或 <code>.mxl</code> 乐谱文件，即可进行双手钢琴指法推导、滚动阅谱与键盘模拟。
       </div>
     );
   }
@@ -974,20 +974,20 @@ export function ScoreViewer({
     >
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1.5 text-xs">
         <div className="flex flex-wrap items-center gap-2 text-slate-600">
-          <span className="font-semibold text-slate-800">Score Canvas</span>
+          <span className="font-semibold text-slate-800">乐谱画布</span>
           <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800">
             <span className="h-2 w-2 rounded-full bg-amber-400" />
-            Warn
+            警告
           </span>
           <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] text-red-700">
             <span className="h-2 w-2 rounded-full bg-red-500" />
-            Danger
+            高风险
           </span>
           <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[11px] text-violet-700">
             <span className="h-2 w-2 rounded-full bg-violet-600" />
-            Diff
+            变更
           </span>
-          <span className="text-[11px] text-slate-400">Click any notehead to edit fingering</span>
+          <span className="text-[11px] text-slate-400">点击任意音符可编辑指法</span>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -998,7 +998,7 @@ export function ScoreViewer({
               onClick={() => setManualScrollPaused(false)}
               className="rounded-full border border-blue-300 bg-blue-600 px-2.5 py-0.5 text-[11px] font-semibold text-white shadow-xs hover:bg-blue-700"
             >
-              回到游标 · Recenter
+              回到游标
             </button>
           )}
 
@@ -1006,7 +1006,7 @@ export function ScoreViewer({
             <div
               className="inline-flex rounded-md border border-slate-300 bg-slate-100 p-0.5 text-[11px] font-medium"
               role="group"
-              aria-label="Score layout mode"
+              aria-label="乐谱排版模式"
             >
               <button
                 type="button"
@@ -1042,7 +1042,7 @@ export function ScoreViewer({
               data-testid="active-measure-badge"
               className="rounded-full border border-blue-200 bg-blue-50 px-2.5 py-0.5 font-semibold text-blue-700"
             >
-              Active: m.{selectedMeasureIndex + 1}
+              当前: 第 {selectedMeasureIndex + 1} 小节
             </span>
           )}
         </div>
@@ -1054,7 +1054,7 @@ export function ScoreViewer({
           className="mb-2 flex items-center gap-1.5 overflow-x-auto rounded-lg border border-red-100 bg-red-50/50 px-2.5 py-1 text-xs"
         >
           <span className="shrink-0 font-semibold text-red-700">
-            Anchors ({anchoredNotes.length}):
+            锚点 ({anchoredNotes.length}):
           </span>
           {anchoredNotes.map((anchor) => (
             <button
@@ -1073,11 +1073,11 @@ export function ScoreViewer({
                   ? "border-red-400 bg-red-100 text-red-800"
                   : "border-red-200 bg-white text-red-700 hover:bg-red-50"
               }`}
-              title={`Finger anchor ${anchor.finger} on ${midiToPitchLabel(anchor.midi)} in measure ${anchor.measureIndex + 1}`}
+              title={`第 ${anchor.measureIndex + 1} 小节 ${midiToPitchLabel(anchor.midi)} 指法锚点: ${anchor.finger}`}
             >
               <span className="h-1.5 w-1.5 rounded-full bg-red-600" />
               <span>
-                m.{anchor.measureIndex + 1} {midiToPitchLabel(anchor.midi)} ({anchor.hand}): {anchor.finger}
+                第{anchor.measureIndex + 1}小节 {midiToPitchLabel(anchor.midi)} ({anchor.hand === "RH" ? "右手" : "左手"}): {anchor.finger}
               </span>
             </button>
           ))}
@@ -1086,7 +1086,7 @@ export function ScoreViewer({
 
       {renderError && (
         <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          Render error: {renderError}
+          渲染错误: {renderError}
         </div>
       )}
 

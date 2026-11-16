@@ -551,29 +551,29 @@ export function UnifiedPiano88({
   return (
     <section
       data-testid="unified-piano-88"
-      aria-label="88-key dual-hand piano keyboard"
+      aria-label="88键双手钢琴键盘"
       className="border-t border-slate-300 bg-white px-4 py-2 shadow-[0_-4px_12px_rgba(15,23,42,0.05)]"
     >
       <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-semibold text-slate-900">88-Key Piano &amp; Dual-Hand Simulation</span>
+          <span className="font-semibold text-slate-900">88 键钢琴与双手实时模拟</span>
           <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 font-medium text-indigo-700">
             <span className="h-2 w-2 rounded-full bg-indigo-600" />
-            LH{" "}
+            左手{" "}
             {lhHandPos
               ? `${midiToPitchLabel(whiteKeyIndexToMidi(Math.min(lhHandPos.thumbKey, lhHandPos.pinkyKey)))}–${midiToPitchLabel(whiteKeyIndexToMidi(Math.max(lhHandPos.thumbKey, lhHandPos.pinkyKey)))}`
-              : "Resting"}
+              : "休止"}
           </span>
           <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-2 py-0.5 font-medium text-teal-800">
             <span className="h-2 w-2 rounded-full bg-teal-600" />
-            RH{" "}
+            右手{" "}
             {rhHandPos
               ? `${midiToPitchLabel(whiteKeyIndexToMidi(Math.min(rhHandPos.thumbKey, rhHandPos.pinkyKey)))}–${midiToPitchLabel(whiteKeyIndexToMidi(Math.max(rhHandPos.thumbKey, rhHandPos.pinkyKey)))}`
-              : "Resting"}
+              : "休止"}
           </span>
           {selectedSlice && (
             <span data-testid="piano-slice-summary" className="text-slate-500">
-              m.{selectedSlice.measureIndex + 1} · {selectedSlice.hand} ·{" "}
+              第{selectedSlice.measureIndex + 1}小节 · {selectedSlice.hand === "RH" ? "右手" : "左手"} ·{" "}
               {selectedSlice.notes.map((n) => midiToPitchLabel(n.midi)).join("+")}
             </span>
           )}
@@ -585,14 +585,14 @@ export function UnifiedPiano88({
               data-testid="midi-sustain-indicator"
               className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800"
             >
-              Sustain Ped
+              延音踏板
             </span>
           )}
-          <span className="text-[11px] text-slate-400">Click any key or press Z–M / Q–I</span>
+          <span className="text-[11px] text-slate-400">点击琴键或按 Z–M / Q–I 键试听</span>
           {slices.length > 0 && (
             <>
               <span className="ml-1 text-[11px] text-slate-500">
-                Slice {currentIdx + 1}/{slices.length}
+                切片 {currentIdx + 1}/{slices.length}
               </span>
               <button
                 type="button"
@@ -605,7 +605,7 @@ export function UnifiedPiano88({
                 }}
                 className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                Prev
+                上一步
               </button>
               <button
                 type="button"
@@ -618,7 +618,7 @@ export function UnifiedPiano88({
                 }}
                 className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                Next
+                下一步
               </button>
             </>
           )}

@@ -314,7 +314,7 @@ describe("Slice 3: ScoreViewer OSMD/scroll seam, anchor indicators & active meas
 
     const anchorStrip = mountedContainer.querySelector('[data-testid="anchor-indicators"]');
     expect(anchorStrip).not.toBeNull();
-    expect(anchorStrip!.textContent).toContain("m.1");
+    expect(anchorStrip!.textContent).toContain("第1小节");
     expect(anchorStrip!.textContent).toContain("1");
 
     const viewer = mountedContainer.querySelector('[data-testid="score-viewer"]') as HTMLElement;
@@ -440,7 +440,7 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
     // Anchor indicator displayed for m.1 E4 finger 2
     const anchorIndicators = mountedContainer.querySelector('[data-testid="anchor-indicators"]');
     expect(anchorIndicators).not.toBeNull();
-    expect(anchorIndicators!.textContent).toContain("m.1 E4 (RH): 2");
+    expect(anchorIndicators!.textContent).toContain("第1小节 E4 (右手): 2");
     expect(markAnchoredNotes).toHaveBeenCalledWith([
       expect.objectContaining({ measureIndex: 0, midi: 64, hand: "RH", finger: 2 }),
     ]);
@@ -466,8 +466,8 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
     expect(gutterBars[2].getAttribute("aria-pressed")).toBe("true");
     expect(highlightMeasure).toHaveBeenLastCalledWith(2);
     expect(scrollToMeasure).toHaveBeenLastCalledWith(2, expect.any(HTMLElement));
-    expect(mountedContainer.querySelector('[data-testid="active-warning-label"]')?.textContent).toContain("m.3");
-    expect(mountedContainer.querySelector('[data-testid="piano-slice-summary"]')?.textContent).toContain("m.3");
+    expect(mountedContainer.querySelector('[data-testid="active-warning-label"]')?.textContent).toContain("第3小节");
+    expect(mountedContainer.querySelector('[data-testid="piano-slice-summary"]')?.textContent).toContain("第3小节");
 
     // Click risk bar for m.2 -> selects slice in m.2 and scrolls
     await act(async () => {

@@ -343,7 +343,7 @@ describe("Slice 4: Whole-Measure A-B Loop & Loop Gap in <App />", () => {
     });
 
     expect(container.querySelector('[data-testid="count-in-indicator"]')?.textContent).toContain(
-      "Count-In: 3"
+      "预备拍: 3"
     );
 
     // Finish the 1.5s Loop Gap Count-In
@@ -420,7 +420,7 @@ describe("Slice 4: Whole-Measure A-B Loop & Loop Gap in <App />", () => {
       await new Promise((r) => setTimeout(r, 10));
     });
     expect(container.querySelector('[data-testid="count-in-indicator"]')?.textContent).toContain(
-      "Count-In: 3"
+      "预备拍: 3"
     );
 
     // Turn off Waiting Mode mid-Count-In -> must cancel Count-In and unpause metronome

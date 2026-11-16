@@ -228,7 +228,7 @@ const INITIAL_DATA = {
   selectedNoteUid: null as string | null,
   selectedSliceId: null as string | null,
   selectedMeasureIndex: null as number | null,
-  status: "Ready",
+  status: "就绪",
   errorMsg: null as string | null,
 };
 
@@ -318,7 +318,7 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
       selectedMeasureIndex: nextSlice?.measureIndex ?? null,
       selectedNoteUid: nextNote?.noteUid ?? null,
       renderedXml: exportedXml,
-      status: `Solved ${scoreDoc.noteEvents.length} notes in ${solveResult.solveTimeMs.toFixed(1)} ms`,
+      status: `已完成 ${scoreDoc.noteEvents.length} 个音符指法推导（耗时 ${solveResult.solveTimeMs.toFixed(1)} ms）`,
       errorMsg: null,
     });
   },
@@ -414,7 +414,7 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
         future: [],
       },
       renderedXml: exportedXml,
-      status: `Updated anchor (${diff.length} note${diff.length === 1 ? "" : "s"} changed in ${result.solveTimeMs.toFixed(1)} ms)`,
+      status: `已更新锚点（${diff.length} 个音符指法变更，耗时 ${result.solveTimeMs.toFixed(1)} ms）`,
     });
   },
 
@@ -446,7 +446,7 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
         future: currentSnapshot ? [currentSnapshot, ...history.future] : history.future,
       },
       renderedXml: exportedXml,
-      status: "Undid last fingering change",
+      status: "已撤销上一次指法修改",
     });
   },
 
@@ -478,7 +478,7 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
         future: history.future.slice(1),
       },
       renderedXml: exportedXml,
-      status: "Redid fingering change",
+      status: "已重做指法修改",
     });
   },
 

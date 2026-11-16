@@ -99,7 +99,7 @@ export function NoteAnchorPopover({
   return (
     <div
       role="dialog"
-      aria-label="Note anchor popover"
+      aria-label="音符指法锚点编辑"
       data-testid="note-anchor-popover"
       style={style}
       className={`${
@@ -110,7 +110,7 @@ export function NoteAnchorPopover({
         <div>
           <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-900">
             <span>
-              m.{note.measureIndex + 1} · {midiToPitchLabel(note.midi)}
+              第 {note.measureIndex + 1} 小节 · {midiToPitchLabel(note.midi)}
             </span>
             <span
               className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
@@ -119,7 +119,7 @@ export function NoteAnchorPopover({
                   : "bg-indigo-50 text-indigo-800"
               }`}
             >
-              {note.hand}
+              {note.hand === "RH" ? "右手" : "左手"}
             </span>
             {currentFinger !== undefined && (
               <span
@@ -132,12 +132,12 @@ export function NoteAnchorPopover({
           </div>
           <div className="mt-0.5 text-[11px] text-slate-500">
             {userAnchor
-              ? `User anchor (${userAnchor.mode === "pinOnly" ? "Pin Only" : "Phrase"})`
+              ? `手动锚点 (${userAnchor.mode === "pinOnly" ? "仅锁定此音" : "局部重算"})`
               : hasRawAnchor
-                ? `Score XML anchor (${note.anchorFinger})`
-                : "Auto-deduced fingering"}
+                ? `原谱 XML 指法 (${note.anchorFinger})`
+                : "自动推导指法"}
             {isConflict && (
-              <span className="ml-1.5 font-semibold text-red-600">· Repaired conflict</span>
+              <span className="ml-1.5 font-semibold text-red-600">· 已修复冲突</span>
             )}
           </div>
         </div>
@@ -146,7 +146,7 @@ export function NoteAnchorPopover({
           type="button"
           data-testid="popover-close-btn"
           onClick={onClose}
-          aria-label="Close note popover"
+          aria-label="关闭音符弹窗"
           className="rounded px-1.5 py-0.5 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-700"
         >
           ✕
@@ -158,11 +158,11 @@ export function NoteAnchorPopover({
           data-testid="popover-tie-notice"
           className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px] text-slate-600"
         >
-          Tie continuation sustains from its preceding note and does not take a new 1–5 finger strike.
+          连音线延音音符延续前一音符时值，无需重新分配 1–5 指法。
         </div>
       ) : (
         <div className="space-y-2.5">
-          <div className="grid grid-cols-5 gap-1.5" role="group" aria-label="Assign finger 1 to 5">
+          <div className="grid grid-cols-5 gap-1.5" role="group" aria-label="指定指法 1 到 5">
             {FINGERS.map((f) => {
               const isSelected = currentFinger === f;
               return (
@@ -197,9 +197,9 @@ export function NoteAnchorPopover({
                   ? "border-amber-400 bg-amber-50 text-amber-900"
                   : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
               }`}
-              title="Pin Only locks just this note; Phrase locally re-solves surrounding notes"
+              title="仅锁定此音：只固定当前音符；局部重算：锁定此音并重新推导周边乐句指法"
             >
-              {overrideMode === "pinOnly" ? "Pin Only" : "Phrase Re-solve"}
+              {overrideMode === "pinOnly" ? "仅锁定此音" : "局部重算"}
             </button>
 
             <div className="flex items-center gap-1">
@@ -210,7 +210,7 @@ export function NoteAnchorPopover({
                   onClick={onPlayFromHere}
                   className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
                 >
-                  Play here
+                  从此处播放
                 </button>
               )}
               <button
@@ -220,7 +220,7 @@ export function NoteAnchorPopover({
                 onClick={() => onRemoveAnchor(note.noteUid)}
                 className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                Unpin
+                取消锁定
               </button>
             </div>
           </div>

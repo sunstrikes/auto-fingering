@@ -182,11 +182,11 @@ export function MarginRiskGutter({
     isHorizontal = false
   ) => {
     const isSelected = selectedMeasureIndex === summary.measureIndex;
-    const titleParts = [`Measure ${summary.measureIndex + 1}`];
+    const titleParts = [`第 ${summary.measureIndex + 1} 小节`];
     if (summary.warningCount > 0) {
-      titleParts.push(`${summary.warningCount} warning(s): ${summary.labels.join(", ")}`);
+      titleParts.push(`${summary.warningCount} 条提示: ${summary.labels.join("、")}`);
     } else {
-      titleParts.push("No risk warnings");
+      titleParts.push("无风险提示");
     }
 
     const posStyle: React.CSSProperties | undefined = style
@@ -202,8 +202,10 @@ export function MarginRiskGutter({
         data-measure-index={summary.measureIndex}
         data-severity={summary.highestSeverity}
         aria-pressed={isSelected}
-        aria-label={`Measure ${summary.measureIndex + 1}${
-          summary.highestSeverity !== "none" ? ` (${summary.highestSeverity})` : ""
+        aria-label={`第 ${summary.measureIndex + 1} 小节${
+          summary.highestSeverity !== "none"
+            ? ` (${summary.highestSeverity === "danger" ? "高风险" : "警告"})`
+            : ""
         }`}
         title={titleParts.join(" · ")}
         onClick={() => onSelectMeasure(summary.measureIndex)}
@@ -244,7 +246,7 @@ export function MarginRiskGutter({
         <nav
           data-testid="margin-risk-gutter"
           data-orientation="horizontal"
-          aria-label="Measure risk strip"
+          aria-label="小节风险导航条"
           className="relative h-5 shrink-0 select-none"
           style={{ width: `${Math.ceil(totalWidth)}px` }}
         >
@@ -264,7 +266,7 @@ export function MarginRiskGutter({
       <nav
         data-testid="margin-risk-gutter"
         data-orientation="horizontal"
-        aria-label="Measure risk strip"
+        aria-label="小节风险导航条"
         className="flex h-5 w-full items-center gap-1 select-none"
       >
         {measures.map((summary) => renderBarButton(summary, undefined, true))}
@@ -280,7 +282,7 @@ export function MarginRiskGutter({
       <nav
         data-testid="margin-risk-gutter"
         data-orientation="vertical"
-        aria-label="Measure risk gutter"
+        aria-label="小节风险边栏"
         className="relative w-5 shrink-0 select-none"
         style={{ minHeight: `${Math.ceil(maxBottom)}px` }}
       >
@@ -293,7 +295,7 @@ export function MarginRiskGutter({
     <nav
       data-testid="margin-risk-gutter"
       data-orientation="vertical"
-      aria-label="Measure risk gutter"
+      aria-label="小节风险边栏"
       className="flex w-5 shrink-0 flex-col gap-1 select-none"
     >
       {measures.map((summary) => renderBarButton(summary))}

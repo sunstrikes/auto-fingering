@@ -310,7 +310,7 @@ describe("<App /> Web MIDI integration, Practice Settings & local sound", () => 
 
     const settingsBtn = mountedContainer.querySelector('[data-testid="practice-settings-btn"]') as HTMLButtonElement;
     expect(settingsBtn).not.toBeNull();
-    expect(settingsBtn.textContent).toContain("1 connected");
+    expect(settingsBtn.textContent).toContain("已连接 1 台");
 
     // Open Practice Settings modal
     await act(async () => {
@@ -329,7 +329,7 @@ describe("<App /> Web MIDI integration, Practice Settings & local sound", () => 
     await act(async () => {
       access.addInput(dev2);
     });
-    expect(settingsBtn.textContent).toContain("2 connected");
+    expect(settingsBtn.textContent).toContain("已连接 2 台");
     expect(Array.from(select.options).map((o) => o.value)).toEqual(["all", "dev-1", "dev-2"]);
 
     // MIDI Local Sound defaults to OFF -> NoteOn highlights key 60 without triggering audio
@@ -389,7 +389,7 @@ describe("<App /> Web MIDI integration, Practice Settings & local sound", () => 
     });
 
     const settingsBtn = mountedContainer.querySelector('[data-testid="practice-settings-btn"]') as HTMLButtonElement;
-    expect(settingsBtn.textContent).toContain("Unsupported");
+    expect(settingsBtn.textContent).toContain("不支持");
 
     await act(async () => {
       settingsBtn.click();
@@ -398,7 +398,7 @@ describe("<App /> Web MIDI integration, Practice Settings & local sound", () => 
     const guide = mountedContainer.querySelector('[data-testid="midi-usb-guide"]');
     expect(guide).not.toBeNull();
     expect(guide!.textContent).toContain("USB");
-    expect(guide!.textContent?.toLowerCase()).toContain("unavailable");
+    expect(guide!.textContent).toContain("不可用");
   });
 
   it("filters single port via Practice Settings, and emits synthetic NoteOn/NoteOff from UnifiedPiano88 clicks and QWERTY keys", async () => {
@@ -429,7 +429,7 @@ describe("<App /> Web MIDI integration, Practice Settings & local sound", () => 
       // Top header MIDI status button opens Practice Settings modal
       const headerBtn = mountedContainer.querySelector('[data-testid="header-midi-status-btn"]') as HTMLButtonElement;
       expect(headerBtn).not.toBeNull();
-      expect(headerBtn.textContent).toContain("MIDI: 2 connected");
+      expect(headerBtn.textContent).toContain("MIDI: 已连接 2 台");
 
       await act(async () => {
         headerBtn.click();

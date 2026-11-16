@@ -324,14 +324,14 @@ describe("UnifiedPiano88 component", () => {
 
       expect(prevBtn.disabled).toBe(true);
       expect(nextBtn.disabled).toBe(false);
-      expect(container.textContent).toContain(`Slice 1/${scoreDoc.onsetSlices.length}`);
+      expect(container.textContent).toContain(`切片 1/${scoreDoc.onsetSlices.length}`);
 
       let sawCrossOver = false;
       for (let i = 1; i < scoreDoc.onsetSlices.length; i++) {
         await act(async () => {
           nextBtn.click();
         });
-        expect(container.textContent).toContain(`Slice ${i + 1}/${scoreDoc.onsetSlices.length}`);
+        expect(container.textContent).toContain(`切片 ${i + 1}/${scoreDoc.onsetSlices.length}`);
         expect(prevBtn.disabled).toBe(false);
         const rhOverlay = container.querySelector('[data-testid="hand-overlay-RH"]');
         if (rhOverlay?.getAttribute("data-crossing-style") === "cross-over") {
@@ -446,7 +446,7 @@ describe("App UnifiedPiano88 bottom-dock integration", () => {
 
       const dock = container.querySelector('[data-testid="unified-piano-88"]')!;
       expect(dock).not.toBeNull();
-      expect(dock.textContent).toContain("Slice 1/3");
+      expect(dock.textContent).toContain("切片 1/3");
       expect(dock.querySelector('[data-testid="hand-overlay-RH"]')).not.toBeNull();
       expect(dock.querySelector('[data-testid="hand-overlay-LH"]')).not.toBeNull();
 
@@ -462,7 +462,7 @@ describe("App UnifiedPiano88 bottom-dock integration", () => {
         nextBtn.click();
       });
 
-      expect(dock.textContent).toContain("Slice 3/3");
+      expect(dock.textContent).toContain("切片 3/3");
       expect(dock.querySelector('[data-midi="64"]')?.getAttribute("data-key-rh")).toBe("active");
       expect(dock.querySelector('[data-midi="48"]')?.getAttribute("data-key-lh")).toBe("held");
 
