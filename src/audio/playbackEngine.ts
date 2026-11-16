@@ -1,5 +1,12 @@
 import { computeTieChainEndByRoot } from "../domain/tieUtils";
-import type { Hand, OnsetSlice, ScoreDocument } from "../domain/types";
+import {
+  createDefaultAbLoopBounds,
+  normalizeAbLoopBounds,
+  type AbLoopBounds,
+  type Hand,
+  type OnsetSlice,
+  type ScoreDocument,
+} from "../domain/types";
 import {
   buildCountInBeats,
   buildMetronomeBeats,
@@ -87,6 +94,13 @@ export interface PlaybackEngine {
   setMetronomeVolume(volume: number): void;
   isCountInEnabled(): boolean;
   setCountInEnabled(enabled: boolean): void;
+  getAbLoop(): AbLoopBounds;
+  setAbLoop(bounds: AbLoopBounds): void;
+  playCountIn(
+    scoreDoc: ScoreDocument,
+    measureIndex: number,
+    onComplete: () => void
+  ): Promise<void>;
   play(scoreDoc: ScoreDocument, options?: PlayOptions): Promise<void>;
   pause(): void;
   stop(): void;
@@ -232,6 +246,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
   let metronomeEnabled = false;
   let metronomePaused = false;
   let countInEnabled = false;
+  let abLoop: AbLoopBounds = createDefaultAbLoopBounds(0);
   let runToken = 0;
   let rafId: number | null = null;
 
@@ -385,17 +400,43 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     return 0;
   };
 
+  const resolveLoopRange = (doc: ScoreDocument) => {
+    if (!abLoop.enabled || doc.measureTimelines.length === 0) return null;
+    const norm = normalizeAbLoopBounds(abLoop, doc.measureTimelines.length);
+    const startMeasure = doc.measureTimelines[norm.startMeasureIndex];
+    const endMeasure = doc.measureTimelines[norm.endMeasureIndex];
+    if (!startMeasure || !endMeasure) return null;
+    return {
+      startMeasureIndex: norm.startMeasureIndex,
+      endMeasureIndex: norm.endMeasureIndex,
+      startSec: startMeasure.startSec,
+      endSec: endMeasure.endSec,
+      loopGap: norm.loopGap,
+    };
+  };
+
   const startPlaybackLoop = (
     doc: ScoreDocument,
     startScoreSec: number,
     fromSliceId?: string | null,
-    useCountIn = false
+    useCountIn = false,
+    countInStartAudioTimeOverride?: number
   ) => {
+    const loopRange = resolveLoopRange(doc);
     const schedule = buildPlaybackSchedule(doc, fromSliceId);
     // If resuming from a paused timestamp mid-score, filter notes at or after startScoreSec
     if (!fromSliceId && startScoreSec > 0) {
       schedule.notes = schedule.notes.filter((n) => n.onsetSec >= startScoreSec - 1e-4);
       schedule.startScoreSec = startScoreSec;
+    }
+
+    if (loopRange) {
+      schedule.notes = schedule.notes
+        .filter((n) => n.onsetSec < loopRange.endSec - 1e-6)
+        .map((n) => ({
+          ...n,
+          durationSec: Math.min(n.durationSec, Math.max(0.05, loopRange.endSec - n.onsetSec)),
+        }));
     }
 
     activeDoc = doc;
@@ -407,13 +448,17 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     lastEmittedSliceId = null;
     lastCursorBeatKey = null;
 
-    activeScoreBeats = buildMetronomeBeats(doc).filter((b) => b.scoreSec >= startScoreSec - 1e-4);
+    activeScoreBeats = buildMetronomeBeats(doc).filter(
+      (b) =>
+        b.scoreSec >= startScoreSec - 1e-4 &&
+        (!loopRange || b.scoreSec < loopRange.endSec - 1e-4)
+    );
     nextScoreBeatIndex = 0;
     visualBeatTimeline = [];
     lastEmittedBeatKey = null;
 
     const ctx = deps.audioEngine.getAudioContext();
-    const countInStartAudioTime = ctx.currentTime;
+    const countInStartAudioTime = countInStartAudioTimeOverride ?? ctx.currentTime;
     const startMeasureIndex = resolveStartMeasureIndex(doc, startScoreSec, fromSliceId);
     const countIn = useCountIn ? buildCountInBeats(doc, startMeasureIndex, speed) : null;
     const countInDurationRealSec = countIn ? countIn.totalDurationRealSec : 0;
@@ -455,7 +500,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
 
     const token = runToken;
     const step = () => {
-      if (token !== runToken || state !== "playing" || !activeSchedule) return;
+      if (token !== runToken || state !== "playing" || !activeSchedule || !activeDoc) return;
       const now = deps.audioEngine.getAudioContext().currentTime;
       scheduleUpcomingNotes();
       scheduleUpcomingBeats();
@@ -468,6 +513,20 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       }
 
       const scoreSec = getCurrentScoreSec();
+      const activeLoop = resolveLoopRange(activeDoc);
+      if (activeLoop && scoreSec >= activeLoop.endSec - 1e-6) {
+        const loopEndAudioTime =
+          anchorAudioTime + Math.max(0, activeLoop.endSec - anchorScoreSec) / speed;
+        startPlaybackLoop(
+          activeDoc,
+          activeLoop.startSec,
+          undefined,
+          activeLoop.loopGap,
+          loopEndAudioTime
+        );
+        return;
+      }
+
       emitSyncForScoreSec(scoreSec);
 
       if (scoreSec >= activeSchedule.totalDurationSec && nextNoteIndex >= activeSchedule.notes.length) {
@@ -578,6 +637,82 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       countInEnabled = enabled;
     },
 
+    getAbLoop: () => abLoop,
+
+    setAbLoop(bounds: AbLoopBounds) {
+      const normalized = normalizeAbLoopBounds(
+        bounds,
+        activeDoc?.measureTimelines.length
+      );
+      abLoop = normalized;
+      if (state === "playing" && activeDoc) {
+        const currentScore = getCurrentScoreSec();
+        const loopRange = resolveLoopRange(activeDoc);
+        let nextScore = currentScore;
+        if (loopRange && (currentScore < loopRange.startSec - 1e-4 || currentScore >= loopRange.endSec - 1e-4)) {
+          nextScore = loopRange.startSec;
+        }
+        runToken += 1;
+        clearRaf();
+        deps.audioEngine.stopAll();
+        metronomeAudio.cancelPending();
+        startPlaybackLoop(activeDoc, nextScore, undefined, false);
+      }
+    },
+
+    async playCountIn(scoreDoc: ScoreDocument, measureIndex: number, onComplete: () => void) {
+      const token = ++runToken;
+      clearRaf();
+      metronomeAudio.cancelPending();
+      await deps.audioEngine.prepare();
+      if (token !== runToken) return;
+
+      const ctx = deps.audioEngine.getAudioContext();
+      const startAudioTime = ctx.currentTime;
+      const countIn = buildCountInBeats(scoreDoc, measureIndex, speed);
+      const endAudioTime = startAudioTime + countIn.totalDurationRealSec;
+
+      visualBeatTimeline = [];
+      lastEmittedBeatKey = null;
+
+      for (const beat of countIn.beats) {
+        const audioTime = startAudioTime + beat.offsetRealSec;
+        metronomeAudio.triggerClick({ time: audioTime, isAccent: beat.isAccent });
+        visualBeatTimeline.push({
+          key: `countin:${beat.measureIndex}:${beat.beatIndex}:${audioTime.toFixed(4)}`,
+          audioTime,
+          event: {
+            measureIndex: beat.measureIndex,
+            beatIndex: beat.beatIndex,
+            beatNumber: beat.beatNumber,
+            totalBeats: beat.totalBeats,
+            isAccent: beat.isAccent,
+            isCountIn: true,
+            countdownRemaining: beat.countdownRemaining,
+          },
+        });
+      }
+
+      emitActiveMetronomeBeat();
+
+      const stepCountIn = () => {
+        if (token !== runToken) return;
+        const now = deps.audioEngine.getAudioContext().currentTime;
+        emitActiveMetronomeBeat();
+        if (now >= endAudioTime - 1e-6) {
+          clearRaf();
+          visualBeatTimeline = [];
+          lastEmittedBeatKey = null;
+          deps.onMetronomeBeat?.(null);
+          onComplete();
+          return;
+        }
+        rafId = requestRaf(stepCountIn);
+      };
+
+      rafId = requestRaf(stepCountIn);
+    },
+
     async play(scoreDoc: ScoreDocument, options?: PlayOptions) {
       const token = ++runToken;
       clearRaf();
@@ -612,6 +747,15 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       } else if (!options?.restart && prevState === "paused" && pausedScoreSec !== null && activeDoc === scoreDoc) {
         startScoreSec = pausedScoreSec;
         isResumingPaused = true;
+      }
+
+      const loopRange = resolveLoopRange(scoreDoc);
+      if (
+        loopRange &&
+        (startScoreSec < loopRange.startSec - 1e-4 || startScoreSec >= loopRange.endSec - 1e-4)
+      ) {
+        startScoreSec = loopRange.startSec;
+        startSliceId = null;
       }
 
       const useCountIn = countInEnabled && !isResumingPaused;

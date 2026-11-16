@@ -8,11 +8,13 @@ export interface PracticeSettingsModalProps {
   speedMultiplier: SpeedMultiplier;
   baseBpm: number;
   countInEnabled: boolean;
+  loopGapEnabled?: boolean;
   metronomeVolume: number;
   skipGraceNotes?: boolean;
   onSelectDevice: (deviceId: string | null) => void;
   onToggleLocalSound: (enabled: boolean) => void;
   onToggleCountIn: () => void;
+  onToggleLoopGap?: () => void;
   onChangeMetronomeVolume: (volume: number) => void;
   onToggleSkipGraceNotes?: () => void;
   onClose: () => void;
@@ -59,11 +61,13 @@ export function PracticeSettingsModal({
   speedMultiplier,
   baseBpm,
   countInEnabled,
+  loopGapEnabled = false,
   metronomeVolume,
   skipGraceNotes = false,
   onSelectDevice,
   onToggleLocalSound,
   onToggleCountIn,
+  onToggleLoopGap,
   onChangeMetronomeVolume,
   onToggleSkipGraceNotes,
   onClose,
@@ -195,6 +199,23 @@ export function PracticeSettingsModal({
               aria-label="One-Measure Count-In"
               checked={countInEnabled}
               onChange={onToggleCountIn}
+              className="h-4 w-4 accent-blue-600"
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div>
+              <div className="font-medium text-slate-900">Loop Gap (1-Measure Count-In)</div>
+              <div className="text-[11px] text-slate-500">
+                Insert one full measure of Count-In clicks at measure A&apos;s meter before each A-B Loop restart
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              data-testid="loop-gap-toggle"
+              aria-label="Loop Gap (1-Measure Count-In)"
+              checked={loopGapEnabled}
+              onChange={() => onToggleLoopGap?.()}
               className="h-4 w-4 accent-blue-600"
             />
           </div>

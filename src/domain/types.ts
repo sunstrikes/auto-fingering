@@ -158,3 +158,49 @@ export interface WaitingModeState {
   hitMidis: Set<number>;
   wrongMidis: Set<number>;
 }
+
+export interface AbLoopBounds {
+  startMeasureIndex: number;
+  endMeasureIndex: number;
+  enabled: boolean;
+  loopGap: boolean;
+}
+
+/**
+ * Normalizes `AbLoopBounds` so `0 <= startMeasureIndex <= endMeasureIndex`
+ * (and clamps to `measureCount - 1` when `measureCount > 0`).
+ */
+export function normalizeAbLoopBounds(
+  bounds: AbLoopBounds,
+  measureCount?: number
+): AbLoopBounds {
+  const maxMeasure =
+    typeof measureCount === "number" && Number.isFinite(measureCount) && measureCount > 0
+      ? Math.floor(measureCount) - 1
+      : null;
+
+  const clampIndex = (raw: number): number => {
+    const floored = Number.isFinite(raw) ? Math.floor(raw) : 0;
+    const nonNegative = Math.max(0, floored);
+    return maxMeasure !== null ? Math.min(maxMeasure, nonNegative) : nonNegative;
+  };
+
+  const a = clampIndex(bounds.startMeasureIndex);
+  const b = clampIndex(bounds.endMeasureIndex);
+
+  return {
+    startMeasureIndex: Math.min(a, b),
+    endMeasureIndex: Math.max(a, b),
+    enabled: Boolean(bounds.enabled),
+    loopGap: Boolean(bounds.loopGap),
+  };
+}
+
+export function createDefaultAbLoopBounds(measureCount = 0): AbLoopBounds {
+  return {
+    startMeasureIndex: 0,
+    endMeasureIndex: measureCount > 0 ? Math.max(0, measureCount - 1) : 0,
+    enabled: false,
+    loopGap: false,
+  };
+}
