@@ -44,8 +44,12 @@ export interface UnifiedPiano88Props {
   practiceMode?: PracticeMode;
   wrongMidis?: ReadonlySet<number>;
   hitMidis?: ReadonlySet<number>;
+  pressedMidis?: ReadonlySet<number>;
+  sustainPedalPressed?: boolean;
   onSelectSlice?: (sliceId: string) => void;
   onAuditionMidi?: (midi: number) => void;
+  onVirtualNoteOn?: (midi: number, velocity?: number) => void;
+  onVirtualNoteOff?: (midi: number) => void;
 }
 
 const WHITE_KEY_W = PIANO_WHITE_KEY_W;
@@ -420,8 +424,12 @@ export function UnifiedPiano88({
   practiceMode = "both",
   wrongMidis,
   hitMidis,
+  pressedMidis,
+  sustainPedalPressed = false,
   onSelectSlice,
   onAuditionMidi,
+  onVirtualNoteOn,
+  onVirtualNoteOff,
 }: UnifiedPiano88Props) {
   const dimRh = practiceMode === "lh-only";
   const dimLh = practiceMode === "rh-only";
@@ -532,9 +540,11 @@ export function UnifiedPiano88({
 
   const handleKeyPress = (midi: number) => {
     setAuditionMidi(midi);
+    onVirtualNoteOn?.(midi, 96);
     onAuditionMidi?.(midi);
     window.setTimeout(() => {
       setAuditionMidi((prev) => (prev === midi ? null : prev));
+      onVirtualNoteOff?.(midi);
     }, 180);
   };
 
@@ -570,7 +580,15 @@ export function UnifiedPiano88({
         </div>
 
         <div className="flex items-center gap-1.5">
-          <span className="text-[11px] text-slate-400">Click any key to audition</span>
+          {sustainPedalPressed && (
+            <span
+              data-testid="midi-sustain-indicator"
+              className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800"
+            >
+              Sustain Ped
+            </span>
+          )}
+          <span className="text-[11px] text-slate-400">Click any key or press Z–M / Q–I</span>
           {slices.length > 0 && (
             <>
               <span className="ml-1 text-[11px] text-slate-500">
@@ -651,7 +669,8 @@ export function UnifiedPiano88({
           <g data-layer="white-keys">
             {keysLayout.whites.map(({ midi, x, label }) => {
               const info = displayFrame.activeKeyHighlights.get(midi);
-              const isAudition = auditionMidi === midi;
+              const isPressed = Boolean(pressedMidis?.has(midi));
+              const isAudition = auditionMidi === midi || isPressed;
               const isWrong = wrongMidis?.has(midi) ?? false;
               const isHit = hitMidis?.has(midi) ?? false;
               const isAccompanimentOnly = Boolean(
@@ -663,6 +682,8 @@ export function UnifiedPiano88({
                 fill = "#ef4444";
               } else if (isHit) {
                 fill = "#86efac";
+              } else if (isPressed) {
+                fill = "#fde68a";
               } else if (isBoth) {
                 fill = "url(#piano-dual-overlap)";
               } else if (info?.rh === "active") {
@@ -678,7 +699,7 @@ export function UnifiedPiano88({
               }
 
               const hasPressed = Boolean(info || isAudition || isWrong || isHit);
-              const pressShift = info || isWrong || isHit ? 2 : 0;
+              const pressShift = info || isPressed || isWrong || isHit ? 2 : 0;
 
               return (
                 <g
@@ -690,6 +711,7 @@ export function UnifiedPiano88({
                   data-wrong-note={isWrong ? "true" : undefined}
                   data-hit-note={isHit ? "true" : undefined}
                   data-accompaniment-dimmed={isAccompanimentOnly ? "true" : undefined}
+                  data-key-pressed={isPressed ? "true" : undefined}
                   onClick={() => handleKeyPress(midi)}
                   className="cursor-pointer"
                 >
@@ -743,7 +765,8 @@ export function UnifiedPiano88({
           <g data-layer="black-keys">
             {keysLayout.blacks.map(({ midi, x }) => {
               const info = displayFrame.activeKeyHighlights.get(midi);
-              const isAudition = auditionMidi === midi;
+              const isPressed = Boolean(pressedMidis?.has(midi));
+              const isAudition = auditionMidi === midi || isPressed;
               const isWrong = wrongMidis?.has(midi) ?? false;
               const isHit = hitMidis?.has(midi) ?? false;
               const isAccompanimentOnly = Boolean(
@@ -755,6 +778,8 @@ export function UnifiedPiano88({
                 fill = "#dc2626";
               } else if (isHit) {
                 fill = "#16a34a";
+              } else if (isPressed) {
+                fill = "#f59e0b";
               } else if (isBoth) {
                 fill = "url(#piano-dual-overlap)";
               } else if (info?.rh === "active") {
@@ -779,6 +804,7 @@ export function UnifiedPiano88({
                   data-wrong-note={isWrong ? "true" : undefined}
                   data-hit-note={isHit ? "true" : undefined}
                   data-accompaniment-dimmed={isAccompanimentOnly ? "true" : undefined}
+                  data-key-pressed={isPressed ? "true" : undefined}
                   onClick={() => handleKeyPress(midi)}
                   className="cursor-pointer"
                 >
@@ -786,7 +812,7 @@ export function UnifiedPiano88({
                     x={x}
                     y={KEYS_Y}
                     width={BLACK_KEY_W}
-                    height={BLACK_KEY_H + (info || isWrong || isHit ? 2 : 0)}
+                    height={BLACK_KEY_H + (info || isPressed || isWrong || isHit ? 2 : 0)}
                     rx={2}
                     fill={fill}
                     stroke={isWrong ? "#991b1b" : info?.isRepairedAnchor ? "#f87171" : "#334155"}

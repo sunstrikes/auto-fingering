@@ -155,8 +155,10 @@ function createInProcessSolverClientFactory() {
       onmessage: null,
       onerror: null,
       postMessage(msg: WorkerRequest) {
-        if (msg.type === "solve") {
-          const result = solveFingering(msg.onsetSlices, msg.profile);
+        if (msg.type !== "local-resolve") {
+          const result = solveFingering(msg.onsetSlices, msg.profile, {
+            ignoreExistingFingerings: msg.ignoreExistingFingerings,
+          });
           const response: WorkerResponse = {
             requestId: msg.requestId,
             ok: true,
@@ -213,9 +215,13 @@ const SINGLE_STAFF_LH_XML = `<?xml version="1.0" encoding="UTF-8"?>
 
 async function uploadXml(container: HTMLElement, xml: string, name = "test.musicxml") {
   const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-  const file = new File([xml], name, { type: "application/xml" });
+  const fakeFile = {
+    name,
+    text: async () => xml,
+    arrayBuffer: async () => new TextEncoder().encode(xml).buffer,
+  };
+  Object.defineProperty(input, "files", { value: [fakeFile], configurable: true });
   await act(async () => {
-    Object.defineProperty(input, "files", { value: [file], configurable: true });
     input.dispatchEvent(new Event("change", { bubbles: true }));
     await new Promise((r) => setTimeout(r, 40));
   });

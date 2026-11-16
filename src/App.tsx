@@ -16,6 +16,7 @@ import {
   buildPracticeSteps,
   createWaitingModeState,
   doesNoteOnMatchPausedStep,
+  handleWaitingNoteOff,
   handleWaitingNoteOn,
 } from "./practice/waitingMode";
 import type { MxlContainer } from "./musicxml/mxl";
@@ -35,6 +36,20 @@ import {
   type ScoreRendererFactory,
 } from "./components/ScoreViewer";
 import { TransportPracticeBar } from "./components/TransportPracticeBar";
+import {
+  PracticeSettingsModal,
+  formatMidiStatusLabel,
+  getMidiStatusBadgeClass,
+} from "./components/PracticeSettingsModal";
+import {
+  createWebMidiController,
+  getDefaultRequestMIDIAccess,
+  QWERTY_TO_MIDI,
+  type MIDIAccessLike,
+  type MidiConnectionState,
+  type MidiInputEvent,
+  type WebMidiController,
+} from "./midi/webMidi";
 import {
   createPianoAudioEngine,
   type AudioEngineStatus,
@@ -66,20 +81,27 @@ export interface AppAudioDeps extends PianoAudioDeps {
   cancelAnimationFrame?: (id: number) => void;
 }
 
+export interface AppMidiDeps {
+  requestMIDIAccess?: () => Promise<MIDIAccessLike>;
+}
+
 export interface AppProps {
   solverClientFactory?: () => SolverClient;
   scoreRendererFactory?: ScoreRendererFactory;
   audioDeps?: AppAudioDeps;
+  midiDeps?: AppMidiDeps;
 }
 
 export default function App({
   solverClientFactory = createSolverClient,
   scoreRendererFactory,
   audioDeps,
+  midiDeps,
 }: AppProps) {
   const solverClientRef = useRef<SolverClient | null>(null);
   const audioEngineRef = useRef<PianoAudioEngine | null>(null);
   const playbackEngineRef = useRef<PlaybackEngine | null>(null);
+  const midiControllerRef = useRef<WebMidiController | null>(null);
   const [isResolving, setIsResolving] = useState<boolean>(false);
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
   const [playbackSpeed, setPlaybackSpeed] = useState<SpeedMultiplier>(1.0);
@@ -90,7 +112,6 @@ export default function App({
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("both");
   const [waitingModeEnabled, setWaitingModeEnabled] = useState<boolean>(false);
   const [skipGraceNotes, setSkipGraceNotes] = useState<boolean>(false);
-  const [midiLocalSound, setMidiLocalSound] = useState<boolean>(true);
   const [waitingState, setWaitingState] = useState<WaitingModeState>(() => createWaitingModeState(0));
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
@@ -100,6 +121,18 @@ export default function App({
   const [popoverAnchorRect, setPopoverAnchorRect] = useState<PopoverAnchorRect | null>(null);
   const [diffDropdownOpen, setDiffDropdownOpen] = useState<boolean>(false);
   const [warningNavIndex, setWarningNavIndex] = useState<number>(-1);
+  const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  const [midiLocalSound, setMidiLocalSound] = useState<boolean>(false);
+  const [midiState, setMidiState] = useState<MidiConnectionState>({
+    status: "unsupported",
+    devices: [],
+    selectedDeviceId: null,
+    errorMessage: null,
+  });
+  const [pressedMidis, setPressedMidis] = useState<Set<number>>(() => new Set());
+  const [sustainPedalPressed, setSustainPedalPressed] = useState<boolean>(false);
+  const midiLocalSoundRef = useRef<boolean>(midiLocalSound);
+  midiLocalSoundRef.current = midiLocalSound;
 
   const fileName = useStudioStore((s) => s.fileName);
   const scoreTitle = useStudioStore((s) => s.scoreTitle);
@@ -168,6 +201,77 @@ export default function App({
       audioEngineRef.current = null;
     };
   }, [audioDeps]);
+
+  const handleMidiInputEvent = (event: MidiInputEvent) => {
+    if (event.type === "noteon") {
+      setPressedMidis((prev) => {
+        if (prev.has(event.midi)) return prev;
+        const next = new Set(prev);
+        next.add(event.midi);
+        return next;
+      });
+      const shouldPlayLocalAudio = waitingModeEnabled
+        ? midiLocalSoundRef.current
+        : event.source !== "midi" || midiLocalSoundRef.current;
+      if (shouldPlayLocalAudio) {
+        const audio = audioEngineRef.current;
+        if (audio) {
+          void audio.prepare().then(() => {
+            const ctx = audio.getAudioContext();
+            audio.triggerNote({
+              midi: event.midi,
+              time: ctx.currentTime,
+              duration: 0.35,
+              velocity: event.velocity,
+            });
+          });
+        }
+      }
+      if (waitingModeEnabled) {
+        processWaitingNoteOn(event.midi);
+      }
+      return;
+    }
+
+    if (event.type === "noteoff") {
+      setPressedMidis((prev) => {
+        if (!prev.has(event.midi)) return prev;
+        const next = new Set(prev);
+        next.delete(event.midi);
+        return next;
+      });
+      if (waitingModeEnabled) {
+        setWaitingState((prev) => handleWaitingNoteOff(prev, event.midi));
+      }
+      return;
+    }
+
+    if (event.type === "sustain") {
+      setSustainPedalPressed(event.pressed);
+    }
+  };
+
+  const handleMidiInputEventRef = useRef(handleMidiInputEvent);
+  handleMidiInputEventRef.current = handleMidiInputEvent;
+
+  useEffect(() => {
+    const requestMIDIAccess = midiDeps
+      ? midiDeps.requestMIDIAccess
+      : getDefaultRequestMIDIAccess();
+
+    const controller = createWebMidiController({
+      requestMIDIAccess,
+      onStateChange: setMidiState,
+      onMidiEvent: (event) => handleMidiInputEventRef.current(event),
+    });
+    midiControllerRef.current = controller;
+    void controller.connect();
+
+    return () => {
+      controller.dispose();
+      midiControllerRef.current = null;
+    };
+  }, [midiDeps]);
 
   const solveAndRender = async (
     nextDoc: ScoreDocument,
@@ -649,90 +753,123 @@ export default function App({
     setPopoverOpen(true);
   };
 
-  const handleAuditionMidi = (midi: number) => {
-    if (waitingModeEnabled) {
-      if (midiLocalSound) {
-        const audio = audioEngineRef.current;
-        if (audio) {
-          void audio.prepare().then(() => {
-            const ctx = audio.getAudioContext();
-            audio.triggerNote({
-              midi,
-              time: ctx.currentTime,
-              duration: 0.35,
-            });
-          });
-        }
+  const processWaitingNoteOn = (midi: number) => {
+    if (!waitingModeEnabled || practiceSteps.length === 0) return;
+
+    let isPlayingNow = playbackState === "playing";
+    if (playbackState === "paused") {
+      const currentStep = practiceSteps[waitingState.currentStepIndex];
+      if (!doesNoteOnMatchPausedStep(currentStep, midi)) {
+        return;
       }
-
-      if (practiceSteps.length === 0) return;
-
-      let activeState = waitingState;
-      let isPlayingNow = playbackState === "playing";
-
-      if (playbackState === "paused") {
-        const currentStep = practiceSteps[waitingState.currentStepIndex];
-        if (!doesNoteOnMatchPausedStep(currentStep, midi)) {
-          return;
-        }
-        isPlayingNow = true;
-        setPlaybackState("playing");
-        playbackEngineRef.current?.setMetronomePaused(true);
-        syncToPracticeStep(currentStep, "playing");
-      }
-
-      if (!isPlayingNow) return;
-
-      const result = handleWaitingNoteOn(activeState, practiceSteps, midi);
-      setWaitingState(result.nextState);
-
-      if (result.completedStep) {
-        playAccompanimentNotes(result.completedStep);
-        if (result.advancedToStep) {
-          triggerStepAdvanceMetronome(result.advancedToStep);
-          syncToPracticeStep(result.advancedToStep, "playing");
-        } else if (result.completedScore) {
-          setPlaybackState("stopped");
-          playbackEngineRef.current?.setMetronomePaused(false);
-          setActiveMetronomeBeat(null);
-          syncToPracticeStep(null, "stopped");
-        }
-      }
-      return;
+      isPlayingNow = true;
+      setPlaybackState("playing");
+      playbackEngineRef.current?.setMetronomePaused(true);
+      syncToPracticeStep(currentStep, "playing");
     }
 
-    const audio = audioEngineRef.current;
-    if (!audio) return;
-    void audio.prepare().then(() => {
-      const ctx = audio.getAudioContext();
-      audio.triggerNote({
-        midi,
-        time: ctx.currentTime,
-        duration: 0.35,
-      });
-    });
-  };
+    if (!isPlayingNow) return;
 
+    const result = handleWaitingNoteOn(waitingState, practiceSteps, midi);
+    setWaitingState(result.nextState);
+
+    if (result.completedStep) {
+      playAccompanimentNotes(result.completedStep);
+      if (result.advancedToStep) {
+        triggerStepAdvanceMetronome(result.advancedToStep);
+        syncToPracticeStep(result.advancedToStep, "playing");
+      } else if (result.completedScore) {
+        setPlaybackState("stopped");
+        playbackEngineRef.current?.setMetronomePaused(false);
+        setActiveMetronomeBeat(null);
+        syncToPracticeStep(null, "stopped");
+      }
+    }
+  };
   useEffect(() => {
+    const activeQwertyMidis = new Map<string, number>();
+
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (e.key === "Escape") {
         setPopoverOpen(false);
         setDiffDropdownOpen(false);
+        setSettingsOpen(false);
         return;
       }
-      if (selectedNote && !selectedNote.isTieStop && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (
+        popoverOpen &&
+        selectedNote &&
+        !selectedNote.isTieStop &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
         if (e.key >= "1" && e.key <= "5") {
           const finger = Number(e.key) as Finger;
           const mode = anchors[selectedNote.noteUid]?.mode ?? "phrase";
           handleSetAnchor(selectedNote.noteUid, finger, mode);
+          return;
+        }
+      }
+
+      if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) {
+        const keyLower = e.key.toLowerCase();
+        const mappedMidi = QWERTY_TO_MIDI[keyLower];
+        if (mappedMidi !== undefined) {
+          activeQwertyMidis.set(keyLower, mappedMidi);
+          handleMidiInputEventRef.current({
+            type: "noteon",
+            midi: mappedMidi,
+            velocity: 96,
+            channel: 0,
+            portId: "qwerty-keyboard",
+            source: "qwerty",
+          });
         }
       }
     };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      const keyLower = e.key.toLowerCase();
+      const mappedMidi = activeQwertyMidis.get(keyLower) ?? QWERTY_TO_MIDI[keyLower];
+      if (mappedMidi !== undefined && activeQwertyMidis.has(keyLower)) {
+        activeQwertyMidis.delete(keyLower);
+        handleMidiInputEventRef.current({
+          type: "noteoff",
+          midi: mappedMidi,
+          velocity: 0,
+          channel: 0,
+          portId: "qwerty-keyboard",
+          source: "qwerty",
+        });
+      }
+    };
+
+    const onBlur = () => {
+      for (const midi of activeQwertyMidis.values()) {
+        handleMidiInputEventRef.current({
+          type: "noteoff",
+          midi,
+          velocity: 0,
+          channel: 0,
+          portId: "qwerty-keyboard",
+          source: "qwerty",
+        });
+      }
+      activeQwertyMidis.clear();
+    };
+
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedNote, anchors]);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [popoverOpen, selectedNote, anchors]);
 
   const canUndo = history.past.length > 0;
   const canRedo = history.future.length > 0;
@@ -1076,6 +1213,15 @@ export default function App({
               >
                 Download .{exportFormat}
               </button>
+
+              <button
+                type="button"
+                data-testid="header-midi-status-btn"
+                onClick={() => setSettingsOpen(true)}
+                className={`rounded-lg border px-3 py-2 text-xs font-medium transition hover:opacity-90 ${getMidiStatusBadgeClass(midiState)}`}
+              >
+                {formatMidiStatusLabel(midiState)} · Settings
+              </button>
             </div>
           </div>
         </div>
@@ -1269,6 +1415,8 @@ export default function App({
         measureCount={measureCount}
         measureTimelines={scoreDoc?.measureTimelines ?? []}
         activeMeasureIndex={cursorTarget?.measureIndex ?? selectedMeasureIndex}
+        midiStatusLabel={formatMidiStatusLabel(midiState)}
+        onOpenSettings={() => setSettingsOpen(true)}
         metronomeEnabled={metronomeEnabled}
         metronomePaused={waitingModeEnabled && playbackState === "playing"}
         metronomeVolume={metronomeVolume}
@@ -1303,10 +1451,48 @@ export default function App({
           practiceMode={effectivePracticeMode}
           wrongMidis={waitingState.wrongMidis}
           hitMidis={waitingState.hitMidis}
+          pressedMidis={pressedMidis}
+          sustainPedalPressed={sustainPedalPressed}
           onSelectSlice={handleSelectSlice}
-          onAuditionMidi={handleAuditionMidi}
+          onVirtualNoteOn={(midi, velocity = 96) =>
+            handleMidiInputEvent({
+              type: "noteon",
+              midi,
+              velocity,
+              channel: 0,
+              portId: "virtual-keyboard",
+              source: "virtual",
+            })
+          }
+          onVirtualNoteOff={(midi) =>
+            handleMidiInputEvent({
+              type: "noteoff",
+              midi,
+              velocity: 0,
+              channel: 0,
+              portId: "virtual-keyboard",
+              source: "virtual",
+            })
+          }
         />
       </div>
+
+      <PracticeSettingsModal
+        open={settingsOpen}
+        midiState={midiState}
+        midiLocalSound={midiLocalSound}
+        speedMultiplier={playbackSpeed}
+        baseBpm={scoreDoc?.tempoPoints[0]?.bpm ?? 100}
+        countInEnabled={countInEnabled}
+        metronomeVolume={metronomeVolume}
+        skipGraceNotes={skipGraceNotes}
+        onSelectDevice={(deviceId) => midiControllerRef.current?.setSelectedDeviceId(deviceId)}
+        onToggleLocalSound={setMidiLocalSound}
+        onToggleCountIn={handleToggleCountIn}
+        onChangeMetronomeVolume={handleChangeMetronomeVolume}
+        onToggleSkipGraceNotes={handleToggleSkipGraceNotes}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   );
 }
