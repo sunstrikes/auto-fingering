@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { DEFAULT_HAND_SPAN_PROFILE, type Hand, type SolveResult } from "./domain/types";
+import {
+  DEFAULT_HAND_SPAN_PROFILE,
+  type Hand,
+  type HandSpanProfile,
+  type SolveResult,
+  type SpanPreset,
+} from "./domain/types";
 import type { MxlContainer } from "./musicxml/mxl";
 import { parseMusicXml } from "./musicxml/parser";
 import { exportScoreOutput, loadScoreInput, type ExportFormat } from "./musicxml/scoreSession";
@@ -7,7 +13,17 @@ import { serializeScoreDocument, writeFingeringsToScore } from "./musicxml/write
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
 import { ScoreViewer } from "./components/ScoreViewer";
 
-export default function App() {
+const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
+  { preset: "S", title: "Small hand span (0.82x)" },
+  { preset: "M", title: "Medium hand span (1.00x)" },
+  { preset: "L", title: "Large hand span (1.18x)" },
+];
+
+export interface AppProps {
+  solverClientFactory?: () => SolverClient;
+}
+
+export default function App({ solverClientFactory = createSolverClient }: AppProps) {
   const solverClientRef = useRef<SolverClient | null>(null);
   const [fileName, setFileName] = useState<string>("");
   const [scoreTitle, setScoreTitle] = useState<string>("");
@@ -16,6 +32,9 @@ export default function App() {
   const [exportFormat, setExportFormat] = useState<ExportFormat>("musicxml");
   const [isSingleStaff, setIsSingleStaff] = useState<boolean>(false);
   const [singleStaffHand, setSingleStaffHand] = useState<Hand>("RH");
+  const [handSpanProfile, setHandSpanProfile] = useState<HandSpanProfile>(
+    DEFAULT_HAND_SPAN_PROFILE
+  );
   const [renderedXml, setRenderedXml] = useState<string | null>(null);
   const [solveResult, setSolveResult] = useState<SolveResult | null>(null);
   const [noteCount, setNoteCount] = useState<number>(0);
@@ -23,26 +42,24 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    const client = createSolverClient();
+    const client = solverClientFactory();
     solverClientRef.current = client;
     return () => {
       client.dispose();
       solverClientRef.current = null;
     };
-  }, []);
+  }, [solverClientFactory]);
 
   const solveAndRender = async (
-    scoreDoc: ReturnType<typeof parseMusicXml>
+    scoreDoc: ReturnType<typeof parseMusicXml>,
+    profile: HandSpanProfile
   ) => {
     if (!solverClientRef.current) return;
     setScoreTitle(scoreDoc.title);
     setNoteCount(scoreDoc.noteEvents.length);
     setStatus("Solving fingerings in Web Worker...");
 
-    const result = await solverClientRef.current.solve(
-      scoreDoc.onsetSlices,
-      DEFAULT_HAND_SPAN_PROFILE
-    );
+    const result = await solverClientRef.current.solve(scoreDoc.onsetSlices, profile);
 
     writeFingeringsToScore(scoreDoc, result.fingerByNoteUid);
     const exportedXml = serializeScoreDocument(scoreDoc);
@@ -50,6 +67,28 @@ export default function App() {
     setSolveResult(result);
     setRenderedXml(exportedXml);
     setStatus(`Solved ${scoreDoc.noteEvents.length} notes in ${result.solveTimeMs.toFixed(1)} ms`);
+  };
+
+  const reSolveScore = async (
+    xmlText: string,
+    singleStaff: boolean,
+    handOverride: Hand,
+    profile: HandSpanProfile
+  ) => {
+    setErrorMsg(null);
+    try {
+      const scoreDoc = parseMusicXml(
+        xmlText,
+        singleStaff ? { singleStaffHandOverride: handOverride } : undefined
+      );
+      await solveAndRender(scoreDoc, profile);
+    } catch (err) {
+      if (err instanceof SolverCancelledError) {
+        return;
+      }
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+      setStatus("Error");
+    }
   };
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -72,7 +111,7 @@ export default function App() {
       setIsSingleStaff(session.scoreDoc.isSingleStaff);
       setSingleStaffHand(session.scoreDoc.defaultSingleStaffHand);
 
-      await solveAndRender(session.scoreDoc);
+      await solveAndRender(session.scoreDoc, handSpanProfile);
     } catch (err) {
       if (err instanceof SolverCancelledError) {
         return;
@@ -91,17 +130,14 @@ export default function App() {
 
   const handleSingleStaffHandToggle = async (nextHand: Hand) => {
     if (!rawXmlText || !isSingleStaff || nextHand === singleStaffHand) return;
-    setErrorMsg(null);
     setSingleStaffHand(nextHand);
-    try {
-      const scoreDoc = parseMusicXml(rawXmlText, { singleStaffHandOverride: nextHand });
-      await solveAndRender(scoreDoc);
-    } catch (err) {
-      if (err instanceof SolverCancelledError) {
-        return;
-      }
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-      setStatus("Error");
+    await reSolveScore(rawXmlText, isSingleStaff, nextHand, handSpanProfile);
+  };
+
+  const handleProfileChange = (nextProfile: HandSpanProfile) => {
+    setHandSpanProfile(nextProfile);
+    if (rawXmlText) {
+      void reSolveScore(rawXmlText, isSingleStaff, singleStaffHand, nextProfile);
     }
   };
 
@@ -178,6 +214,63 @@ export default function App() {
               </div>
             )}
 
+            <div className="flex flex-wrap items-center gap-3">
+              <div
+                className="inline-flex rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-xs font-medium"
+                role="group"
+                aria-label="Hand Span Profile"
+              >
+                {SPAN_PRESETS.map(({ preset, title }) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    title={title}
+                    aria-pressed={handSpanProfile.preset === preset}
+                    onClick={() =>
+                      handleProfileChange({ ...handSpanProfile, preset })
+                    }
+                    className={`rounded-md px-2.5 py-1.5 transition ${
+                      handSpanProfile.preset === preset
+                        ? "bg-white text-slate-900 shadow-xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+
+              <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={handSpanProfile.avoidThumbOnBlack}
+                  onChange={(e) =>
+                    handleProfileChange({
+                      ...handSpanProfile,
+                      avoidThumbOnBlack: e.target.checked,
+                    })
+                  }
+                  className="rounded border-slate-300 text-slate-900"
+                />
+                Avoid thumb on black
+              </label>
+
+              <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={handSpanProfile.preferStablePosition}
+                  onChange={(e) =>
+                    handleProfileChange({
+                      ...handSpanProfile,
+                      preferStablePosition: e.target.checked,
+                    })
+                  }
+                  className="rounded border-slate-300 text-slate-900"
+                />
+                Prefer stable position
+              </label>
+            </div>
+
             <div className="flex items-center gap-1.5">
               <select
                 aria-label="Export format"
@@ -220,9 +313,14 @@ export default function App() {
               </span>
             )}
             {solveResult && (
-              <span>
-                <strong>Transitions:</strong> {solveResult.transitionCues.length}
-              </span>
+              <>
+                <span>
+                  <strong>Transitions:</strong> {solveResult.transitionCues.length}
+                </span>
+                <span>
+                  <strong>Warnings:</strong> {solveResult.warnings.length}
+                </span>
+              </>
             )}
           </div>
           <span className="text-slate-400">Zero backend calls · Web Worker DP</span>

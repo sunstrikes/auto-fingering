@@ -54,13 +54,26 @@ export function generateSliceCandidates(
   if (k <= 5) {
     baseTuples = MONOTONIC_TUPLES_BY_K[k] ?? [[1]];
   } else if (k === 6) {
-    // 6-note chord fallback: allow thumb (1) or pinky (5) to double adjacent keys
-    baseTuples = [
-      [1, 1, 2, 3, 4, 5],
-      [1, 2, 3, 4, 5, 5],
-    ];
+    const lowPairAdjacent =
+      Math.abs(notes[orderedIndices[1]].midi - notes[orderedIndices[0]].midi) <= 2;
+    const highPairAdjacent =
+      Math.abs(notes[orderedIndices[5]].midi - notes[orderedIndices[4]].midi) <= 2;
+    baseTuples = [];
+    if (lowPairAdjacent) {
+      baseTuples.push([1, 1, 2, 3, 4, 5]);
+    }
+    if (highPairAdjacent) {
+      baseTuples.push([1, 2, 3, 4, 5, 5]);
+    }
+    if (baseTuples.length === 0) {
+      // >5-note chord without adjacent 2nds: prioritize outer 1/5 voices, keep all notes assigned
+      baseTuples = [
+        [1, 1, 2, 3, 4, 5],
+        [1, 2, 3, 4, 5, 5],
+      ];
+    }
   } else {
-    // 7+ note fallback: assign [1, 2, 3, 4, 5, 5...] in hand-frame order
+    // 7+ note fallback: assign [1, 2, 3, 4, 5, ..., 5] in hand-frame order
     const fallback: Finger[] = orderedIndices.map((_, i) =>
       (Math.min(5, i + 1) as Finger)
     );
@@ -115,36 +128,52 @@ function computePairwiseSpanCost(
   fB: Finger,
   posB: number,
   scale: number,
-  shapeWeight = 1.0
+  shapeWeight = 1.0,
+  preset: HandSpanProfile["preset"] = "M",
+  semitoneDiff = Infinity
 ): { cost: number; hasUnreachableSpan: boolean; hasWideStretch: boolean } {
   const dist = Math.abs(posB - posA);
   const maxSpan = getMaxSpan(fA, fB, scale);
+  const stretchBias = preset === "L" ? 0.75 : preset === "S" ? 1.25 : 1.0;
   let cost = 0;
   let hasUnreachableSpan = false;
   let hasWideStretch = false;
 
   if (fA === fB) {
-    if (dist > 1.5) {
-      cost += IMPOSSIBLE_COST;
-      hasUnreachableSpan = true;
+    if ((fA === 1 || fA === 5) && semitoneDiff <= 2 && dist <= 1.5) {
+      cost += 6.0;
     } else {
-      cost += 20.0;
+      cost += IMPOSSIBLE_COST + dist;
+      hasUnreachableSpan = true;
     }
     return { cost, hasUnreachableSpan, hasWideStretch };
   }
 
   if (dist > maxSpan) {
-    cost += 250 + Math.min(80, (dist - maxSpan) * 20);
+    const over = dist - maxSpan;
+    cost += 250 + Math.min(120, over * 20) + 0.01 * over;
     hasUnreachableSpan = true;
-  } else if (dist > maxSpan * 0.85) {
-    cost += 4.0 * (dist / maxSpan) * shapeWeight;
+  } else if (dist >= maxSpan * 0.85) {
+    const nonThumbBias = Math.min(fA, fB) >= 2 && dist >= maxSpan * 0.9 ? 3.5 : 1.0;
+    cost += 4.0 * (dist / maxSpan) * shapeWeight * stretchBias * nonThumbBias;
     hasWideStretch = true;
+  }
+
+  // Strongly penalize 1-4 octaves under S, relax under L
+  const lowF = Math.min(fA, fB);
+  const highF = Math.max(fA, fB);
+  if (lowF === 1 && highF === 4 && dist >= 6.8) {
+    if (preset === "S") {
+      cost += 18.0 * shapeWeight;
+    } else if (preset === "M") {
+      cost += 2.5 * shapeWeight;
+    }
   }
 
   const natDist = Math.abs(fB - fA) * scale;
   const diff = dist - natDist;
   if (diff > 0.6) {
-    cost += 0.9 * (diff - 0.6) * (diff - 0.6) * shapeWeight;
+    cost += 0.9 * (diff - 0.6) * (diff - 0.6) * shapeWeight * stretchBias;
   } else if (diff < -0.5) {
     cost += 1.4 * (-0.5 - diff) * shapeWeight;
   }
@@ -159,8 +188,8 @@ export function computeVerticalCost(
   profile: HandSpanProfile
 ): { cost: number; hasUnreachableSpan: boolean; hasWideStretch: boolean } {
   const scale = getSpanScale(profile);
-  const weakMultiplier = profile.preferStablePosition ? 0.75 : 1.0;
-  const thumbBlackCost = profile.avoidThumbOnBlack ? 3.5 : 0.8;
+  const weakMultiplier = profile.preferStablePosition ? 0.6 : 1.0;
+  const thumbBlackCost = profile.avoidThumbOnBlack ? 4.5 : 0.2;
   let cost = 0;
   let hasUnreachableSpan = false;
   let hasWideStretch = false;
@@ -180,7 +209,7 @@ export function computeVerticalCost(
     for (const [fH, heldMidi] of heldFingers.entries()) {
       if (fH === f) continue;
       const posH = toHandFramePos(heldMidi, slice.hand);
-      const pair = computePairwiseSpanCost(fH, posH, f, posS, scale, 0.6);
+      const pair = computePairwiseSpanCost(fH, posH, f, posS, scale, 0.6, profile.preset);
       cost += pair.cost;
       if (pair.hasUnreachableSpan) hasUnreachableSpan = true;
       if (pair.hasWideStretch) hasWideStretch = true;
@@ -204,7 +233,17 @@ export function computeVerticalCost(
     // Pairwise chord ergonomics
     for (let j = i + 1; j < notes.length; j++) {
       const posB = toHandFramePos(notes[j].midi, slice.hand);
-      const pair = computePairwiseSpanCost(f, posS, fingers[j], posB, scale, 1.0);
+      const semitoneDiff = Math.abs(notes[j].midi - n.midi);
+      const pair = computePairwiseSpanCost(
+        f,
+        posS,
+        fingers[j],
+        posB,
+        scale,
+        1.0,
+        profile.preset,
+        semitoneDiff
+      );
       cost += pair.cost;
       if (pair.hasUnreachableSpan) hasUnreachableSpan = true;
       if (pair.hasWideStretch) hasWideStretch = true;
@@ -266,8 +305,8 @@ export function computeHorizontalCost(
     if (absD > 2.8 * scale) {
       cost += (absD - 2.8 * scale) * 4.0;
     }
-    if (profile.avoidThumbOnBlack && isBlackKey(currNote.midi)) {
-      cost += 4.5;
+    if (isBlackKey(currNote.midi)) {
+      cost += profile.avoidThumbOnBlack ? 6.0 : 0.3;
     }
   } else if (isCrossOver) {
     const fingerCrossPenalty = currFinger === 3 ? 1.5 : currFinger === 2 ? 1.9 : 2.4;
@@ -285,7 +324,7 @@ export function computeHorizontalCost(
       if (absD > maxSpan && dt < 0.2) {
         cost += 25.0 + (absD - maxSpan) * 8.0;
         hasUnreachableSpan = true;
-      } else if (absD > maxSpan * 0.85 && dt < 0.4) {
+      } else if (absD >= maxSpan * 0.85 && dt < 0.4) {
         cost += 3.5;
         hasWideStretch = true;
       }
@@ -300,6 +339,7 @@ export function computeHorizontalCost(
 
   // Chord-involved transitions: discourage rapid reuse of same finger on a different pitch
   if (!isMonoPair && dt < 0.5) {
+    const bothChords = prevSlice.notes.length >= 2 && currSlice.notes.length >= 2;
     for (let i = 0; i < prevSlice.notes.length; i++) {
       for (let j = 0; j < currSlice.notes.length; j++) {
         if (
@@ -310,7 +350,11 @@ export function computeHorizontalCost(
             toHandFramePos(currSlice.notes[j].midi, hand) -
               toHandFramePos(prevSlice.notes[i].midi, hand)
           );
-          cost += 4.0 + 1.0 * dist;
+          if (bothChords && prevFingers[i] === 1) {
+            cost += 1.2 + 0.3 * dist;
+          } else {
+            cost += 4.0 + 1.0 * dist;
+          }
         }
       }
     }
@@ -323,7 +367,7 @@ export function computeHorizontalCost(
 
   const freeShift = isThumbUnder || isCrossOver ? 3.5 : 0.75;
   if (rootShift > freeShift) {
-    const shiftWeight = profile.preferStablePosition ? 2.6 : 1.5;
+    const shiftWeight = profile.preferStablePosition ? 3.2 : 1.5;
     cost += shiftWeight * (rootShift - freeShift);
   }
 

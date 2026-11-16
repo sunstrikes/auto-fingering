@@ -211,6 +211,9 @@ function derivePositionsAndCues(
     if (handSlices.length === 0) continue;
 
     let currentPos: HandPosition | null = null;
+    let anchorThumbKey = 0;
+    let prevBounds: { thumbKey: number; pinkyKey: number; minMidi: number; maxMidi: number } | null =
+      null;
 
     for (let idx = 0; idx < handSlices.length; idx++) {
       const slice = handSlices[idx];
@@ -234,6 +237,23 @@ function derivePositionsAndCues(
         const posI = toHandFramePos(slice.notes[i].midi, hand);
         for (let j = i + 1; j < slice.notes.length; j++) {
           const dist = Math.abs(toHandFramePos(slice.notes[j].midi, hand) - posI);
+          const semitoneDiff = Math.abs(slice.notes[j].midi - slice.notes[i].midi);
+          if (fingers[i] === fingers[j]) {
+            const isValidDouble =
+              (fingers[i] === 1 || fingers[i] === 5) && semitoneDiff <= 2 && dist <= 1.5;
+            if (!isValidDouble) {
+              transitionCues.push({
+                sliceId: slice.sliceId,
+                hand,
+                measureIndex: slice.measureIndex,
+                type: "unreachable-span",
+                severity: "danger",
+                cost: dist + 10,
+                label: "Chord exceeds 5 fingers (arpeggiate/split)",
+              });
+            }
+            continue;
+          }
           const maxSpan = getMaxSpan(fingers[i], fingers[j], scale);
           if (dist > maxSpan) {
             transitionCues.push({
@@ -245,7 +265,7 @@ function derivePositionsAndCues(
               cost: dist - maxSpan,
               label: "Unreachable span",
             });
-          } else if (dist > maxSpan * 0.85) {
+          } else if (dist >= maxSpan * 0.85) {
             transitionCues.push({
               sliceId: slice.sliceId,
               hand,
@@ -273,7 +293,7 @@ function derivePositionsAndCues(
               cost: dist - maxSpan,
               label: "Unreachable span (held)",
             });
-          } else if (dist > maxSpan * 0.85) {
+          } else if (dist >= maxSpan * 0.85) {
             transitionCues.push({
               sliceId: slice.sliceId,
               hand,
@@ -339,7 +359,7 @@ function derivePositionsAndCues(
                 cost: Math.abs(d) - maxSpan,
                 label: "Unreachable span",
               });
-            } else if (Math.abs(d) > maxSpan * 0.85 && dt < 0.4) {
+            } else if (Math.abs(d) >= maxSpan * 0.85 && dt < 0.4) {
               transitionCues.push({
                 sliceId: slice.sliceId,
                 hand,
@@ -356,17 +376,49 @@ function derivePositionsAndCues(
         const prevRoot = computeHandRoot(prev.notes, prevFingers, hand);
         const currRoot = computeHandRoot(slice.notes, fingers, hand);
         const rootShift = Math.abs(currRoot - prevRoot);
-        if (!hadCrossingOrShift && rootShift >= 2.0) {
+        const noOverlap =
+          prevBounds !== null &&
+          (hand === "RH"
+            ? bounds.thumbKey > prevBounds.pinkyKey || bounds.pinkyKey < prevBounds.thumbKey
+            : bounds.pinkyKey > prevBounds.thumbKey || bounds.thumbKey < prevBounds.pinkyKey);
+
+        if (!hadCrossingOrShift && (rootShift >= 2.0 || noOverlap)) {
           hadCrossingOrShift = true;
-          const isFastJump = rootShift / dt > 12.0;
+          const velocity = rootShift / dt;
+          const isSameFingerJump =
+            prev.notes.length === 1 &&
+            slice.notes.length === 1 &&
+            prevFingers[0] === fingers[0] &&
+            prev.notes[0].midi !== slice.notes[0].midi &&
+            (rootShift >= 2.5 && dt <= 0.3 || velocity > 18.0);
+          const isDangerLeap =
+            (velocity >= 35.0 && rootShift >= 7.0) || (rootShift >= 10.0 && dt <= 0.25);
+          const isWarnLeap =
+            isSameFingerJump ||
+            (velocity >= 22.0 && rootShift >= 4.0) ||
+            (rootShift >= 7.0 && dt <= 0.3);
+
+          const severity: TransitionCue["severity"] = isDangerLeap
+            ? "danger"
+            : isWarnLeap
+              ? "warn"
+              : "info";
+          const label = isDangerLeap
+            ? "Extreme position leap"
+            : isSameFingerJump
+              ? "Awkward jump"
+              : isWarnLeap
+                ? "Fast position shift"
+                : "Position shift";
+
           transitionCues.push({
             sliceId: slice.sliceId,
             hand,
             measureIndex: slice.measureIndex,
             type: "position-shift",
-            severity: isFastJump ? "warn" : "info",
+            severity,
             cost: rootShift,
-            label: isFastJump ? "Fast position shift" : "Position shift",
+            label,
           });
         }
       }
@@ -375,15 +427,23 @@ function derivePositionsAndCues(
         currentPos &&
         !hadCrossingOrShift &&
         handSlices[idx - 1].phraseId === slice.phraseId &&
-        Math.abs(bounds.thumbKey - currentPos.thumbKey) <= 1
+        Math.abs(bounds.thumbKey - anchorThumbKey) <= 1
       ) {
         currentPos.endSliceId = slice.sliceId;
         currentPos.minMidi = Math.min(currentPos.minMidi, bounds.minMidi);
         currentPos.maxMidi = Math.max(currentPos.maxMidi, bounds.maxMidi);
+        if (hand === "RH") {
+          currentPos.thumbKey = Math.min(currentPos.thumbKey, bounds.thumbKey);
+          currentPos.pinkyKey = Math.max(currentPos.pinkyKey, bounds.pinkyKey);
+        } else {
+          currentPos.thumbKey = Math.max(currentPos.thumbKey, bounds.thumbKey);
+          currentPos.pinkyKey = Math.min(currentPos.pinkyKey, bounds.pinkyKey);
+        }
       } else {
         if (currentPos) {
           handPositions.push(currentPos);
         }
+        anchorThumbKey = bounds.thumbKey;
         currentPos = {
           hand,
           startSliceId: slice.sliceId,
@@ -394,6 +454,7 @@ function derivePositionsAndCues(
           maxMidi: bounds.maxMidi,
         };
       }
+      prevBounds = bounds;
     }
 
     if (currentPos) {
