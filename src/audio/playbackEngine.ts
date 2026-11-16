@@ -1,5 +1,12 @@
 import { computeTieChainEndByRoot } from "../domain/tieUtils";
 import type { Hand, OnsetSlice, ScoreDocument } from "../domain/types";
+import {
+  buildCountInBeats,
+  buildMetronomeBeats,
+  createMetronomeAudio,
+  type MetronomeBeatEvent,
+  type ScheduledMetronomeBeat,
+} from "./metronome";
 import type { PianoAudioEngine } from "./pianoAudio";
 
 export const MIN_SPEED_MULTIPLIER = 0.25;
@@ -64,12 +71,19 @@ export interface PlaybackEngineDeps {
   onSliceChange?: (slice: OnsetSlice) => void;
   onCursorSync?: (target: CursorSyncTarget | null) => void;
   onFrame?: (frame: PlaybackFrame | null) => void;
+  onMetronomeBeat?: (beat: MetronomeBeatEvent | null) => void;
 }
 
 export interface PlaybackEngine {
   getState(): PlaybackState;
   getSpeed(): PlaybackSpeed;
   setSpeed(speed: PlaybackSpeed): void;
+  isMetronomeEnabled(): boolean;
+  setMetronomeEnabled(enabled: boolean): void;
+  getMetronomeVolume(): number;
+  setMetronomeVolume(volume: number): void;
+  isCountInEnabled(): boolean;
+  setCountInEnabled(enabled: boolean): void;
   play(scoreDoc: ScoreDocument, options?: PlayOptions): Promise<void>;
   pause(): void;
   stop(): void;
@@ -208,9 +222,12 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
   const cancelRaf =
     deps.cancelAnimationFrame ?? ((id: number) => globalThis.cancelAnimationFrame(id));
   const scheduleAheadRealSec = deps.scheduleAheadRealSec ?? DEFAULT_SCHEDULE_AHEAD_REAL_SEC;
+  const metronomeAudio = createMetronomeAudio(() => deps.audioEngine.getAudioContext());
 
   let state: PlaybackState = "stopped";
   let speed: PlaybackSpeed = 1.0;
+  let metronomeEnabled = false;
+  let countInEnabled = false;
   let runToken = 0;
   let rafId: number | null = null;
 
@@ -223,6 +240,16 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
   let pausedScoreSec: number | null = null;
   let lastEmittedSliceId: string | null = null;
   let lastCursorBeatKey: string | null = null;
+
+  interface ScheduledVisualBeat {
+    key: string;
+    audioTime: number;
+    event: MetronomeBeatEvent;
+  }
+  let activeScoreBeats: ScheduledMetronomeBeat[] = [];
+  let nextScoreBeatIndex = 0;
+  let visualBeatTimeline: ScheduledVisualBeat[] = [];
+  let lastEmittedBeatKey: string | null = null;
 
   const setState = (next: PlaybackState) => {
     if (state !== next) {
@@ -248,7 +275,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     if (!activeSchedule) return;
     const ctx = deps.audioEngine.getAudioContext();
     const horizonScoreSec =
-      anchorScoreSec + (Math.max(0, ctx.currentTime - anchorAudioTime) + scheduleAheadRealSec) * speed;
+      anchorScoreSec + (ctx.currentTime + scheduleAheadRealSec - anchorAudioTime) * speed;
 
     while (nextNoteIndex < activeSchedule.notes.length) {
       const note = activeSchedule.notes[nextNoteIndex];
@@ -262,6 +289,51 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
         duration: audioDuration,
       });
       nextNoteIndex += 1;
+    }
+  };
+
+  const scheduleUpcomingBeats = () => {
+    if (!metronomeEnabled) return;
+    const ctx = deps.audioEngine.getAudioContext();
+    const horizonScoreSec =
+      anchorScoreSec + (ctx.currentTime + scheduleAheadRealSec - anchorAudioTime) * speed;
+
+    while (nextScoreBeatIndex < activeScoreBeats.length) {
+      const beat = activeScoreBeats[nextScoreBeatIndex];
+      if (beat.scoreSec > horizonScoreSec + 1e-6) break;
+
+      const audioTime = anchorAudioTime + Math.max(0, beat.scoreSec - anchorScoreSec) / speed;
+      metronomeAudio.triggerClick({ time: audioTime, isAccent: beat.isAccent });
+      visualBeatTimeline.push({
+        key: `score:${beat.measureIndex}:${beat.beatIndex}:${audioTime.toFixed(4)}`,
+        audioTime,
+        event: {
+          measureIndex: beat.measureIndex,
+          beatIndex: beat.beatIndex,
+          beatNumber: beat.beatNumber,
+          totalBeats: beat.totalBeats,
+          isAccent: beat.isAccent,
+          isCountIn: false,
+        },
+      });
+      nextScoreBeatIndex += 1;
+    }
+  };
+
+  const emitActiveMetronomeBeat = () => {
+    const ctx = deps.audioEngine.getAudioContext();
+    const now = ctx.currentTime;
+    let latest: ScheduledVisualBeat | null = null;
+    for (const item of visualBeatTimeline) {
+      if (item.audioTime <= now + 1e-4) {
+        latest = item;
+      } else {
+        break;
+      }
+    }
+    if (latest && latest.key !== lastEmittedBeatKey) {
+      lastEmittedBeatKey = latest.key;
+      deps.onMetronomeBeat?.(latest.event);
     }
   };
 
@@ -292,10 +364,28 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     }
   };
 
-  const startPlaybackLoop = (
+  const resolveStartMeasureIndex = (
     doc: ScoreDocument,
     startScoreSec: number,
     fromSliceId?: string | null
+  ): number => {
+    if (fromSliceId) {
+      const target = doc.onsetSlices.find((s) => s.sliceId === fromSliceId);
+      if (target) return target.measureIndex;
+    }
+    for (let i = doc.measureTimelines.length - 1; i >= 0; i--) {
+      if (doc.measureTimelines[i].startSec <= startScoreSec + 1e-4) {
+        return doc.measureTimelines[i].measureIndex;
+      }
+    }
+    return 0;
+  };
+
+  const startPlaybackLoop = (
+    doc: ScoreDocument,
+    startScoreSec: number,
+    fromSliceId?: string | null,
+    useCountIn = false
   ) => {
     const schedule = buildPlaybackSchedule(doc, fromSliceId);
     // If resuming from a paused timestamp mid-score, filter notes at or after startScoreSec
@@ -313,29 +403,78 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     lastEmittedSliceId = null;
     lastCursorBeatKey = null;
 
+    activeScoreBeats = buildMetronomeBeats(doc).filter((b) => b.scoreSec >= startScoreSec - 1e-4);
+    nextScoreBeatIndex = 0;
+    visualBeatTimeline = [];
+    lastEmittedBeatKey = null;
+
     const ctx = deps.audioEngine.getAudioContext();
-    anchorAudioTime = ctx.currentTime;
+    const countInStartAudioTime = ctx.currentTime;
+    const startMeasureIndex = resolveStartMeasureIndex(doc, startScoreSec, fromSliceId);
+    const countIn = useCountIn ? buildCountInBeats(doc, startMeasureIndex, speed) : null;
+    const countInDurationRealSec = countIn ? countIn.totalDurationRealSec : 0;
+
+    anchorAudioTime = countInStartAudioTime + countInDurationRealSec;
     anchorScoreSec = startScoreSec;
     pausedScoreSec = null;
 
+    if (countIn) {
+      for (const beat of countIn.beats) {
+        const audioTime = countInStartAudioTime + beat.offsetRealSec;
+        metronomeAudio.triggerClick({ time: audioTime, isAccent: beat.isAccent });
+        visualBeatTimeline.push({
+          key: `countin:${beat.measureIndex}:${beat.beatIndex}:${audioTime.toFixed(4)}`,
+          audioTime,
+          event: {
+            measureIndex: beat.measureIndex,
+            beatIndex: beat.beatIndex,
+            beatNumber: beat.beatNumber,
+            totalBeats: beat.totalBeats,
+            isAccent: beat.isAccent,
+            isCountIn: true,
+            countdownRemaining: beat.countdownRemaining,
+          },
+        });
+      }
+    }
+
     setState("playing");
     scheduleUpcomingNotes();
-    emitSyncForScoreSec(startScoreSec);
+    scheduleUpcomingBeats();
+    emitActiveMetronomeBeat();
+
+    if (ctx.currentTime >= anchorAudioTime - 1e-6) {
+      emitSyncForScoreSec(startScoreSec);
+    } else {
+      emitFrameForState(startScoreSec, "playing");
+    }
 
     const token = runToken;
     const step = () => {
       if (token !== runToken || state !== "playing" || !activeSchedule) return;
-      const scoreSec = getCurrentScoreSec();
+      const now = deps.audioEngine.getAudioContext().currentTime;
       scheduleUpcomingNotes();
+      scheduleUpcomingBeats();
+      emitActiveMetronomeBeat();
+
+      if (now < anchorAudioTime - 1e-6) {
+        emitFrameForState(anchorScoreSec, "playing");
+        rafId = requestRaf(step);
+        return;
+      }
+
+      const scoreSec = getCurrentScoreSec();
       emitSyncForScoreSec(scoreSec);
 
       if (scoreSec >= activeSchedule.totalDurationSec && nextNoteIndex >= activeSchedule.notes.length) {
         clearRaf();
         activeSchedule = null;
         pausedScoreSec = null;
+        lastEmittedBeatKey = null;
         setState("stopped");
         deps.onCursorSync?.(null);
         deps.onFrame?.(null);
+        deps.onMetronomeBeat?.(null);
         return;
       }
 
@@ -362,15 +501,59 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
         runToken += 1;
         clearRaf();
         deps.audioEngine.stopAll();
-        startPlaybackLoop(resumeDoc, currentScore);
+        metronomeAudio.cancelPending();
+        startPlaybackLoop(resumeDoc, currentScore, undefined, false);
       }
+    },
+
+    isMetronomeEnabled: () => metronomeEnabled,
+
+    setMetronomeEnabled(enabled: boolean) {
+      if (metronomeEnabled === enabled) return;
+      metronomeEnabled = enabled;
+      if (state === "playing") {
+        if (enabled) {
+          const currentScore = getCurrentScoreSec();
+          while (
+            nextScoreBeatIndex < activeScoreBeats.length &&
+            activeScoreBeats[nextScoreBeatIndex].scoreSec < currentScore - 1e-4
+          ) {
+            nextScoreBeatIndex += 1;
+          }
+          scheduleUpcomingBeats();
+          emitActiveMetronomeBeat();
+        } else {
+          metronomeAudio.cancelPending();
+          const now = deps.audioEngine.getAudioContext().currentTime;
+          visualBeatTimeline = visualBeatTimeline.filter(
+            (b) => b.event.isCountIn || b.audioTime <= now + 1e-4
+          );
+          if (now >= anchorAudioTime - 1e-6) {
+            deps.onMetronomeBeat?.(null);
+          }
+        }
+      }
+    },
+
+    getMetronomeVolume: () => metronomeAudio.getVolume(),
+
+    setMetronomeVolume(volume: number) {
+      metronomeAudio.setVolume(volume);
+    },
+
+    isCountInEnabled: () => countInEnabled,
+
+    setCountInEnabled(enabled: boolean) {
+      countInEnabled = enabled;
     },
 
     async play(scoreDoc: ScoreDocument, options?: PlayOptions) {
       const token = ++runToken;
       clearRaf();
-      if (state === "playing") {
+      const prevState = state;
+      if (prevState === "playing") {
         deps.audioEngine.stopAll();
+        metronomeAudio.cancelPending();
       }
 
       await deps.audioEngine.prepare();
@@ -379,11 +562,13 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       if (scoreDoc.onsetSlices.length === 0) {
         setState("stopped");
         deps.onCursorSync?.(null);
+        deps.onMetronomeBeat?.(null);
         return;
       }
 
       let startScoreSec = 0;
       let startSliceId: string | null = null;
+      let isResumingPaused = false;
 
       if (options?.fromSliceId) {
         const target = scoreDoc.onsetSlices.find((s) => s.sliceId === options.fromSliceId);
@@ -393,11 +578,13 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
         }
       } else if (typeof options?.fromScoreSec === "number" && Number.isFinite(options.fromScoreSec)) {
         startScoreSec = Math.max(0, options.fromScoreSec);
-      } else if (!options?.restart && state === "paused" && pausedScoreSec !== null && activeDoc === scoreDoc) {
+      } else if (!options?.restart && prevState === "paused" && pausedScoreSec !== null && activeDoc === scoreDoc) {
         startScoreSec = pausedScoreSec;
+        isResumingPaused = true;
       }
 
-      startPlaybackLoop(scoreDoc, startScoreSec, startSliceId);
+      const useCountIn = countInEnabled && !isResumingPaused;
+      startPlaybackLoop(scoreDoc, startScoreSec, startSliceId, useCountIn);
     },
 
     pause() {
@@ -406,22 +593,28 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       runToken += 1;
       clearRaf();
       deps.audioEngine.stopAll();
+      metronomeAudio.stopAll();
       pausedScoreSec = scoreSec;
+      lastEmittedBeatKey = null;
       setState("paused");
       emitFrameForState(scoreSec, "paused");
+      deps.onMetronomeBeat?.(null);
     },
 
     stop() {
       runToken += 1;
       clearRaf();
       deps.audioEngine.stopAll();
+      metronomeAudio.stopAll();
       activeSchedule = null;
       pausedScoreSec = null;
       lastEmittedSliceId = null;
       lastCursorBeatKey = null;
+      lastEmittedBeatKey = null;
       setState("stopped");
       deps.onCursorSync?.(null);
       deps.onFrame?.(null);
+      deps.onMetronomeBeat?.(null);
     },
 
     dispose() {

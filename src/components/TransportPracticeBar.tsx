@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { MetronomeBeatEvent } from "../audio/metronome";
 import type { AudioEngineStatus } from "../audio/pianoAudio";
 import {
   clampSpeedMultiplier,
@@ -22,6 +23,10 @@ export interface TransportPracticeBarProps {
   activeMeasureIndex: number | null;
   midiStatusLabel?: string;
   onOpenSettings?: () => void;
+  metronomeEnabled?: boolean;
+  metronomeVolume?: number;
+  countInEnabled?: boolean;
+  activeMetronomeBeat?: MetronomeBeatEvent | null;
   onPlay: () => void;
   onPlayFromSlice: () => void;
   onPause: () => void;
@@ -29,6 +34,9 @@ export interface TransportPracticeBarProps {
   onJumpToStart: () => void;
   onJumpToMeasure: (measureIndex: number) => void;
   onChangeSpeed: (speed: SpeedMultiplier) => void;
+  onToggleMetronome?: () => void;
+  onChangeMetronomeVolume?: (volume: number) => void;
+  onToggleCountIn?: () => void;
 }
 
 const SPEED_STEP = 0.05;
@@ -73,6 +81,10 @@ export function TransportPracticeBar({
   activeMeasureIndex,
   midiStatusLabel,
   onOpenSettings,
+  metronomeEnabled = false,
+  metronomeVolume = 0.7,
+  countInEnabled = false,
+  activeMetronomeBeat = null,
   onPlay,
   onPlayFromSlice,
   onPause,
@@ -80,6 +92,9 @@ export function TransportPracticeBar({
   onJumpToStart,
   onJumpToMeasure,
   onChangeSpeed,
+  onToggleMetronome,
+  onChangeMetronomeVolume,
+  onToggleCountIn,
 }: TransportPracticeBarProps) {
   const [editingBpm, setEditingBpm] = useState(false);
   const [bpmDraft, setBpmDraft] = useState("");
@@ -300,6 +315,50 @@ export function TransportPracticeBar({
             {statusInfo.text}
           </span>
 
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              data-testid="metronome-toggle-btn"
+              aria-pressed={metronomeEnabled}
+              onClick={onToggleMetronome}
+              title="Toggle metronome"
+              className={`rounded-md border px-2.5 py-1 text-xs font-medium transition ${
+                metronomeEnabled
+                  ? "border-blue-600 bg-blue-600 text-white hover:bg-blue-700"
+                  : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              Metronome
+            </button>
+
+            <span
+              data-testid="metronome-beat-indicator"
+              aria-live="polite"
+              className={`inline-flex min-w-[44px] items-center justify-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold transition ${
+                activeMetronomeBeat
+                  ? activeMetronomeBeat.isAccent
+                    ? "border-amber-500 bg-amber-100 text-amber-900"
+                    : "border-blue-400 bg-blue-100 text-blue-900"
+                  : "border-slate-200 bg-slate-50 text-slate-400"
+              }`}
+            >
+              {activeMetronomeBeat
+                ? `${activeMetronomeBeat.beatNumber}/${activeMetronomeBeat.totalBeats}`
+                : metronomeEnabled
+                  ? "Ready"
+                  : "Off"}
+            </span>
+
+            {activeMetronomeBeat?.isCountIn && (
+              <span
+                data-testid="count-in-indicator"
+                className="rounded-md border border-indigo-400 bg-indigo-600 px-2 py-0.5 text-[11px] font-bold text-white"
+              >
+                Count-In: {activeMetronomeBeat.countdownRemaining}
+              </span>
+            )}
+          </div>
+
           <button
             type="button"
             data-testid="practice-settings-btn"
@@ -331,11 +390,46 @@ export function TransportPracticeBar({
                 Close
               </button>
             </div>
-            <div className="mt-3 space-y-2 text-xs text-slate-600">
-              <p>
-                Configure metronome, Web MIDI input device, local sound echo, and Waiting Mode
-                options here.
-              </p>
+            <div className="mt-3 space-y-3 text-xs text-slate-700">
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div>
+                  <div className="font-medium text-slate-900">One-Measure Count-In</div>
+                  <div className="text-[11px] text-slate-500">
+                    Play one full measure of clicks before score playback begins
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  data-testid="count-in-toggle"
+                  aria-label="One-Measure Count-In"
+                  checked={countInEnabled}
+                  onChange={() => onToggleCountIn?.()}
+                  className="h-4 w-4 accent-blue-600"
+                />
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <label htmlFor="metronome-volume-slider" className="font-medium text-slate-900">
+                    Metronome Volume
+                  </label>
+                  <span className="text-[11px] font-semibold text-slate-600">
+                    {Math.round(metronomeVolume * 100)}%
+                  </span>
+                </div>
+                <input
+                  id="metronome-volume-slider"
+                  data-testid="metronome-volume-slider"
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={metronomeVolume}
+                  onChange={(e) => onChangeMetronomeVolume?.(Number.parseFloat(e.target.value))}
+                  className="w-full accent-blue-600"
+                />
+              </div>
+
               <p className="text-[11px] text-slate-400">
                 Current base tempo: ♩={safeBaseBpm} · Multiplier: {formatSpeedLabel(speedMultiplier)}
               </p>

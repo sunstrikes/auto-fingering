@@ -7,8 +7,12 @@ export interface PracticeSettingsModalProps {
   midiLocalSound: boolean;
   speedMultiplier: SpeedMultiplier;
   baseBpm: number;
+  countInEnabled: boolean;
+  metronomeVolume: number;
   onSelectDevice: (deviceId: string | null) => void;
   onToggleLocalSound: (enabled: boolean) => void;
+  onToggleCountIn: () => void;
+  onChangeMetronomeVolume: (volume: number) => void;
   onClose: () => void;
 }
 
@@ -52,8 +56,12 @@ export function PracticeSettingsModal({
   midiLocalSound,
   speedMultiplier,
   baseBpm,
+  countInEnabled,
+  metronomeVolume,
   onSelectDevice,
   onToggleLocalSound,
+  onToggleCountIn,
+  onChangeMetronomeVolume,
   onClose,
 }: PracticeSettingsModalProps) {
   if (!open) return null;
@@ -168,6 +176,45 @@ export function PracticeSettingsModal({
                 <span className="font-mono">Z–M</span> / <span className="font-mono">Q–I</span>.
               </li>
             </ul>
+          </div>
+
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div>
+              <div className="font-medium text-slate-900">One-Measure Count-In</div>
+              <div className="text-[11px] text-slate-500">
+                Play one full measure of clicks before score playback begins
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              data-testid="count-in-toggle"
+              aria-label="One-Measure Count-In"
+              checked={countInEnabled}
+              onChange={onToggleCountIn}
+              className="h-4 w-4 accent-blue-600"
+            />
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div className="mb-1.5 flex items-center justify-between">
+              <label htmlFor="metronome-volume-slider" className="font-medium text-slate-900">
+                Metronome Volume
+              </label>
+              <span className="text-[11px] font-semibold text-slate-600">
+                {Math.round(metronomeVolume * 100)}%
+              </span>
+            </div>
+            <input
+              id="metronome-volume-slider"
+              data-testid="metronome-volume-slider"
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={metronomeVolume}
+              onChange={(e) => onChangeMetronomeVolume(Number.parseFloat(e.target.value))}
+              className="w-full accent-blue-600"
+            />
           </div>
 
           <p className="text-[11px] text-slate-400">
