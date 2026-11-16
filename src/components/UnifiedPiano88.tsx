@@ -5,6 +5,7 @@ import {
   type Finger,
   type Hand,
   type HandSpanProfile,
+  type PracticeMode,
   type ScoreDocument,
   type SolveResult,
   type TransitionCue,
@@ -40,6 +41,9 @@ export interface UnifiedPiano88Props {
   selectedSliceId: string | null;
   handSpanProfile?: HandSpanProfile;
   playbackFrame?: PlaybackFrame | null;
+  practiceMode?: PracticeMode;
+  wrongMidis?: ReadonlySet<number>;
+  hitMidis?: ReadonlySet<number>;
   onSelectSlice?: (sliceId: string) => void;
   onAuditionMidi?: (midi: number) => void;
 }
@@ -126,10 +130,17 @@ function tweenHandPosture(from: HandPosture, to: HandPosture, t: number): HandPo
   };
 }
 
-function HandVectorOverlay({ posture }: { posture: HandPosture }) {
+function HandVectorOverlay({
+  posture,
+  dimmed = false,
+}: {
+  posture: HandPosture;
+  dimmed?: boolean;
+}) {
   const pal = handPalette(posture.hand);
   const skeleton = computeHandSkeleton(posture);
-  const opacity = posture.isResting ? 0.42 : 0.95;
+  const baseOpacity = posture.isResting ? 0.42 : 0.95;
+  const opacity = dimmed ? 0.22 : baseOpacity;
 
   // Sort fingers so lower layerOffset (-1 thumb-under) draws behind higher layerOffset (+1 cross-over)
   const orderedFingers = [...FINGERS].sort((a, b) => {
@@ -144,6 +155,7 @@ function HandVectorOverlay({ posture }: { posture: HandPosture }) {
       data-testid={`hand-overlay-${posture.hand}`}
       data-crossing-style={posture.crossingStyle}
       data-resting={posture.isResting ? "true" : "false"}
+      data-dimmed={dimmed ? "true" : "false"}
       opacity={opacity}
       className="pointer-events-none"
     >
@@ -296,9 +308,11 @@ function HandVectorOverlay({ posture }: { posture: HandPosture }) {
 function OverheadHandLane({
   posture,
   laneY,
+  dimmed = false,
 }: {
   posture: HandPosture;
   laneY: number;
+  dimmed?: boolean;
 }) {
   const pal = handPalette(posture.hand);
   const hp = posture.handPosition;
@@ -318,7 +332,11 @@ function OverheadHandLane({
   }, [hp]);
 
   return (
-    <g data-testid={`overhead-lane-${posture.hand}`}>
+    <g
+      data-testid={`overhead-lane-${posture.hand}`}
+      data-dimmed={dimmed ? "true" : "false"}
+      opacity={dimmed ? 0.3 : 1}
+    >
       {hpSpan && (
         <g>
           <rect
@@ -399,9 +417,14 @@ export function UnifiedPiano88({
   selectedSliceId,
   handSpanProfile = DEFAULT_HAND_SPAN_PROFILE,
   playbackFrame = null,
+  practiceMode = "both",
+  wrongMidis,
+  hitMidis,
   onSelectSlice,
   onAuditionMidi,
 }: UnifiedPiano88Props) {
+  const dimRh = practiceMode === "lh-only";
+  const dimLh = practiceMode === "rh-only";
   const [auditionMidi, setAuditionMidi] = useState<number | null>(null);
 
   const postureIndex = useMemo(() => {
@@ -611,8 +634,8 @@ export function UnifiedPiano88({
           </defs>
 
           {/* Overhead Dual Lanes: RH Top, LH Bottom */}
-          <OverheadHandLane posture={displayFrame.rh} laneY={RH_LANE_Y} />
-          <OverheadHandLane posture={displayFrame.lh} laneY={LH_LANE_Y} />
+          <OverheadHandLane posture={displayFrame.rh} laneY={RH_LANE_Y} dimmed={dimRh} />
+          <OverheadHandLane posture={displayFrame.lh} laneY={LH_LANE_Y} dimmed={dimLh} />
 
           {/* Fallboard Divider */}
           <rect
@@ -629,24 +652,33 @@ export function UnifiedPiano88({
             {keysLayout.whites.map(({ midi, x, label }) => {
               const info = displayFrame.activeKeyHighlights.get(midi);
               const isAudition = auditionMidi === midi;
+              const isWrong = wrongMidis?.has(midi) ?? false;
+              const isHit = hitMidis?.has(midi) ?? false;
+              const isAccompanimentOnly = Boolean(
+                (dimLh && info?.lh && !info?.rh) || (dimRh && info?.rh && !info?.lh)
+              );
               const isBoth = Boolean(info?.rh && info?.lh);
               let fill = "#ffffff";
-              if (isBoth) {
+              if (isWrong) {
+                fill = "#ef4444";
+              } else if (isHit) {
+                fill = "#86efac";
+              } else if (isBoth) {
                 fill = "url(#piano-dual-overlap)";
               } else if (info?.rh === "active") {
-                fill = "#5eead4";
+                fill = dimRh ? "#ccfbf1" : "#5eead4";
               } else if (info?.rh === "held") {
-                fill = "#ccfbf1";
+                fill = dimRh ? "#f0fdfa" : "#ccfbf1";
               } else if (info?.lh === "active") {
-                fill = "#a5b4fc";
+                fill = dimLh ? "#e0e7ff" : "#a5b4fc";
               } else if (info?.lh === "held") {
-                fill = "#e0e7ff";
+                fill = dimLh ? "#eef2ff" : "#e0e7ff";
               } else if (isAudition) {
                 fill = "#fde68a";
               }
 
-              const hasPressed = Boolean(info || isAudition);
-              const pressShift = info ? 2 : 0;
+              const hasPressed = Boolean(info || isAudition || isWrong || isHit);
+              const pressShift = info || isWrong || isHit ? 2 : 0;
 
               return (
                 <g
@@ -655,6 +687,9 @@ export function UnifiedPiano88({
                   data-midi={midi}
                   data-key-rh={info?.rh}
                   data-key-lh={info?.lh}
+                  data-wrong-note={isWrong ? "true" : undefined}
+                  data-hit-note={isHit ? "true" : undefined}
+                  data-accompaniment-dimmed={isAccompanimentOnly ? "true" : undefined}
                   onClick={() => handleKeyPress(midi)}
                   className="cursor-pointer"
                 >
@@ -664,8 +699,8 @@ export function UnifiedPiano88({
                     width={WHITE_KEY_W}
                     height={WHITE_KEY_H + pressShift}
                     fill={fill}
-                    stroke={info?.isRepairedAnchor ? "#dc2626" : "#94a3b8"}
-                    strokeWidth={info?.isRepairedAnchor ? 1.8 : 0.9}
+                    stroke={isWrong ? "#991b1b" : info?.isRepairedAnchor ? "#dc2626" : "#94a3b8"}
+                    strokeWidth={isWrong || info?.isRepairedAnchor ? 1.8 : 0.9}
                     rx={2}
                   />
                   {hasPressed && (
@@ -674,8 +709,18 @@ export function UnifiedPiano88({
                       y={KEYS_Y + WHITE_KEY_H - 4}
                       width={WHITE_KEY_W - 2}
                       height={5}
-                      fill={info?.rh ? "#0f766e" : info?.lh ? "#4338ca" : "#d97706"}
-                      opacity={0.75}
+                      fill={
+                        isWrong
+                          ? "#991b1b"
+                          : isHit
+                            ? "#15803d"
+                            : info?.rh
+                              ? "#0f766e"
+                              : info?.lh
+                                ? "#4338ca"
+                                : "#d97706"
+                      }
+                      opacity={isAccompanimentOnly ? 0.3 : 0.75}
                     />
                   )}
                   {label && (
@@ -699,18 +744,27 @@ export function UnifiedPiano88({
             {keysLayout.blacks.map(({ midi, x }) => {
               const info = displayFrame.activeKeyHighlights.get(midi);
               const isAudition = auditionMidi === midi;
+              const isWrong = wrongMidis?.has(midi) ?? false;
+              const isHit = hitMidis?.has(midi) ?? false;
+              const isAccompanimentOnly = Boolean(
+                (dimLh && info?.lh && !info?.rh) || (dimRh && info?.rh && !info?.lh)
+              );
               const isBoth = Boolean(info?.rh && info?.lh);
               let fill = "#0f172a";
-              if (isBoth) {
+              if (isWrong) {
+                fill = "#dc2626";
+              } else if (isHit) {
+                fill = "#16a34a";
+              } else if (isBoth) {
                 fill = "url(#piano-dual-overlap)";
               } else if (info?.rh === "active") {
-                fill = "#0d9488";
+                fill = dimRh ? "#5eead4" : "#0d9488";
               } else if (info?.rh === "held") {
-                fill = "#115e59";
+                fill = dimRh ? "#99f6e4" : "#115e59";
               } else if (info?.lh === "active") {
-                fill = "#4f46e5";
+                fill = dimLh ? "#a5b4fc" : "#4f46e5";
               } else if (info?.lh === "held") {
-                fill = "#3730a3";
+                fill = dimLh ? "#c7d2fe" : "#3730a3";
               } else if (isAudition) {
                 fill = "#d97706";
               }
@@ -722,6 +776,9 @@ export function UnifiedPiano88({
                   data-midi={midi}
                   data-key-rh={info?.rh}
                   data-key-lh={info?.lh}
+                  data-wrong-note={isWrong ? "true" : undefined}
+                  data-hit-note={isHit ? "true" : undefined}
+                  data-accompaniment-dimmed={isAccompanimentOnly ? "true" : undefined}
                   onClick={() => handleKeyPress(midi)}
                   className="cursor-pointer"
                 >
@@ -729,11 +786,11 @@ export function UnifiedPiano88({
                     x={x}
                     y={KEYS_Y}
                     width={BLACK_KEY_W}
-                    height={BLACK_KEY_H + (info ? 2 : 0)}
+                    height={BLACK_KEY_H + (info || isWrong || isHit ? 2 : 0)}
                     rx={2}
                     fill={fill}
-                    stroke={info?.isRepairedAnchor ? "#f87171" : "#334155"}
-                    strokeWidth={info?.isRepairedAnchor ? 1.5 : 0.8}
+                    stroke={isWrong ? "#991b1b" : info?.isRepairedAnchor ? "#f87171" : "#334155"}
+                    strokeWidth={isWrong || info?.isRepairedAnchor ? 1.5 : 0.8}
                   />
                 </g>
               );
@@ -742,8 +799,8 @@ export function UnifiedPiano88({
 
           {/* 2D Translucent Dual-Hand Posture Simulation Layer */}
           <g data-layer="hand-posture-simulation">
-            <HandVectorOverlay posture={displayFrame.lh} />
-            <HandVectorOverlay posture={displayFrame.rh} />
+            <HandVectorOverlay posture={displayFrame.lh} dimmed={dimLh} />
+            <HandVectorOverlay posture={displayFrame.rh} dimmed={dimRh} />
           </g>
         </svg>
       </div>
