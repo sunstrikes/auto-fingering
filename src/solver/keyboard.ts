@@ -19,6 +19,15 @@ const SEMITONE_TO_KEY_POS = [
 ];
 
 const SEMITONE_TO_WHITE_INDEX = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6];
+const PITCH_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+
+/**
+ * Format a MIDI note number as a concise pitch label (e.g. 60 -> "C4").
+ */
+export function midiToPitchLabel(midi: number): string {
+  const octave = Math.floor(midi / 12) - 1;
+  return `${PITCH_NAMES[((midi % 12) + 12) % 12]}${octave}`;
+}
 
 export const SPAN_PRESET_SCALE: Record<SpanPreset, number> = {
   S: 0.82,
