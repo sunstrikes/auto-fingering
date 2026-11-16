@@ -361,7 +361,7 @@ describe("Seam 3c: Full App integration (OSMD click -> popover resolve -> Diff p
     // Apply phrase override: E4 -> finger 4
     await act(async () => {
       (mountedContainer!.querySelector('[data-testid="finger-btn-4"]') as HTMLButtonElement).click();
-      await new Promise((r) => setTimeout(r, 25));
+      await new Promise((r) => setTimeout(r, 200));
     });
 
     // Expandable Diff summary pill reflects change; UnifiedPiano88 reflects finger 4 on midi 64
