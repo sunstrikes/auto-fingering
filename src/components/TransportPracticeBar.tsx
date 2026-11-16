@@ -20,6 +20,8 @@ export interface TransportPracticeBarProps {
   measureCount: number;
   measureTimelines: MeasureTimeline[];
   activeMeasureIndex: number | null;
+  midiStatusLabel?: string;
+  onOpenSettings?: () => void;
   onPlay: () => void;
   onPlayFromSlice: () => void;
   onPause: () => void;
@@ -69,6 +71,8 @@ export function TransportPracticeBar({
   measureCount,
   measureTimelines,
   activeMeasureIndex,
+  midiStatusLabel,
+  onOpenSettings,
   onPlay,
   onPlayFromSlice,
   onPause,
@@ -299,15 +303,15 @@ export function TransportPracticeBar({
           <button
             type="button"
             data-testid="practice-settings-btn"
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => (onOpenSettings ? onOpenSettings() : setSettingsOpen(true))}
             className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
           >
-            Practice Settings
+            {midiStatusLabel ? `Practice Settings · ${midiStatusLabel}` : "Practice Settings"}
           </button>
         </div>
       </div>
 
-      {settingsOpen && (
+      {!onOpenSettings && settingsOpen && (
         <div
           data-testid="practice-settings-modal"
           role="dialog"
