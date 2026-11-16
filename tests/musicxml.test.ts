@@ -382,4 +382,91 @@ describe("musicxml pipeline seam: parseMusicXml", () => {
     expect(tgDoc.onsetSlices[3].heldNotes.map((h) => h.midi)).toEqual([60]);
     expect(tgDoc.onsetSlices[3].heldNotes[0].endTick).toBe(2);
   });
+
+  it("extracts non-auxiliary leading 1-5 FingerAnchors, ignores alternate/substitution/invalid digits, and preserves original <fingering> verbatim even when repaired", () => {
+    const { DOMParser, XMLSerializer } = createJsdomDom();
+
+    // 1. 03-partial-fingering-hanon.musicxml anchor extraction and <notations> before <lyric>
+    const xml03 = readFileSync(
+      resolve(__dirname, "../test-corpus/03-partial-fingering-hanon.musicxml"),
+      "utf-8"
+    );
+    const doc03 = parseMusicXml(xml03, { DOMParser });
+    const rhM1 = doc03.noteEvents.filter((n) => n.hand === "RH" && n.measureIndex === 0);
+    expect(rhM1.map((n) => n.anchorFinger)).toEqual([1, 2, undefined, undefined, 5, undefined, undefined, undefined]);
+    expect(rhM1.map((n) => n.anchorRawPreserved)).toEqual([true, true, false, false, true, false, false, false]);
+
+    const lhM1 = doc03.noteEvents.filter((n) => n.hand === "LH" && n.measureIndex === 0);
+    expect(lhM1.map((n) => n.anchorFinger)).toEqual([5, 4, undefined, undefined, 1, undefined, undefined, undefined]);
+
+    const c5Ending = doc03.noteEvents.find((n) => n.measureIndex === 1 && n.midi === 72)!;
+    expect(c5Ending.anchorFinger).toBe(5);
+    expect(c5Ending.anchorRawPreserved).toBe(true);
+    const c5El = doc03.noteElementsByUid.get(c5Ending.noteUid)!;
+    const c5Tags = Array.from(c5El.children).map((c) => c.localName);
+    expect(c5Tags.indexOf("notations")).toBeLessThan(c5Tags.indexOf("lyric"));
+
+    // 2. Auxiliary tags ignored, hyphenated leading 1-5 extracted, invalid leading digit ignored,
+    // and verbatim XML node + attributes preserved even when solver assigns a repaired finger
+    const anchorXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations>
+          <technical>
+            <fingering alternate="yes">4</fingering>
+            <fingering substitution="yes">5</fingering>
+            <fingering placement="above" default-x="3" default-y="14">1-2</fingering>
+          </technical>
+        </notations>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations>
+          <technical>
+            <fingering alternate="yes">2</fingering>
+          </technical>
+        </notations>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations>
+          <technical>
+            <fingering>6-1</fingering>
+          </technical>
+        </notations>
+      </note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(anchorXml, { DOMParser });
+    const [n1, n2, n3] = doc.noteEvents;
+    expect(n1.anchorFinger).toBe(1);
+    expect(n1.anchorRawPreserved).toBe(true);
+    expect(n2.anchorFinger).toBeUndefined();
+    expect(n2.anchorRawPreserved).toBe(false);
+    expect(n3.anchorFinger).toBeUndefined();
+    expect(n3.anchorRawPreserved).toBe(false);
+
+    // Simulate conflict repair proposing finger 3 for n1 (whose anchor was 1 / "1-2")
+    writeFingeringsToScore(doc, {
+      [n1.noteUid]: 3,
+      [n2.noteUid]: 2,
+      [n3.noteUid]: 4,
+    });
+    const out = serializeScoreDocument(doc, { XMLSerializer });
+
+    // Original preserved <fingering> on n1 stays 100% verbatim with all attributes and "1-2" text
+    expect(out).toContain('<fingering placement="above" default-x="3" default-y="14">1-2</fingering>');
+    expect(out).toContain('<fingering alternate="yes">4</fingering>');
+    expect(out).toContain('<fingering substitution="yes">5</fingering>');
+    // n2 had only alternate="yes", so a new primary <fingering> is added alongside it
+    expect(out).toContain('<fingering alternate="yes">2</fingering>');
+    expect(out).toContain('<fingering placement="above">2</fingering>');
+  });
 });

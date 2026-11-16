@@ -35,6 +35,7 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
   const [handSpanProfile, setHandSpanProfile] = useState<HandSpanProfile>(
     DEFAULT_HAND_SPAN_PROFILE
   );
+  const [ignoreExistingFingerings, setIgnoreExistingFingerings] = useState<boolean>(false);
   const [renderedXml, setRenderedXml] = useState<string | null>(null);
   const [solveResult, setSolveResult] = useState<SolveResult | null>(null);
   const [noteCount, setNoteCount] = useState<number>(0);
@@ -52,16 +53,21 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
 
   const solveAndRender = async (
     scoreDoc: ReturnType<typeof parseMusicXml>,
-    profile: HandSpanProfile
+    profile: HandSpanProfile,
+    ignoreAnchors: boolean
   ) => {
     if (!solverClientRef.current) return;
     setScoreTitle(scoreDoc.title);
     setNoteCount(scoreDoc.noteEvents.length);
     setStatus("Solving fingerings in Web Worker...");
 
-    const result = await solverClientRef.current.solve(scoreDoc.onsetSlices, profile);
+    const result = await solverClientRef.current.solve(scoreDoc.onsetSlices, profile, {
+      ignoreExistingFingerings: ignoreAnchors,
+    });
 
-    writeFingeringsToScore(scoreDoc, result.fingerByNoteUid);
+    writeFingeringsToScore(scoreDoc, result.fingerByNoteUid, {
+      ignoreExistingFingerings: ignoreAnchors,
+    });
     const exportedXml = serializeScoreDocument(scoreDoc);
 
     setSolveResult(result);
@@ -73,7 +79,8 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
     xmlText: string,
     singleStaff: boolean,
     handOverride: Hand,
-    profile: HandSpanProfile
+    profile: HandSpanProfile,
+    ignoreAnchors: boolean
   ) => {
     setErrorMsg(null);
     try {
@@ -81,7 +88,7 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
         xmlText,
         singleStaff ? { singleStaffHandOverride: handOverride } : undefined
       );
-      await solveAndRender(scoreDoc, profile);
+      await solveAndRender(scoreDoc, profile, ignoreAnchors);
     } catch (err) {
       if (err instanceof SolverCancelledError) {
         return;
@@ -111,7 +118,7 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
       setIsSingleStaff(session.scoreDoc.isSingleStaff);
       setSingleStaffHand(session.scoreDoc.defaultSingleStaffHand);
 
-      await solveAndRender(session.scoreDoc, handSpanProfile);
+      await solveAndRender(session.scoreDoc, handSpanProfile, ignoreExistingFingerings);
     } catch (err) {
       if (err instanceof SolverCancelledError) {
         return;
@@ -131,13 +138,38 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
   const handleSingleStaffHandToggle = async (nextHand: Hand) => {
     if (!rawXmlText || !isSingleStaff || nextHand === singleStaffHand) return;
     setSingleStaffHand(nextHand);
-    await reSolveScore(rawXmlText, isSingleStaff, nextHand, handSpanProfile);
+    await reSolveScore(
+      rawXmlText,
+      isSingleStaff,
+      nextHand,
+      handSpanProfile,
+      ignoreExistingFingerings
+    );
   };
 
   const handleProfileChange = (nextProfile: HandSpanProfile) => {
     setHandSpanProfile(nextProfile);
     if (rawXmlText) {
-      void reSolveScore(rawXmlText, isSingleStaff, singleStaffHand, nextProfile);
+      void reSolveScore(
+        rawXmlText,
+        isSingleStaff,
+        singleStaffHand,
+        nextProfile,
+        ignoreExistingFingerings
+      );
+    }
+  };
+
+  const handleIgnoreExistingToggle = (nextIgnore: boolean) => {
+    setIgnoreExistingFingerings(nextIgnore);
+    if (rawXmlText) {
+      void reSolveScore(
+        rawXmlText,
+        isSingleStaff,
+        singleStaffHand,
+        handSpanProfile,
+        nextIgnore
+      );
     }
   };
 
@@ -269,6 +301,16 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
                 />
                 Prefer stable position
               </label>
+
+              <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50">
+                <input
+                  type="checkbox"
+                  checked={ignoreExistingFingerings}
+                  onChange={(e) => handleIgnoreExistingToggle(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900"
+                />
+                Ignore original fingerings
+              </label>
             </div>
 
             <div className="flex items-center gap-1.5">
@@ -317,7 +359,7 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
                 <span>
                   <strong>Transitions:</strong> {solveResult.transitionCues.length}
                 </span>
-                <span>
+                <span className={solveResult.warnings.length > 0 ? "text-red-600" : undefined}>
                   <strong>Warnings:</strong> {solveResult.warnings.length}
                 </span>
               </>

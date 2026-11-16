@@ -1,4 +1,11 @@
-import type { Finger, Hand, HandSpanProfile, NoteEvent, OnsetSlice } from "../domain/types";
+import {
+  DEFAULT_HAND_SPAN_PROFILE,
+  type Finger,
+  type Hand,
+  type HandSpanProfile,
+  type NoteEvent,
+  type OnsetSlice,
+} from "../domain/types";
 import { getMaxSpan, getSpanScale, isBlackKey, toHandFramePos } from "./keyboard";
 
 export const IMPOSSIBLE_COST = 1e6;
@@ -33,13 +40,64 @@ for (let k = 2; k <= 5; k++) {
   generateMonotonicTuples(k, 0, [], MONOTONIC_TUPLES_BY_K[k]);
 }
 
+function hasAnchoredImpossibleSpan(
+  notes: NoteEvent[],
+  tuple: Finger[],
+  hand: Hand,
+  scale: number,
+  allCandidates: Finger[][],
+  keptAnchorSet: Set<number>
+): boolean {
+  const indices = Array.from(keptAnchorSet);
+  for (let a = 0; a < indices.length; a++) {
+    const i = indices[a];
+    const posI = toHandFramePos(notes[i].midi, hand);
+    for (let b = a + 1; b < indices.length; b++) {
+      const j = indices[b];
+      const dist = Math.abs(toHandFramePos(notes[j].midi, hand) - posI);
+      const maxSpan = getMaxSpan(tuple[i], tuple[j], scale);
+      if (dist <= maxSpan) continue;
+
+      const canImprove = allCandidates.some((alt) => {
+        const altSpan = getMaxSpan(alt[i], alt[j], scale);
+        return altSpan >= dist || (notes.length === 2 && altSpan > maxSpan);
+      });
+      if (canImprove) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function collectAnchoredSubsets(
+  anchoredIndices: number[],
+  keepCount: number,
+  startPos: number,
+  current: number[],
+  out: Set<number>[]
+): void {
+  if (current.length === keepCount) {
+    out.push(new Set(current));
+    return;
+  }
+  for (let i = startPos; i < anchoredIndices.length; i++) {
+    current.push(anchoredIndices[i]);
+    collectAnchoredSubsets(anchoredIndices, keepCount, i + 1, current, out);
+    current.pop();
+  }
+}
+
 /**
  * Returns candidate finger tuples aligned to `slice.notes` (which are sorted by
  * midi ascending). In LH frame, fingers run descending (thumb=1 on highest note).
+ * Minimally drops conflicting anchors when simultaneous anchors cannot be satisfied.
  */
 export function generateSliceCandidates(
   slice: OnsetSlice,
-  ignoreAnchors = false
+  ignoreAnchors = false,
+  profile: HandSpanProfile = DEFAULT_HAND_SPAN_PROFILE,
+  ignoredNoteUids?: Set<string>
 ): { candidates: Finger[][]; hadAnchorConflict: boolean } {
   const notes = slice.notes;
   const k = notes.length;
@@ -93,20 +151,55 @@ export function generateSliceCandidates(
     return { candidates: allCandidates, hadAnchorConflict: false };
   }
 
-  const hasAnchor = notes.some((n) => n.anchorFinger !== undefined);
-  if (!hasAnchor) {
+  const anchoredIndices: number[] = [];
+  for (let i = 0; i < notes.length; i++) {
+    const n = notes[i];
+    if (n.anchorFinger !== undefined && !ignoredNoteUids?.has(n.noteUid)) {
+      anchoredIndices.push(i);
+    }
+  }
+
+  if (anchoredIndices.length === 0) {
     return { candidates: allCandidates, hadAnchorConflict: false };
   }
 
-  const filtered = allCandidates.filter((tuple) =>
-    notes.every((note, idx) => note.anchorFinger === undefined || tuple[idx] === note.anchorFinger)
-  );
+  const scale = getSpanScale(profile);
 
-  if (filtered.length > 0) {
-    return { candidates: filtered, hadAnchorConflict: false };
+  // Try keeping all anchors first, then minimally drop 1, 2, ... anchors if physically conflicting
+  for (let dropCount = 0; dropCount <= anchoredIndices.length; dropCount++) {
+    const keepCount = anchoredIndices.length - dropCount;
+    const subsets: Set<number>[] = [];
+    collectAnchoredSubsets(anchoredIndices, keepCount, 0, [], subsets);
+
+    const matched: Finger[][] = [];
+    const seenTuples = new Set<string>();
+
+    for (const keptSet of subsets) {
+      for (const tuple of allCandidates) {
+        let matchesKept = true;
+        for (const idx of keptSet) {
+          if (tuple[idx] !== notes[idx].anchorFinger) {
+            matchesKept = false;
+            break;
+          }
+        }
+        if (!matchesKept) continue;
+        if (hasAnchoredImpossibleSpan(notes, tuple, slice.hand, scale, allCandidates, keptSet)) {
+          continue;
+        }
+        const key = tuple.join(",");
+        if (!seenTuples.has(key)) {
+          seenTuples.add(key);
+          matched.push(tuple);
+        }
+      }
+    }
+
+    if (matched.length > 0) {
+      return { candidates: matched, hadAnchorConflict: dropCount > 0 };
+    }
   }
 
-  // Anchor conflict: allow all candidates and flag conflict
   return { candidates: allCandidates, hadAnchorConflict: true };
 }
 

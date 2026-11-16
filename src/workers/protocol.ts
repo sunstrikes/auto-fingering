@@ -4,6 +4,7 @@ export interface WorkerRequest {
   requestId: number;
   onsetSlices: OnsetSlice[];
   profile: HandSpanProfile;
+  ignoreExistingFingerings?: boolean;
 }
 
 export type WorkerResponse =
