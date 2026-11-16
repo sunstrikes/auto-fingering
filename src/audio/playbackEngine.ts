@@ -782,6 +782,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       deps.audioEngine.stopAll();
       metronomeAudio.stopAll();
       activeSchedule = null;
+      visualBeatTimeline = [];
       pausedScoreSec = null;
       lastEmittedSliceId = null;
       lastCursorBeatKey = null;
