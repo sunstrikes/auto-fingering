@@ -25,7 +25,7 @@ import {
   type ScoreLayoutMode,
   type ScoreRendererFactory,
 } from "./components/ScoreViewer";
-import { AudioControls } from "./components/AudioControls";
+import { TransportPracticeBar } from "./components/TransportPracticeBar";
 import {
   createPianoAudioEngine,
   type AudioEngineStatus,
@@ -37,8 +37,8 @@ import {
   type CursorSyncTarget,
   type PlaybackEngine,
   type PlaybackFrame,
-  type PlaybackSpeed,
   type PlaybackState,
+  type SpeedMultiplier,
 } from "./audio/playbackEngine";
 
 const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
@@ -68,7 +68,7 @@ export default function App({
   const playbackEngineRef = useRef<PlaybackEngine | null>(null);
   const [isResolving, setIsResolving] = useState<boolean>(false);
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
-  const [playbackSpeed, setPlaybackSpeed] = useState<PlaybackSpeed>(1.0);
+  const [playbackSpeed, setPlaybackSpeed] = useState<SpeedMultiplier>(1.0);
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
   const [playbackFrame, setPlaybackFrame] = useState<PlaybackFrame | null>(null);
@@ -450,6 +450,26 @@ export default function App({
       .getState()
       .selectMeasure(measureIndex, summary?.firstWarningSliceId ?? summary?.firstSliceId ?? null);
     setPopoverOpen(false);
+    if (playbackState === "playing" && scoreDoc && playbackEngineRef.current) {
+      const tl = scoreDoc.measureTimelines[measureIndex];
+      if (tl) {
+        void playbackEngineRef.current.play(scoreDoc, { fromScoreSec: tl.startSec });
+      } else if (summary?.firstSliceId) {
+        void playbackEngineRef.current.play(scoreDoc, { fromSliceId: summary.firstSliceId });
+      }
+    }
+  };
+
+  const handleJumpToStart = () => {
+    if (!scoreDoc) return;
+    setPopoverOpen(false);
+    const firstSliceId = onsetSlices[0]?.sliceId ?? null;
+    useStudioStore.getState().selectMeasure(0, firstSliceId);
+    if (playbackState === "playing" && playbackEngineRef.current) {
+      void playbackEngineRef.current.play(scoreDoc, { restart: true });
+    } else if (playbackState === "paused") {
+      playbackEngineRef.current?.stop();
+    }
   };
 
   const handleSelectSlice = (sliceId: string) => {
@@ -457,6 +477,26 @@ export default function App({
   };
 
   const handleSelectNote = (noteUid: string, anchorRect?: PopoverAnchorRect) => {
+    if (playbackState !== "stopped") {
+      setPopoverOpen(false);
+      const clickedNote = noteEvents.find((n) => n.noteUid === noteUid);
+      const targetSlice =
+        onsetSlices.find((s) => s.notes.some((n) => n.noteUid === noteUid)) ??
+        (clickedNote
+          ? onsetSlices.find(
+              (s) =>
+                s.measureIndex === clickedNote.measureIndex &&
+                s.onsetTick === clickedNote.onsetTick
+            )
+          : undefined);
+      if (targetSlice) {
+        useStudioStore.getState().selectSlice(targetSlice.sliceId);
+        if (playbackState === "playing" && scoreDoc && playbackEngineRef.current) {
+          void playbackEngineRef.current.play(scoreDoc, { fromSliceId: targetSlice.sliceId });
+        }
+      }
+      return;
+    }
     useStudioStore.getState().selectNote(noteUid);
     setPopoverAnchorRect(anchorRect ?? null);
     setPopoverOpen(true);
@@ -519,7 +559,7 @@ export default function App({
     playbackEngineRef.current?.stop();
   };
 
-  const handleSpeedChange = (nextSpeed: PlaybackSpeed) => {
+  const handleSpeedChange = (nextSpeed: SpeedMultiplier) => {
     setPlaybackSpeed(nextSpeed);
     playbackEngineRef.current?.setSpeed(nextSpeed);
   };
@@ -666,19 +706,6 @@ export default function App({
                 Redo
               </button>
             </div>
-
-            <AudioControls
-              hasScore={Boolean(scoreDoc && onsetSlices.length > 0)}
-              hasSelectedSlice={Boolean(selectedSliceId)}
-              playbackState={playbackState}
-              playbackSpeed={playbackSpeed}
-              audioStatus={audioStatus}
-              onPlay={handlePlay}
-              onPlayFromSlice={handlePlayFromSlice}
-              onPause={handlePause}
-              onStop={handleStop}
-              onChangeSpeed={handleSpeedChange}
-            />
 
             <div className="flex items-center gap-1.5">
               <select
@@ -881,6 +908,26 @@ export default function App({
           )}
         </div>
       </main>
+
+      {/* Middle Pane: Dedicated Transport & Practice Bar */}
+      <TransportPracticeBar
+        hasScore={Boolean(scoreDoc && onsetSlices.length > 0)}
+        hasSelectedSlice={Boolean(selectedSliceId)}
+        playbackState={playbackState}
+        speedMultiplier={playbackSpeed}
+        baseBpm={scoreDoc?.tempoPoints[0]?.bpm ?? 100}
+        audioStatus={audioStatus}
+        measureCount={measureCount}
+        measureTimelines={scoreDoc?.measureTimelines ?? []}
+        activeMeasureIndex={cursorTarget?.measureIndex ?? selectedMeasureIndex}
+        onPlay={handlePlay}
+        onPlayFromSlice={handlePlayFromSlice}
+        onPause={handlePause}
+        onStop={handleStop}
+        onJumpToStart={handleJumpToStart}
+        onJumpToMeasure={handleSelectMeasure}
+        onChangeSpeed={handleSpeedChange}
+      />
 
       {/* Bottom Pane: Full-Width 88-Key Physical Piano & Dual-Hand Posture Simulation */}
       <div data-testid="bottom-piano-pane" className="shrink-0">

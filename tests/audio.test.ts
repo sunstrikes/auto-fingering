@@ -581,11 +581,10 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     const statusBadge = mountedContainer.querySelector('[data-testid="audio-engine-status"]')!;
     expect(statusBadge.textContent).toContain("Idle");
 
-    // Set playback speed to 0.5x
-    const speedSelect = mountedContainer.querySelector('[data-testid="audio-speed-select"]') as HTMLSelectElement;
+    // Set playback speed to 0.5x via Transport & Practice Bar preset
+    const speed05Btn = mountedContainer.querySelector('[data-testid="speed-preset-0.5"]') as HTMLButtonElement;
     await act(async () => {
-      speedSelect.value = "0.5";
-      speedSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      speed05Btn.click();
     });
 
     // Press Play -> lazy-loads smplr once, falls back to Synth Fallback cleanly
@@ -713,5 +712,280 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     expect(triggered).toEqual([
       { midi: 74, time: 0.45, duration: 0.5 / 1.25 },
     ]);
+  });
+
+  it("supports continuous Speed Multiplier (0.25x-1.5x), clamps out-of-range values, scales mid-piece tempo shifts proportionally, and jumps via fromScoreSec", async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <time><beats>2</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <direction><sound tempo="120"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+    <measure number="2">
+      <direction><sound tempo="60"/></direction>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml);
+    const mockCtx = createMockAudioContext(0);
+    const triggered: Array<{ midi: number; time: number; duration: number }> = [];
+    const audioEngine = {
+      getStatus: () => "samples" as const,
+      getAudioContext: () => mockCtx,
+      prepare: vi.fn(async () => "samples" as const),
+      triggerNote: vi.fn((p: { midi: number; time: number; duration: number }) => {
+        triggered.push({ midi: p.midi, time: p.time, duration: p.duration });
+      }),
+      stopAll: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const engine = createPlaybackEngine({
+      audioEngine,
+      requestAnimationFrame: () => 1,
+      cancelAnimationFrame: () => {},
+    });
+
+    engine.setSpeed(0.1);
+    expect(engine.getSpeed()).toBe(0.25);
+    engine.setSpeed(2.5);
+    expect(engine.getSpeed()).toBe(1.5);
+
+    engine.setSpeed(0.6);
+    expect(engine.getSpeed()).toBe(0.6);
+
+    // At 0.6x:
+    // m1 (120 BPM): C4 onset 0s -> 0s, dur 0.5/0.6; D4 onset 0.5s -> 0.5/0.6
+    // m2 (60 BPM): E4 onset 1.0s -> 1.0/0.6, dur 1.0/0.6; F4 onset 2.0s -> 2.0/0.6
+    await engine.play(scoreDoc);
+    expect(triggered.map((t) => ({ midi: t.midi, time: Number(t.time.toFixed(4)) }))).toEqual([
+      { midi: 60, time: 0 },
+      { midi: 62, time: Number((0.5 / 0.6).toFixed(4)) },
+      { midi: 64, time: Number((1.0 / 0.6).toFixed(4)) },
+      { midi: 65, time: Number((2.0 / 0.6).toFixed(4)) },
+    ]);
+
+    // Jump directly to measure 2 via fromScoreSec
+    triggered.length = 0;
+    await engine.play(scoreDoc, { fromScoreSec: scoreDoc.measureTimelines[1].startSec });
+    expect(triggered.map((t) => t.midi)).toEqual([64, 65]);
+    expect(triggered[0].time).toBe(0);
+  });
+
+  it("renders TransportPracticeBar between score and piano, supports BPM editor, measure ruler jump, settings modal, and click disambiguation", async () => {
+    const inProcessWorkerFactory = (): WorkerLike => {
+      const worker: WorkerLike = {
+        onmessage: null,
+        onerror: null,
+        postMessage(msg: unknown) {
+          const req = msg as WorkerRequest;
+          queueMicrotask(() => {
+            const result = solveFingering(req.onsetSlices, req.profile, {
+              ignoreExistingFingerings: req.ignoreExistingFingerings,
+            });
+            const resp: WorkerResponse = { requestId: req.requestId, ok: true, result };
+            worker.onmessage?.({ data: resp } as MessageEvent<WorkerResponse>);
+          });
+        },
+        terminate() {},
+      };
+      return worker;
+    };
+
+    const syncCursor = vi.fn();
+    let capturedHitTestNote: ((x: number, y: number) => { noteUid: string; measureIndex: number; midi: number } | null) | undefined;
+    let firstNoteUid = "";
+    let thirdNoteUid = "";
+
+    const rendererSpy: ScoreRendererHandle = {
+      render: vi.fn(async () => ({
+        measureCount: 2,
+        measureGeometry: [
+          { measureIndex: 0, top: 0, height: 100 },
+          { measureIndex: 1, top: 100, height: 100 },
+        ],
+      })),
+      syncCursor,
+      highlightMeasure: vi.fn(),
+      markAnchoredNotes: vi.fn(),
+      scrollToMeasure: vi.fn(),
+      hitTestNoteAtClientPoint: (x: number, y: number) => capturedHitTestNote?.(x, y) ?? null,
+      dispose: vi.fn(),
+    };
+
+    const mockCtx = createMockAudioContext(0);
+    const audioDeps = {
+      getAudioContext: () => mockCtx,
+      loadSmplrPiano: async () => {
+        throw new Error("offline");
+      },
+      requestAnimationFrame: () => 1,
+      cancelAnimationFrame: () => {},
+    };
+
+    mountedContainer = document.createElement("div");
+    document.body.appendChild(mountedContainer);
+    mountedRoot = createRoot(mountedContainer);
+
+    await act(async () => {
+      mountedRoot!.render(
+        createElement(App, {
+          solverClientFactory: () => createSolverClient(inProcessWorkerFactory),
+          scoreRendererFactory: () => rendererSpy,
+          audioDeps,
+        })
+      );
+    });
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <direction><sound tempo="120"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const parsed = parseMusicXml(xml);
+    firstNoteUid = parsed.noteEvents[0].noteUid;
+    thirdNoteUid = parsed.noteEvents[2].noteUid;
+
+    const fileInput = mountedContainer.querySelector('input[type="file"]') as HTMLInputElement;
+    const fakeFile = {
+      name: "transport-test.musicxml",
+      text: async () => xml,
+      arrayBuffer: async () => new TextEncoder().encode(xml).buffer,
+    };
+    Object.defineProperty(fileInput, "files", { value: [fakeFile], configurable: true });
+
+    await act(async () => {
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    // 1. Transport & Practice Bar sits between top-score-pane and bottom-piano-pane
+    const topPane = mountedContainer.querySelector('[data-testid="top-score-pane"]')!;
+    const transportBar = mountedContainer.querySelector('[data-testid="transport-practice-bar"]')!;
+    const bottomPane = mountedContainer.querySelector('[data-testid="bottom-piano-pane"]')!;
+    expect(topPane).not.toBeNull();
+    expect(transportBar).not.toBeNull();
+    expect(bottomPane).not.toBeNull();
+    expect(
+      Boolean(topPane.compareDocumentPosition(transportBar) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ).toBe(true);
+    expect(
+      Boolean(transportBar.compareDocumentPosition(bottomPane) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ).toBe(true);
+
+    // 2. All 8 speed presets exist, steppers work, and BPM editor computes speedMultiplier = targetBpm / baseBpm
+    for (const preset of [0.25, 0.5, 0.6, 0.75, 0.9, 1, 1.25, 1.5]) {
+      expect(mountedContainer.querySelector(`[data-testid="speed-preset-${preset}"]`)).not.toBeNull();
+    }
+    const bpmBtn = mountedContainer.querySelector('[data-testid="bpm-readout-btn"]') as HTMLButtonElement;
+    expect(bpmBtn.textContent).toContain("120");
+    await act(async () => {
+      bpmBtn.click();
+    });
+    const bpmInput = mountedContainer.querySelector('[data-testid="bpm-input"]') as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setter?.call(bpmInput, "90");
+      bpmInput.dispatchEvent(new Event("input", { bubbles: true }));
+      bpmInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    const updatedBpmBtn = mountedContainer.querySelector('[data-testid="bpm-readout-btn"]') as HTMLButtonElement;
+    expect(updatedBpmBtn.textContent).toContain("90");
+    expect(
+      mountedContainer.querySelector('[data-testid="speed-preset-0.75"]')?.getAttribute("aria-pressed")
+    ).toBe("true");
+
+    // 3. Practice Settings modal shell opens and closes
+    const settingsBtn = mountedContainer.querySelector('[data-testid="practice-settings-btn"]') as HTMLButtonElement;
+    await act(async () => {
+      settingsBtn.click();
+    });
+    expect(mountedContainer.querySelector('[data-testid="practice-settings-modal"]')).not.toBeNull();
+    const closeSettingsBtn = mountedContainer.querySelector('[data-testid="practice-settings-close-btn"]') as HTMLButtonElement;
+    await act(async () => {
+      closeSettingsBtn.click();
+    });
+    expect(mountedContainer.querySelector('[data-testid="practice-settings-modal"]')).toBeNull();
+
+    // 4. Click disambiguation: while stopped, clicking a note opens NoteAnchorPopover
+    const surface = mountedContainer.querySelector('[data-testid="osmd-canvas-surface"]') as HTMLElement;
+    capturedHitTestNote = () => ({ noteUid: firstNoteUid, measureIndex: 0, midi: 60 });
+    await act(async () => {
+      surface.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 10, clientY: 10 }));
+    });
+    expect(mountedContainer.querySelector('[data-testid="note-anchor-popover"]')).not.toBeNull();
+
+    // Start playback -> popover closes; clicking a note in measure 2 jumps cursor without opening popover
+    const playBtn = mountedContainer.querySelector('[data-testid="audio-play-btn"]') as HTMLButtonElement;
+    await act(async () => {
+      playBtn.click();
+      await Promise.resolve();
+    });
+    expect(mountedContainer.querySelector('[data-testid="note-anchor-popover"]')).toBeNull();
+
+    capturedHitTestNote = () => ({ noteUid: thirdNoteUid, measureIndex: 1, midi: 64 });
+    await act(async () => {
+      surface.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 50, clientY: 10 }));
+      await Promise.resolve();
+    });
+    expect(mountedContainer.querySelector('[data-testid="note-anchor-popover"]')).toBeNull();
+    expect(syncCursor).toHaveBeenLastCalledWith(
+      expect.objectContaining({ measureIndex: 1, midis: [64] })
+    );
+
+    // 5. Measure ruler click jumps playback to clicked measure; Jump-to-Start jumps to measure 0
+    const rulerM1 = mountedContainer.querySelector('[data-testid="measure-ruler-item-0"]') as HTMLButtonElement;
+    await act(async () => {
+      rulerM1.click();
+      await Promise.resolve();
+    });
+    expect(syncCursor).toHaveBeenLastCalledWith(
+      expect.objectContaining({ measureIndex: 0, midis: [60] })
+    );
+
+    const rulerM2 = mountedContainer.querySelector('[data-testid="measure-ruler-item-1"]') as HTMLButtonElement;
+    await act(async () => {
+      rulerM2.click();
+      await Promise.resolve();
+    });
+    expect(syncCursor).toHaveBeenLastCalledWith(
+      expect.objectContaining({ measureIndex: 1, midis: [64] })
+    );
+
+    const jumpStartBtn = mountedContainer.querySelector('[data-testid="transport-jump-start-btn"]') as HTMLButtonElement;
+    await act(async () => {
+      jumpStartBtn.click();
+      await Promise.resolve();
+    });
+    expect(syncCursor).toHaveBeenLastCalledWith(
+      expect.objectContaining({ measureIndex: 0, midis: [60] })
+    );
   });
 });

@@ -99,6 +99,28 @@ export interface SolveResult {
   solveTimeMs: number;
 }
 
+export interface TempoPoint {
+  tick: number;
+  bpm: number;
+}
+
+export interface TimeSignaturePoint {
+  tick: number;
+  beats: number;
+  beatType: number;
+}
+
+export interface MeasureTimeline {
+  measureIndex: number;
+  startTick: number;
+  endTick: number;
+  startSec: number;
+  endSec: number;
+  timeBeats: number;
+  timeBeatType: number;
+  isPickup: boolean;
+}
+
 export interface ScoreDocument {
   title: string;
   xmlDoc: Document;
@@ -110,4 +132,8 @@ export interface ScoreDocument {
   isSingleStaff: boolean;
   defaultSingleStaffHand: Hand;
   measureCount: number;
+  ticksPerQuarter: number;
+  tempoPoints: TempoPoint[];
+  timeSignaturePoints: TimeSignaturePoint[];
+  measureTimelines: MeasureTimeline[];
 }
