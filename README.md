@@ -2,10 +2,13 @@
 
 > 100% 运行在浏览器本地的 MusicXML 钢琴指法推导与交互练琴工作室：上传乐谱，自动推导 1–5 指法，点音符微调，接上电钢琴逐拍练习，最后无损导出带标准 `<fingering>` 标注的 MusicXML。零后端，乐谱不离开你的浏览器。
 
+**中文** · [English](README.en.md)
+
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vite.dev/)
 [![Vitest](https://img.shields.io/badge/tested%20with-Vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev/)
+[![CI](https://github.com/sunstrikes/auto-fingering/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/sunstrikes/auto-fingering/actions/workflows/ci.yml)
 
 ![MusicXML 钢琴自动指法工作室界面](docs/screenshots/studio.png)
 
@@ -120,7 +123,9 @@ test-corpus/       # 01–05 回归样本（含真实曲目《武昌》）
 
 本项目是纯静态 SPA，`npm run build` 后把 `dist/` 部署到任意静态托管即可，无服务端依赖、无需 SPA 路由回退（单页应用只有根路径）。
 
-EdgeOne Pages 部署步骤、匿名预览与项目认领说明见 [docs/deployment-edgeone.md](docs/deployment-edgeone.md)。
+- `.github/workflows/ci.yml`：在 Node 20/22 上运行类型检查、测试与生产构建。
+- `.github/workflows/deploy-edgeone.yml`：打 `v*` tag 或手动触发，把 `dist/` 发布到 EdgeOne Pages；需配置 `EDGEONE_PAGES_API_TOKEN` secret（可选 `EDGEONE_PROJECT_NAME` 变量）。
+- EdgeOne Pages 部署步骤、匿名预览与项目认领说明见 [docs/deployment-edgeone.md](docs/deployment-edgeone.md)。
 
 ## 文档
 

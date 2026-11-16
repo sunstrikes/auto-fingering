@@ -74,6 +74,23 @@ npx edgeone@latest makers deploy ./dist -n musicxml-fingering --site china
 
 也可以把仓库接入 EdgeOne 的 Git 构建：构建命令 `npm run build`，输出目录 `dist`。
 
+## GitHub Actions 自动部署
+
+仓库内置 `.github/workflows/deploy-edgeone.yml`：推送 `v*` tag 或手动
+`workflow_dispatch` 时，自动构建 `dist/` 并用 API Token 发布。
+
+1. 在 [EdgeOne Pages 控制台](https://console.cloud.tencent.com/edgeone/pages?tab=settings)创建 API Token。
+2. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加 `EDGEONE_PAGES_API_TOKEN`。
+3. 可选：添加 Repository variable `EDGEONE_PROJECT_NAME`（默认 `musicxml-fingering`）。
+4. 打 tag 触发：
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+`.github/workflows/ci.yml` 则在每次 push / PR 时运行 Node 20 与 22 的类型检查、测试（含覆盖率）和构建。
+
 ## 备选：MCP `deploy-html`
 
 <https://cloud.tencent.com/developer/mcp/server/10011> 中的 `deploy-html` 只接收单个 HTML
