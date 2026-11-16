@@ -358,4 +358,113 @@ describe("Slice 4: Whole-Measure A-B Loop & Loop Gap in <App />", () => {
       container.querySelector('[data-testid="measure-ruler-item-1"]')?.className
     ).toContain("bg-blue-600");
   });
+
+  it("cancels in-progress Loop Gap Count-In cleanly when Waiting Mode is turned off or Stop is pressed", async () => {
+    const { audioDeps, rawCtx, tickRaf } = createFakeAudioDeps();
+    const { midiDeps, sendNoteOn } = createMockMidiDeps();
+
+    const container = mount(
+      createElement(App, {
+        solverClientFactory: inProcessWorkerFactory(),
+        scoreRendererFactory: () => createNoopScoreRenderer(),
+        audioDeps,
+        midiDeps,
+      })
+    );
+
+    await uploadXml(container, FOUR_MEASURE_XML);
+
+    // Enable Loop Gap in Practice Settings
+    act(() => {
+      (container.querySelector('[data-testid="practice-settings-btn"]') as HTMLButtonElement).click();
+    });
+    act(() => {
+      (container.querySelector('[data-testid="loop-gap-toggle"]') as HTMLInputElement).click();
+    });
+    act(() => {
+      (container.querySelector('[data-testid="practice-settings-close-btn"]') as HTMLButtonElement).click();
+    });
+
+    // Enable A-B Loop on [1..1] (m.2 only: D4=62)
+    const startSelect = container.querySelector('[data-testid="ab-loop-start-select"]') as HTMLSelectElement;
+    const endSelect = container.querySelector('[data-testid="ab-loop-end-select"]') as HTMLSelectElement;
+    const abToggleBtn = container.querySelector('[data-testid="ab-loop-toggle-btn"]') as HTMLButtonElement;
+    act(() => {
+      startSelect.value = "1";
+      startSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    act(() => {
+      endSelect.value = "1";
+      endSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    act(() => {
+      abToggleBtn.click();
+    });
+
+    // Enable Metronome + Waiting Mode and start Play
+    act(() => {
+      (container.querySelector('[data-testid="metronome-toggle-btn"]') as HTMLButtonElement).click();
+    });
+    const waitingBtn = container.querySelector('[data-testid="waiting-mode-toggle-btn"]') as HTMLButtonElement;
+    act(() => {
+      waitingBtn.click();
+    });
+    await act(async () => {
+      (container.querySelector('[data-testid="audio-play-btn"]') as HTMLButtonElement).click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    // Complete m.2 (D4=62) -> wraps back to m.2 and starts Loop Gap Count-In
+    await act(async () => {
+      sendNoteOn(62);
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(container.querySelector('[data-testid="count-in-indicator"]')?.textContent).toContain(
+      "Count-In: 3"
+    );
+
+    // Turn off Waiting Mode mid-Count-In -> must cancel Count-In and unpause metronome
+    act(() => {
+      waitingBtn.click();
+    });
+    expect(waitingBtn.getAttribute("aria-pressed")).toBe("false");
+    expect(container.querySelector('[data-testid="count-in-indicator"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="metronome-beat-indicator"]')?.getAttribute("data-metronome-paused")
+    ).toBe("false");
+
+    // Advancing audio time later must NOT trigger any stale callback or re-pause metronome
+    act(() => {
+      rawCtx.currentTime = 2.0;
+      tickRaf();
+    });
+    expect(container.querySelector('[data-testid="count-in-indicator"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="metronome-beat-indicator"]')?.getAttribute("data-metronome-paused")
+    ).toBe("false");
+
+    // Re-enable Waiting Mode, trigger Loop Gap again, then press Stop mid-Count-In
+    act(() => {
+      waitingBtn.click();
+    });
+    await act(async () => {
+      (container.querySelector('[data-testid="audio-play-btn"]') as HTMLButtonElement).click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    await act(async () => {
+      sendNoteOn(62);
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(container.querySelector('[data-testid="count-in-indicator"]')).not.toBeNull();
+
+    act(() => {
+      (container.querySelector('[data-testid="audio-stop-btn"]') as HTMLButtonElement).click();
+    });
+    expect(container.querySelector('[data-testid="count-in-indicator"]')).toBeNull();
+    act(() => {
+      rawCtx.currentTime = 4.0;
+      tickRaf();
+    });
+    expect(container.querySelector('[data-testid="count-in-indicator"]')).toBeNull();
+  });
 });

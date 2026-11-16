@@ -380,7 +380,88 @@ describe("<App /> PracticeMode & WaitingMode end-to-end", () => {
     expect(bothBtn.disabled).toBe(true);
     expect(rhBtn.disabled).toBe(true);
 
+    // 5. Loading a two-staff score afterward unlocks PracticeMode
+    await uploadXml(container, TWO_HAND_SCORE_XML, "two-hand-again.musicxml");
+    expect(bothBtn.disabled).toBe(false);
+    expect(rhBtn.disabled).toBe(false);
+    expect(lhBtn.disabled).toBe(false);
+    act(() => {
+      bothBtn.click();
+    });
+    expect(bothBtn.getAttribute("aria-pressed")).toBe("true");
+
     void triggerNoteClick;
+  });
+
+  it("resets MIDI Local Sound to false when toggling Waiting Mode on and allows explicit opt-in while in Waiting Mode", async () => {
+    const { triggeredMidis, audioDeps } = createFakeAudioDeps();
+    const rendererFactory = () =>
+      ({
+        render: vi.fn(async () => ({ measureCount: 1, measureGeometry: [] })),
+        highlightMeasure: vi.fn(),
+        markAnchoredNotes: vi.fn(),
+        scrollToMeasure: vi.fn(),
+        syncCursor: vi.fn(),
+        hitTestNoteAtClientPoint: vi.fn(() => null),
+        dispose: vi.fn(),
+      }) satisfies ScoreRendererHandle;
+
+    const container = mount(
+      createElement(App, {
+        solverClientFactory: createInProcessSolverClientFactory(),
+        scoreRendererFactory: rendererFactory,
+        audioDeps,
+      })
+    );
+
+    await uploadXml(container, TWO_HAND_SCORE_XML);
+
+    // Explicitly turn MIDI Local Sound ON before enabling Waiting Mode
+    act(() => {
+      (container.querySelector('[data-testid="practice-settings-btn"]') as HTMLButtonElement).click();
+    });
+    const localSoundToggleBefore = container.querySelector(
+      '[data-testid="midi-local-sound-toggle"]'
+    ) as HTMLInputElement;
+    expect(localSoundToggleBefore.checked).toBe(false);
+    act(() => {
+      localSoundToggleBefore.click();
+    });
+    expect(localSoundToggleBefore.checked).toBe(true);
+    act(() => {
+      (container.querySelector('[data-testid="practice-settings-close-btn"]') as HTMLButtonElement).click();
+    });
+
+    // Enable Waiting Mode -> MIDI Local Sound must reset to false
+    act(() => {
+      (container.querySelector('[data-testid="waiting-mode-toggle-btn"]') as HTMLButtonElement).click();
+    });
+
+    // PracticeSettingsModal must display false
+    act(() => {
+      (container.querySelector('[data-testid="practice-settings-btn"]') as HTMLButtonElement).click();
+    });
+    const localSoundToggleInWaiting = container.querySelector(
+      '[data-testid="midi-local-sound-toggle"]'
+    ) as HTMLInputElement;
+    expect(localSoundToggleInWaiting.checked).toBe(false);
+
+    // Explicitly opt back in while in Waiting Mode
+    act(() => {
+      localSoundToggleInWaiting.click();
+    });
+    expect(localSoundToggleInWaiting.checked).toBe(true);
+    act(() => {
+      (container.querySelector('[data-testid="practice-settings-close-btn"]') as HTMLButtonElement).click();
+    });
+
+    // Playing a key now triggers local sound
+    const key60 = container.querySelector('[data-testid="piano-key-60"]') as SVGGElement;
+    await act(async () => {
+      key60.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(triggeredMidis).toContain(60);
   });
 
   it("jumps cursor without opening NoteAnchorPopover when clicking score while Waiting Mode is active", async () => {

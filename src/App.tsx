@@ -793,6 +793,7 @@ export default function App({
           const norm = normalizeAbLoopBounds(abLoop, scoreDoc.measureCount);
           syncToPracticeStep(result.advancedToStep, "playing");
           void playbackEngineRef.current.playCountIn(scoreDoc, norm.startMeasureIndex, () => {
+            if (!waitingLoopGapActiveRef.current) return;
             waitingLoopGapActiveRef.current = false;
             playbackEngineRef.current?.setMetronomePaused(true);
           });
@@ -904,7 +905,10 @@ export default function App({
     setPopoverOpen(false);
     if (waitingModeEnabled) {
       if (practiceSteps.length === 0) return;
-      waitingLoopGapActiveRef.current = false;
+      if (waitingLoopGapActiveRef.current) {
+        waitingLoopGapActiveRef.current = false;
+        playbackEngineRef.current.stop();
+      }
       const loopRange = findAbLoopStepRange(practiceSteps, abLoop);
       let startIdx = 0;
       if (playbackState === "paused" && waitingState.currentStepIndex < practiceSteps.length) {
@@ -972,8 +976,7 @@ export default function App({
     setWaitingState(createWaitingModeState(0));
     if (waitingModeEnabled) {
       setPlaybackState("stopped");
-      setCursorTarget(null);
-      setPlaybackFrame(null);
+      syncToPracticeStep(null, "stopped");
       setActiveMetronomeBeat(null);
     }
   };
@@ -1004,31 +1007,34 @@ export default function App({
   };
 
   const handleToggleWaitingMode = () => {
-    setWaitingModeEnabled((prev) => {
-      const next = !prev;
-      if (next) {
-        // Keep MIDI Local Sound off by default whenever Waiting Mode is enabled
-        setMidiLocalSound(false);
-        setPopoverOpen(false);
-        if (playbackEngineRef.current?.getState() === "playing") {
-          playbackEngineRef.current.stop();
-          const currentIdx = selectedSliceId
-            ? Math.max(
-                0,
-                practiceSteps.findIndex((s) => s.primarySliceId === selectedSliceId)
-              )
-            : 0;
-          setWaitingState(createWaitingModeState(currentIdx));
-          setPlaybackState("playing");
-          playbackEngineRef.current.setMetronomePaused(true);
-          syncToPracticeStep(practiceSteps[currentIdx] ?? null, "playing");
-        }
-      } else {
-        playbackEngineRef.current?.setMetronomePaused(false);
-        setWaitingState(createWaitingModeState(0));
+    const next = !waitingModeEnabled;
+    setWaitingModeEnabled(next);
+    if (next) {
+      // Keep MIDI Local Sound off by default whenever Waiting Mode is enabled
+      setMidiLocalSound(false);
+      setPopoverOpen(false);
+      if (playbackEngineRef.current?.getState() === "playing") {
+        playbackEngineRef.current.stop();
+        const currentIdx = selectedSliceId
+          ? Math.max(
+              0,
+              practiceSteps.findIndex((s) => s.primarySliceId === selectedSliceId)
+            )
+          : 0;
+        setWaitingState(createWaitingModeState(currentIdx));
+        setPlaybackState("playing");
+        playbackEngineRef.current.setMetronomePaused(true);
+        syncToPracticeStep(practiceSteps[currentIdx] ?? null, "playing");
       }
-      return next;
-    });
+    } else {
+      waitingLoopGapActiveRef.current = false;
+      playbackEngineRef.current?.stop();
+      playbackEngineRef.current?.setMetronomePaused(false);
+      setPlaybackState("stopped");
+      syncToPracticeStep(null, "stopped");
+      setActiveMetronomeBeat(null);
+      setWaitingState(createWaitingModeState(0));
+    }
   };
 
   const handleToggleSkipGraceNotes = () => {
