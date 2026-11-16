@@ -1,17 +1,27 @@
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
   DEFAULT_HAND_SPAN_PROFILE,
   type Hand,
   type HandSpanProfile,
+  type NoteEvent,
+  type OnsetSlice,
+  type ScoreDocument,
   type SolveResult,
   type SpanPreset,
+  type TransitionCue,
 } from "./domain/types";
 import type { MxlContainer } from "./musicxml/mxl";
 import { parseMusicXml } from "./musicxml/parser";
 import { exportScoreOutput, loadScoreInput, type ExportFormat } from "./musicxml/scoreSession";
 import { serializeScoreDocument, writeFingeringsToScore } from "./musicxml/writer";
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
-import { ScoreViewer } from "./components/ScoreViewer";
+import { buildMeasureRiskSummaries } from "./components/MarginRiskGutter";
+import { InspectorPanel } from "./components/InspectorPanel";
+import {
+  ScoreViewer,
+  type AnchorMarkerInfo,
+  type ScoreRendererFactory,
+} from "./components/ScoreViewer";
 
 const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
   { preset: "S", title: "Small hand span (0.82x)" },
@@ -19,11 +29,31 @@ const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
   { preset: "L", title: "Large hand span (1.18x)" },
 ];
 
-export interface AppProps {
-  solverClientFactory?: () => SolverClient;
+function countMeasuresInScoreDoc(scoreDoc: ScoreDocument): number {
+  const firstPart = scoreDoc.xmlDoc.getElementsByTagName("part")[0];
+  if (firstPart) {
+    let count = 0;
+    for (let i = 0; i < firstPart.children.length; i++) {
+      const child = firstPart.children[i];
+      if (child.localName === "measure" || child.tagName === "measure") {
+        count++;
+      }
+    }
+    if (count > 0) return count;
+  }
+  const maxIdx = scoreDoc.noteEvents.reduce((max, n) => Math.max(max, n.measureIndex), -1);
+  return maxIdx + 1;
 }
 
-export default function App({ solverClientFactory = createSolverClient }: AppProps) {
+export interface AppProps {
+  solverClientFactory?: () => SolverClient;
+  scoreRendererFactory?: ScoreRendererFactory;
+}
+
+export default function App({
+  solverClientFactory = createSolverClient,
+  scoreRendererFactory,
+}: AppProps) {
   const solverClientRef = useRef<SolverClient | null>(null);
   const [fileName, setFileName] = useState<string>("");
   const [scoreTitle, setScoreTitle] = useState<string>("");
@@ -38,7 +68,11 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
   const [ignoreExistingFingerings, setIgnoreExistingFingerings] = useState<boolean>(false);
   const [renderedXml, setRenderedXml] = useState<string | null>(null);
   const [solveResult, setSolveResult] = useState<SolveResult | null>(null);
-  const [noteCount, setNoteCount] = useState<number>(0);
+  const [onsetSlices, setOnsetSlices] = useState<OnsetSlice[]>([]);
+  const [noteEvents, setNoteEvents] = useState<NoteEvent[]>([]);
+  const [measureCount, setMeasureCount] = useState<number>(0);
+  const [selectedSliceId, setSelectedSliceId] = useState<string | null>(null);
+  const [selectedMeasureIndex, setSelectedMeasureIndex] = useState<number | null>(null);
   const [status, setStatus] = useState<string>("Ready");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -52,13 +86,13 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
   }, [solverClientFactory]);
 
   const solveAndRender = async (
-    scoreDoc: ReturnType<typeof parseMusicXml>,
+    scoreDoc: ScoreDocument,
     profile: HandSpanProfile,
-    ignoreAnchors: boolean
+    ignoreAnchors: boolean,
+    resetSelection: boolean
   ) => {
     if (!solverClientRef.current) return;
     setScoreTitle(scoreDoc.title);
-    setNoteCount(scoreDoc.noteEvents.length);
     setStatus("Solving fingerings in Web Worker...");
 
     const result = await solverClientRef.current.solve(scoreDoc.onsetSlices, profile, {
@@ -70,9 +104,25 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
     });
     const exportedXml = serializeScoreDocument(scoreDoc);
 
+    setOnsetSlices(scoreDoc.onsetSlices);
+    setNoteEvents(scoreDoc.noteEvents);
+    setMeasureCount(countMeasuresInScoreDoc(scoreDoc));
     setSolveResult(result);
     setRenderedXml(exportedXml);
     setStatus(`Solved ${scoreDoc.noteEvents.length} notes in ${result.solveTimeMs.toFixed(1)} ms`);
+
+    if (resetSelection) {
+      setSelectedSliceId(null);
+      setSelectedMeasureIndex(null);
+    } else if (selectedSliceId !== null) {
+      const matchingSlice = scoreDoc.onsetSlices.find((s) => s.sliceId === selectedSliceId);
+      if (matchingSlice) {
+        setSelectedMeasureIndex(matchingSlice.measureIndex);
+      } else {
+        setSelectedSliceId(null);
+        setSelectedMeasureIndex(null);
+      }
+    }
   };
 
   const reSolveScore = async (
@@ -88,7 +138,7 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
         xmlText,
         singleStaff ? { singleStaffHandOverride: handOverride } : undefined
       );
-      await solveAndRender(scoreDoc, profile, ignoreAnchors);
+      await solveAndRender(scoreDoc, profile, ignoreAnchors, false);
     } catch (err) {
       if (err instanceof SolverCancelledError) {
         return;
@@ -118,7 +168,12 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
       setIsSingleStaff(session.scoreDoc.isSingleStaff);
       setSingleStaffHand(session.scoreDoc.defaultSingleStaffHand);
 
-      await solveAndRender(session.scoreDoc, handSpanProfile, ignoreExistingFingerings);
+      await solveAndRender(
+        session.scoreDoc,
+        handSpanProfile,
+        ignoreExistingFingerings,
+        true
+      );
     } catch (err) {
       if (err instanceof SolverCancelledError) {
         return;
@@ -128,8 +183,12 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
       setIsSingleStaff(false);
       setRenderedXml(null);
       setSolveResult(null);
+      setOnsetSlices([]);
+      setNoteEvents([]);
+      setMeasureCount(0);
+      setSelectedSliceId(null);
+      setSelectedMeasureIndex(null);
       setScoreTitle("");
-      setNoteCount(0);
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setStatus("Unsupported or invalid score");
     }
@@ -191,10 +250,44 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
     URL.revokeObjectURL(url);
   };
 
+  const measureRisks = useMemo(
+    () => buildMeasureRiskSummaries(measureCount, onsetSlices, solveResult?.warnings ?? []),
+    [measureCount, onsetSlices, solveResult]
+  );
+
+  const anchoredNotes = useMemo<AnchorMarkerInfo[]>(() => {
+    const repairedSet = new Set(solveResult?.repairedAnchorUids ?? []);
+    const markers: AnchorMarkerInfo[] = [];
+    for (const ev of noteEvents) {
+      if (ev.anchorFinger === undefined) continue;
+      if (ignoreExistingFingerings && ev.anchorRawPreserved) continue;
+      markers.push({
+        noteUid: ev.noteUid,
+        measureIndex: ev.measureIndex,
+        midi: ev.midi,
+        hand: ev.hand,
+        finger: ev.anchorFinger,
+        isConflict: repairedSet.has(ev.noteUid),
+      });
+    }
+    return markers;
+  }, [noteEvents, solveResult, ignoreExistingFingerings]);
+
+  const handleSelectWarning = (cue: TransitionCue) => {
+    setSelectedSliceId(cue.sliceId);
+    setSelectedMeasureIndex(cue.measureIndex);
+  };
+
+  const handleSelectMeasure = (measureIndex: number) => {
+    const summary = measureRisks.find((m) => m.measureIndex === measureIndex);
+    setSelectedMeasureIndex(measureIndex);
+    setSelectedSliceId(summary?.firstWarningSliceId ?? summary?.firstSliceId ?? null);
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <header className="border-b border-slate-200 bg-white px-6 py-4">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
           <div>
             <h1 className="text-lg font-semibold tracking-tight text-slate-900">
               MusicXML Auto-Fingering
@@ -338,7 +431,7 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl space-y-4 px-6 py-6">
+      <main className="mx-auto max-w-7xl space-y-4 px-6 py-6">
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs text-slate-600">
           <div className="flex items-center gap-4">
             <span>
@@ -349,9 +442,9 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
                 <strong>Score:</strong> {scoreTitle}
               </span>
             )}
-            {noteCount > 0 && (
+            {noteEvents.length > 0 && (
               <span>
-                <strong>Notes:</strong> {noteCount}
+                <strong>Notes:</strong> {noteEvents.length}
               </span>
             )}
             {solveResult && (
@@ -377,7 +470,34 @@ export default function App({ solverClientFactory = createSolverClient }: AppPro
           </div>
         )}
 
-        <ScoreViewer xmlString={renderedXml} />
+        <div
+          data-testid="split-studio-workspace"
+          className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,13fr)_minmax(320px,7fr)]"
+        >
+          <div className="min-w-0">
+            <ScoreViewer
+              xmlString={renderedXml}
+              measureRisks={measureRisks}
+              anchoredNotes={anchoredNotes}
+              selectedMeasureIndex={selectedMeasureIndex}
+              selectedSliceId={selectedSliceId}
+              onSelectMeasure={handleSelectMeasure}
+              rendererFactory={scoreRendererFactory}
+            />
+          </div>
+
+          <InspectorPanel
+            warnings={solveResult?.warnings ?? []}
+            onsetSlices={onsetSlices}
+            fingerByNoteUid={solveResult?.fingerByNoteUid ?? {}}
+            handSpanProfile={handSpanProfile}
+            selectedSliceId={selectedSliceId}
+            selectedMeasureIndex={selectedMeasureIndex}
+            ignoreExistingFingerings={ignoreExistingFingerings}
+            hasScore={Boolean(renderedXml)}
+            onSelectWarning={handleSelectWarning}
+          />
+        </div>
       </main>
     </div>
   );
