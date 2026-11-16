@@ -21,6 +21,19 @@ import {
   type AnchorMarkerInfo,
   type ScoreRendererFactory,
 } from "./components/ScoreViewer";
+import { AudioControls } from "./components/AudioControls";
+import {
+  createPianoAudioEngine,
+  type AudioEngineStatus,
+  type PianoAudioDeps,
+} from "./audio/pianoAudio";
+import {
+  createPlaybackEngine,
+  type CursorSyncTarget,
+  type PlaybackEngine,
+  type PlaybackSpeed,
+  type PlaybackState,
+} from "./audio/playbackEngine";
 
 const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
   { preset: "S", title: "Small hand span (0.82x)" },
@@ -44,16 +57,24 @@ function countMeasuresInScoreDoc(doc: ScoreDocument): number {
   return maxIdx + 1;
 }
 
+export interface AppAudioDeps extends PianoAudioDeps {
+  requestAnimationFrame?: (cb: FrameRequestCallback) => number;
+  cancelAnimationFrame?: (id: number) => void;
+}
+
 export interface AppProps {
   solverClientFactory?: () => SolverClient;
   scoreRendererFactory?: ScoreRendererFactory;
+  audioDeps?: AppAudioDeps;
 }
 
 export default function App({
   solverClientFactory = createSolverClient,
   scoreRendererFactory,
+  audioDeps,
 }: AppProps) {
   const solverClientRef = useRef<SolverClient | null>(null);
+  const playbackEngineRef = useRef<PlaybackEngine | null>(null);
   const [fileName, setFileName] = useState<string>("");
   const [scoreTitle, setScoreTitle] = useState<string>("");
   const [rawXmlText, setRawXmlText] = useState<string | null>(null);
@@ -72,6 +93,10 @@ export default function App({
   const [selectedMeasureIndex, setSelectedMeasureIndex] = useState<number | null>(null);
   const [status, setStatus] = useState<string>("Ready");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
+  const [playbackSpeed, setPlaybackSpeed] = useState<PlaybackSpeed>(1.0);
+  const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
+  const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
 
   useEffect(() => {
     const client = solverClientFactory();
@@ -82,6 +107,33 @@ export default function App({
     };
   }, [solverClientFactory]);
 
+  useEffect(() => {
+    const audioEngine = createPianoAudioEngine({
+      getAudioContext: audioDeps?.getAudioContext,
+      loadSmplrPiano: audioDeps?.loadSmplrPiano,
+      onStatusChange: (nextStatus) => {
+        setAudioStatus(nextStatus);
+        audioDeps?.onStatusChange?.(nextStatus);
+      },
+    });
+    const engine = createPlaybackEngine({
+      audioEngine,
+      requestAnimationFrame: audioDeps?.requestAnimationFrame,
+      cancelAnimationFrame: audioDeps?.cancelAnimationFrame,
+      onStateChange: setPlaybackState,
+      onSliceChange: (slice) => {
+        setSelectedSliceId(slice.sliceId);
+        setSelectedMeasureIndex(slice.measureIndex);
+      },
+      onCursorSync: setCursorTarget,
+    });
+    playbackEngineRef.current = engine;
+    return () => {
+      engine.dispose();
+      playbackEngineRef.current = null;
+    };
+  }, [audioDeps]);
+
   const solveAndRender = async (
     nextDoc: ScoreDocument,
     profile: HandSpanProfile,
@@ -89,6 +141,7 @@ export default function App({
     resetSelection: boolean
   ) => {
     if (!solverClientRef.current) return;
+    playbackEngineRef.current?.stop();
     setScoreTitle(nextDoc.title);
     setStatus("Solving fingerings in Web Worker...");
 
@@ -142,6 +195,7 @@ export default function App({
     const file = event.target.files?.[0];
     if (!file || !solverClientRef.current) return;
 
+    playbackEngineRef.current?.stop();
     setErrorMsg(null);
     setStatus("Parsing MusicXML...");
 
@@ -287,6 +341,29 @@ export default function App({
     }
   };
 
+  const handlePlay = () => {
+    if (!scoreDoc || !playbackEngineRef.current) return;
+    void playbackEngineRef.current.play(scoreDoc);
+  };
+
+  const handlePlayFromSlice = () => {
+    if (!scoreDoc || !selectedSliceId || !playbackEngineRef.current) return;
+    void playbackEngineRef.current.play(scoreDoc, { fromSliceId: selectedSliceId });
+  };
+
+  const handlePause = () => {
+    playbackEngineRef.current?.pause();
+  };
+
+  const handleStop = () => {
+    playbackEngineRef.current?.stop();
+  };
+
+  const handleSpeedChange = (nextSpeed: PlaybackSpeed) => {
+    setPlaybackSpeed(nextSpeed);
+    playbackEngineRef.current?.setSpeed(nextSpeed);
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <header className="border-b border-slate-200 bg-white px-6 py-4">
@@ -409,6 +486,19 @@ export default function App({
               </label>
             </div>
 
+            <AudioControls
+              hasScore={Boolean(scoreDoc && onsetSlices.length > 0)}
+              hasSelectedSlice={Boolean(selectedSliceId)}
+              playbackState={playbackState}
+              playbackSpeed={playbackSpeed}
+              audioStatus={audioStatus}
+              onPlay={handlePlay}
+              onPlayFromSlice={handlePlayFromSlice}
+              onPause={handlePause}
+              onStop={handleStop}
+              onChangeSpeed={handleSpeedChange}
+            />
+
             <div className="flex items-center gap-1.5">
               <select
                 aria-label="Export format"
@@ -484,6 +574,7 @@ export default function App({
               anchoredNotes={anchoredNotes}
               selectedMeasureIndex={selectedMeasureIndex}
               selectedSliceId={selectedSliceId}
+              cursorTarget={cursorTarget}
               onSelectMeasure={handleSelectMeasure}
               rendererFactory={scoreRendererFactory}
             />

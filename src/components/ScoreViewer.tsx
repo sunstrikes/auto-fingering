@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
+import { OpenSheetMusicDisplay, type Cursor } from "opensheetmusicdisplay";
+import type { CursorSyncTarget } from "../audio/playbackEngine";
 import type { Finger, Hand } from "../domain/types";
 import { midiToPitchLabel } from "../solver/keyboard";
 import {
@@ -25,14 +26,29 @@ export interface ScoreRendererHandle {
   highlightMeasure(measureIndex: number | null): void;
   markAnchoredNotes(anchors: AnchorMarkerInfo[]): void;
   scrollToMeasure(measureIndex: number, scrollContainer: HTMLElement | null): void;
+  syncCursor?: (target: CursorSyncTarget | null) => void;
   dispose(): void;
 }
 
 export type ScoreRendererFactory = (container: HTMLElement) => ScoreRendererHandle;
 
+function cursorMatchesTargetMidis(cursor: Cursor, targetMidis: number[]): boolean {
+  if (targetMidis.length === 0) return true;
+  const notes = cursor.NotesUnderCursor?.() ?? [];
+  if (notes.length === 0) return false;
+  const targetSet = new Set(targetMidis);
+  for (const n of notes) {
+    const pitch = n?.Pitch;
+    if (!pitch) continue;
+    const midi = pitch.getHalfTone() + 12;
+    if (targetSet.has(midi)) return true;
+  }
+  return false;
+}
+
 /**
  * Default OpenSheetMusicDisplay renderer adapter for measure geometry,
- * SVG measure highlighting, red anchor markers, and measure scrolling.
+ * SVG measure highlighting, red anchor markers, playback cursor sync, and measure scrolling.
  */
 export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHandle {
   const osmd = new OpenSheetMusicDisplay(container, {
@@ -40,7 +56,9 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     backend: "svg",
     drawFingerings: true,
     fingeringPosition: "aboveorbelow",
+    followCursor: true,
   });
+  let lastCursorKey: { measureIndex: number; onsetTick: number; isGrace: boolean } | null = null;
 
   const getMeasureSvgElements = (measureIndex: number): SVGGElement[] => {
     const row = osmd.GraphicSheet?.MeasureList?.[measureIndex];
@@ -104,6 +122,8 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     async render(xmlString: string) {
       await osmd.load(xmlString);
       osmd.render();
+      lastCursorKey = null;
+      osmd.cursor?.hide();
       const measureList = osmd.GraphicSheet?.MeasureList ?? [];
       return {
         measureCount: measureList.length,
@@ -210,7 +230,86 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       }
     },
 
+    syncCursor(target: CursorSyncTarget | null) {
+      const cursor = osmd.cursor;
+      if (!cursor) return;
+
+      if (!target) {
+        cursor.hide();
+        lastCursorKey = null;
+        return;
+      }
+
+      if (
+        lastCursorKey &&
+        lastCursorKey.measureIndex === target.measureIndex &&
+        lastCursorKey.onsetTick === target.onsetTick &&
+        lastCursorKey.isGrace === target.isGrace &&
+        !cursor.Hidden
+      ) {
+        return;
+      }
+
+      if (cursor.Hidden) {
+        cursor.show();
+      }
+
+      let iter = cursor.iterator;
+      if (!iter) return;
+
+      const movedBackwards =
+        lastCursorKey === null ||
+        target.measureIndex < lastCursorKey.measureIndex ||
+        (target.measureIndex === lastCursorKey.measureIndex &&
+          target.onsetTick < lastCursorKey.onsetTick) ||
+        iter.EndReached ||
+        iter.CurrentMeasureIndex > target.measureIndex;
+
+      if (movedBackwards) {
+        cursor.reset();
+        iter = cursor.iterator;
+      }
+
+      if (!iter) return;
+
+      let steps = 0;
+      const MAX_STEPS = 4096;
+      while (!iter.EndReached && iter.CurrentMeasureIndex < target.measureIndex && steps < MAX_STEPS) {
+        cursor.next();
+        steps += 1;
+      }
+
+      if (
+        !movedBackwards &&
+        lastCursorKey !== null &&
+        lastCursorKey.measureIndex === target.measureIndex &&
+        !iter.EndReached &&
+        iter.CurrentMeasureIndex === target.measureIndex
+      ) {
+        cursor.next();
+        steps += 1;
+      }
+
+      while (
+        !iter.EndReached &&
+        iter.CurrentMeasureIndex === target.measureIndex &&
+        !cursorMatchesTargetMidis(cursor, target.midis) &&
+        steps < MAX_STEPS
+      ) {
+        cursor.next();
+        steps += 1;
+      }
+
+      lastCursorKey = {
+        measureIndex: target.measureIndex,
+        onsetTick: target.onsetTick,
+        isGrace: target.isGrace,
+      };
+    },
+
     dispose() {
+      osmd.cursor?.hide();
+      lastCursorKey = null;
       clearHighlights();
       clearAnchorMarkers();
       container.innerHTML = "";
@@ -224,13 +323,14 @@ export interface ScoreViewerProps {
   anchoredNotes?: AnchorMarkerInfo[];
   selectedMeasureIndex?: number | null;
   selectedSliceId?: string | null;
+  cursorTarget?: CursorSyncTarget | null;
   onSelectMeasure?: (measureIndex: number) => void;
   rendererFactory?: ScoreRendererFactory;
 }
 
 /**
  * Renders the MusicXML score canvas via OSMD paired with the left-edge MarginRiskGutter,
- * anchor indicators, active measure highlights, and scroll-to-measure support.
+ * anchor indicators, active measure highlights, playback cursor sync, and scroll-to-measure support.
  */
 export function ScoreViewer({
   xmlString,
@@ -238,6 +338,7 @@ export function ScoreViewer({
   anchoredNotes = [],
   selectedMeasureIndex = null,
   selectedSliceId = null,
+  cursorTarget = null,
   onSelectMeasure,
   rendererFactory = createOsmdScoreRenderer,
 }: ScoreViewerProps) {
@@ -306,6 +407,11 @@ export function ScoreViewer({
       rendererRef.current.scrollToMeasure(selectedMeasureIndex, scrollContainerRef.current);
     }
   }, [isRendered, selectedMeasureIndex]);
+
+  useEffect(() => {
+    if (!isRendered || !rendererRef.current) return;
+    rendererRef.current.syncCursor?.(cursorTarget ?? null);
+  }, [isRendered, cursorTarget]);
 
   if (!xmlString) {
     return (
