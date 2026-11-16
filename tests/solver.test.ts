@@ -169,4 +169,369 @@ describe("solver seam: solveFingering", () => {
     expect(res05.handPositions.some((p) => p.hand === "RH")).toBe(true);
     expect(res05.handPositions.some((p) => p.hand === "LH")).toBe(true);
   });
+
+  it("parameterizes HandSpanProfile (S/M/L scaling, avoidThumbOnBlack, preferStablePosition) and changes fingering & warnings", () => {
+    const { DOMParser } = new JSDOM("").window;
+
+    // 1. Span scaling S (0.82) vs M (1.00) vs L (1.18) on octave (C4-C5) and 10th (C4-E5)
+    const spanXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const spanDoc = parseMusicXml(spanXml, { DOMParser });
+
+    const resS = solveFingering(spanDoc.onsetSlices, {
+      preset: "S",
+      avoidThumbOnBlack: true,
+      preferStablePosition: false,
+    });
+    const resM = solveFingering(spanDoc.onsetSlices, {
+      preset: "M",
+      avoidThumbOnBlack: true,
+      preferStablePosition: false,
+    });
+    const resL = solveFingering(spanDoc.onsetSlices, {
+      preset: "L",
+      avoidThumbOnBlack: true,
+      preferStablePosition: false,
+    });
+
+    // Under S (1-5 max = 6.806), both octave (7.0) and 10th (9.0) emit unreachable-span
+    expect(resS.warnings.filter((w) => w.type === "unreachable-span")).toHaveLength(2);
+    // Under M (1-5 max = 8.3), octave is playable without warning, 10th (9.0) emits unreachable-span
+    expect(resM.warnings.filter((w) => w.type === "unreachable-span")).toHaveLength(1);
+    // Under L (1-5 max = 9.794), 10th (9.0 >= 0.85 * 9.794 = 8.325) is wide-stretch, 0 unreachable-span
+    expect(resL.warnings.filter((w) => w.type === "unreachable-span")).toHaveLength(0);
+    expect(resL.warnings.filter((w) => w.type === "wide-stretch")).toHaveLength(1);
+
+    // 2. avoidThumbOnBlack: F#4 -> G4 -> A4 -> B4 -> C5 -> D5 avoids thumb on F#4 when enabled
+    const blackXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>F</step><alter>1</alter><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const blackDoc = parseMusicXml(blackXml, { DOMParser });
+    const resAvoidBlack = solveFingering(blackDoc.onsetSlices, {
+      preset: "M",
+      avoidThumbOnBlack: true,
+      preferStablePosition: false,
+    });
+    const resAllowBlack = solveFingering(blackDoc.onsetSlices, {
+      preset: "M",
+      avoidThumbOnBlack: false,
+      preferStablePosition: false,
+    });
+    const fSharpUid = blackDoc.noteEvents[0].noteUid;
+    expect(resAvoidBlack.fingerByNoteUid[fSharpUid]).not.toBe(1);
+    expect(resAllowBlack.fingerByNoteUid[fSharpUid]).toBe(1);
+
+    // 3. preferStablePosition: keeps 5-finger position on C4-E4-G4-A4-G4-E4-C4 instead of shifting
+    const stableXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const stableDoc = parseMusicXml(stableXml, { DOMParser });
+    const resMobile = solveFingering(stableDoc.onsetSlices, {
+      preset: "M",
+      avoidThumbOnBlack: true,
+      preferStablePosition: false,
+    });
+    const resStable = solveFingering(stableDoc.onsetSlices, {
+      preset: "M",
+      avoidThumbOnBlack: true,
+      preferStablePosition: true,
+    });
+    const stableFingers = stableDoc.noteEvents.map((n) => resStable.fingerByNoteUid[n.noteUid]);
+    expect(stableFingers[4]).toBe(5);
+    expect(resStable.handPositions.length).toBeLessThanOrEqual(resMobile.handPositions.length);
+    // And on wuchang, preferStablePosition measurably changes fingering choices
+    const xml05 = readFileSync(
+      resolve(__dirname, "../test-corpus/05-realworld-wuchang.musicxml"),
+      "utf-8"
+    );
+    const doc05 = parseMusicXml(xml05, { DOMParser });
+    const wuchangMobile = solveFingering(doc05.onsetSlices, {
+      preset: "M",
+      avoidThumbOnBlack: true,
+      preferStablePosition: false,
+    });
+    const wuchangStable = solveFingering(doc05.onsetSlices, {
+      preset: "M",
+      avoidThumbOnBlack: true,
+      preferStablePosition: true,
+    });
+    const diffs = doc05.noteEvents.filter(
+      (n) => !n.isTieStop && wuchangMobile.fingerByNoteUid[n.noteUid] !== wuchangStable.fingerByNoteUid[n.noteUid]
+    );
+    expect(diffs.length).toBeGreaterThan(0);
+    expect(wuchangStable.handPositions.length).toBeLessThanOrEqual(wuchangMobile.handPositions.length);
+  });
+
+  it("handles extreme 6+ note chords (adjacent 2nd double-press vs outer-voice fallback) and extreme over-MAX_SPAN chords", () => {
+    const { DOMParser } = new JSDOM("").window;
+
+    // 1. 6-note RH chord with bottom adjacent 2nd (C4-D4-E4-G4-A4-C5): thumb double-press [1,1,2,3,4,5], no unreachable-span
+    // 2. 6-note RH chord with top adjacent 2nd (C4-E4-G4-A4-B4-C5): pinky double-press [1,2,3,4,5,5], no unreachable-span
+    // 3. 6-note RH chord WITHOUT adjacent 2nds (C4-E4-G4-B4-D5-F5): all notes assigned, outer voices 1 & 5, emits unreachable-span
+    // 4. 7-note RH chord (C4-D4-E4-F4-G4-A4-B4): all notes assigned, outer voices 1 & 5, emits unreachable-span
+    // 5. Extreme 2-octave RH chord (C3-C5, 14 white keys >> MAX_SPAN): outer voices 1 & 5, emits unreachable-span
+    const extremeXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <!-- Chord 1: C4 D4 E4 G4 A4 C5 -->
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <!-- Chord 2: C4 E4 G4 A4 B4 C5 -->
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <!-- Chord 3: C4 E4 G4 B4 D5 F5 -->
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <!-- Chord 4: C4 D4 E4 F4 G4 A4 B4 -->
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <!-- Chord 5: C3 C5 -->
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(extremeXml, { DOMParser });
+    const res = solveFingering(doc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+
+    // Every note must receive a valid 1..5 assignment (no blanks)
+    expect(Object.keys(res.fingerByNoteUid)).toHaveLength(doc.noteEvents.length);
+
+    const [s1, s2, s3, s4, s5] = doc.onsetSlices;
+    const f1 = s1.notes.map((n) => res.fingerByNoteUid[n.noteUid]);
+    const f2 = s2.notes.map((n) => res.fingerByNoteUid[n.noteUid]);
+    const f3 = s3.notes.map((n) => res.fingerByNoteUid[n.noteUid]);
+    const f4 = s4.notes.map((n) => res.fingerByNoteUid[n.noteUid]);
+    const f5 = s5.notes.map((n) => res.fingerByNoteUid[n.noteUid]);
+
+    expect(f1).toEqual([1, 1, 2, 3, 4, 5]);
+    expect(f2).toEqual([1, 2, 3, 4, 5, 5]);
+
+    // Chords 3 & 4 assign outer voices 1 & 5 and leave no note blank
+    expect(f3[0]).toBe(1);
+    expect(f3[f3.length - 1]).toBe(5);
+    expect(f4[0]).toBe(1);
+    expect(f4[f4.length - 1]).toBe(5);
+
+    // Chord 5 (2 octaves) assigns playable outer 1 & 5
+    expect(f5).toEqual([1, 5]);
+
+    // Chords 1 & 2 (valid adjacent-2nd double-press within 1-5 span) do NOT emit unreachable-span
+    expect(res.warnings.some((w) => w.sliceId === s1.sliceId && w.type === "unreachable-span")).toBe(false);
+    expect(res.warnings.some((w) => w.sliceId === s2.sliceId && w.type === "unreachable-span")).toBe(false);
+
+    // Chords 3, 4, 5 MUST emit unreachable-span (danger)
+    expect(res.warnings.some((w) => w.sliceId === s3.sliceId && w.type === "unreachable-span" && w.severity === "danger")).toBe(true);
+    expect(res.warnings.some((w) => w.sliceId === s4.sliceId && w.type === "unreachable-span" && w.severity === "danger")).toBe(true);
+    expect(res.warnings.some((w) => w.sliceId === s5.sliceId && w.type === "unreachable-span" && w.severity === "danger")).toBe(true);
+  });
+
+  it("merges stable HandPosition intervals (<=1 thumbKey drift, no crossing/shift) and classifies all 6 TransitionCue categories with accurate severities", () => {
+    const { DOMParser } = new JSDOM("").window;
+
+    // 1. HandPosition merging + thumb-under (info) + cross-over (info)
+    // C4-D4-E4-F4-G4 (1-2-3-4-5, all thumbKey=28 -> 1 HandPosition)
+    // followed by descending G4-F4-E4-D4-C4-B3-A3 (5-4-3-2-1-3-2 -> cross-over 1->3 on B3 splits HandPosition)
+    const posXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><octave>3</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>A</step><octave>3</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const posDoc = parseMusicXml(posXml, { DOMParser });
+    const posRes = solveFingering(posDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+
+    // First 9 slices (C4..G4..C4) merge into 1 stable HandPosition; cross-over on B3 starts second HandPosition
+    expect(posRes.handPositions).toHaveLength(2);
+    expect(posRes.handPositions[0].startSliceId).toBe(posDoc.onsetSlices[0].sliceId);
+    expect(posRes.handPositions[0].endSliceId).toBe(posDoc.onsetSlices[8].sliceId);
+    expect(
+      posRes.transitionCues.some((c) => c.type === "cross-over" && c.severity === "info")
+    ).toBe(true);
+
+    // 2. Normal position-shift (info) vs extreme fast leap (danger) vs wide-stretch (>=85% MAX_SPAN, warn) vs anchor-conflict (danger)
+    const cuesXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <direction><sound tempo="120"/></direction>
+      <!-- Moderate quarter-note shift: C4 -> F4 (finger 1 -> 1 or 1 -> shift, slow dt=0.5s, rootShift=3 -> info) -->
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice>
+        <notations><technical><fingering>1</fingering></technical></notations>
+      </note>
+      <note>
+        <pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations><technical><fingering>1</fingering></technical></notations>
+      </note>
+      <!-- Extreme fast 16th-note leap: F4 -> C6 (11 white keys in 0.125s -> danger position-shift) -->
+      <note>
+        <pitch><step>C</step><octave>6</octave></pitch><duration>1</duration><voice>1</voice>
+      </note>
+      <!-- Chord with wide-stretch (C4 + B4 = 6.0 white keys? No, F4 + E5 = 6.0; E4 + F5 -> 1,5 span 8.0 / 8.3 = 96% -> wide-stretch warn) -->
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <!-- Chord with anchor-conflict: C4=3, E4=1 (inverted) -->
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice>
+        <notations><technical><fingering>3</fingering></technical></notations>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice>
+        <notations><technical><fingering>1</fingering></technical></notations>
+      </note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const cuesDoc = parseMusicXml(cuesXml, { DOMParser });
+    const cuesRes = solveFingering(cuesDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+
+    expect(
+      cuesRes.transitionCues.some(
+        (c) => c.sliceId === cuesDoc.onsetSlices[1].sliceId && c.type === "position-shift" && c.severity === "info"
+      )
+    ).toBe(true);
+    expect(
+      cuesRes.transitionCues.some(
+        (c) => c.sliceId === cuesDoc.onsetSlices[2].sliceId && c.type === "position-shift" && c.severity === "danger"
+      )
+    ).toBe(true);
+    expect(
+      cuesRes.transitionCues.some(
+        (c) => c.sliceId === cuesDoc.onsetSlices[3].sliceId && c.type === "wide-stretch" && c.severity === "warn"
+      )
+    ).toBe(true);
+    expect(
+      cuesRes.transitionCues.some(
+        (c) => c.sliceId === cuesDoc.onsetSlices[4].sliceId && c.type === "anchor-conflict" && c.severity === "danger"
+      )
+    ).toBe(true);
+  });
+
+  it("meets <= 200ms performance budget on 05-realworld-wuchang, flags 10ths under S/M, and substantially reduces warnings under L", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const xml05 = readFileSync(
+      resolve(__dirname, "../test-corpus/05-realworld-wuchang.musicxml"),
+      "utf-8"
+    );
+    const doc05 = parseMusicXml(xml05, { DOMParser });
+
+    const resS = solveFingering(doc05.onsetSlices, {
+      preset: "S",
+      avoidThumbOnBlack: true,
+      preferStablePosition: false,
+    });
+    const resM = solveFingering(doc05.onsetSlices, {
+      preset: "M",
+      avoidThumbOnBlack: true,
+      preferStablePosition: false,
+    });
+    const resL = solveFingering(doc05.onsetSlices, {
+      preset: "L",
+      avoidThumbOnBlack: true,
+      preferStablePosition: false,
+    });
+
+    expect(resS.solveTimeMs).toBeLessThanOrEqual(200);
+    expect(resM.solveTimeMs).toBeLessThanOrEqual(200);
+    expect(resL.solveTimeMs).toBeLessThanOrEqual(200);
+
+    // 15-16 semitone 10th chords in measures 23, 27, 66, 72 (0-based 22, 26, 65, 71) are flagged under S and M
+    for (const measureIdx of [22, 26, 65, 71]) {
+      expect(
+        resS.warnings.some(
+          (w) => w.measureIndex === measureIdx && w.type === "unreachable-span"
+        )
+      ).toBe(true);
+      expect(
+        resM.warnings.some(
+          (w) => w.measureIndex === measureIdx && w.type === "unreachable-span"
+        )
+      ).toBe(true);
+    }
+
+    const dangerS = resS.warnings.filter((w) => w.severity === "danger").length;
+    const dangerM = resM.warnings.filter((w) => w.severity === "danger").length;
+    const dangerL = resL.warnings.filter((w) => w.severity === "danger").length;
+
+    expect(dangerS).toBeGreaterThan(dangerM);
+    expect(dangerL).toBeLessThan(dangerM);
+    expect(resL.warnings.length).toBeLessThan(resM.warnings.length * 0.85);
+    expect(resL.warnings.length).toBeLessThan(resS.warnings.length * 0.4);
+  });
 });

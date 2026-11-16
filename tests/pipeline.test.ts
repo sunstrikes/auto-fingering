@@ -209,9 +209,158 @@ describe("walking skeleton end-to-end headless pipeline", () => {
       )
     ).rejects.toThrow(/score-partwise/i);
 
-    // 4. App UI renders .musicxml/.xml/.mxl upload and export format controls
+    // 4. App UI renders .musicxml/.xml/.mxl upload, export format, and HandSpanProfile controls
     const appHtml = renderToStaticMarkup(createElement(App));
     expect(appHtml).toContain('accept=".musicxml,.xml,.mxl"');
     expect(appHtml).toContain('aria-label="Export format"');
+    expect(appHtml).toContain('aria-label="Hand Span Profile"');
+    expect(appHtml).toContain("Avoid thumb on black");
+    expect(appHtml).toContain("Prefer stable position");
+  });
+
+  it("triggers Worker re-solve when HandSpanProfile controls change and cancels superseded in-flight requests", async () => {
+    const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
+      url: "http://localhost/",
+    });
+    const prevWindow = globalThis.window;
+    const prevDocument = globalThis.document;
+    const prevDOMParser = globalThis.DOMParser;
+    const prevXMLSerializer = globalThis.XMLSerializer;
+    const prevActEnv = (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT;
+    // @ts-expect-error test jsdom globals for React mount
+    globalThis.window = dom.window;
+    globalThis.document = dom.window.document;
+    globalThis.DOMParser = dom.window.DOMParser;
+    globalThis.XMLSerializer = dom.window.XMLSerializer;
+    (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+
+    try {
+      const { act } = await import("react");
+      const { createRoot } = await import("react-dom/client");
+
+      const pendingResolvers: Array<() => void> = [];
+      const seenProfiles: Array<{ preset: string; avoidThumbOnBlack: boolean; preferStablePosition: boolean }> = [];
+
+      const deferredWorkerFactory = (): WorkerLike => {
+        const w: WorkerLike = {
+          onmessage: null,
+          onerror: null,
+          postMessage(msg: unknown) {
+            const req = msg as WorkerRequest;
+            seenProfiles.push({ ...req.profile });
+            pendingResolvers.push(() => {
+              const result = solveFingering(req.onsetSlices, req.profile);
+              const resp: WorkerResponse = { requestId: req.requestId, ok: true, result };
+              w.onmessage?.({ data: resp } as MessageEvent<WorkerResponse>);
+            });
+          },
+          terminate() {},
+        };
+        return w;
+      };
+
+      const container = dom.window.document.getElementById("root")!;
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(createElement(App, { solverClientFactory: () => createSolverClient(deferredWorkerFactory) }));
+      });
+
+      const spanXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+      const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+      const fakeFile = {
+        name: "tenth.musicxml",
+        text: async () => spanXml,
+        arrayBuffer: async () => new TextEncoder().encode(spanXml).buffer,
+      };
+      Object.defineProperty(fileInput, "files", { value: [fakeFile], configurable: true });
+
+      await act(async () => {
+        fileInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 0));
+      });
+
+      // Flush initial M solve
+      await act(async () => {
+        pendingResolvers.shift()?.();
+        await Promise.resolve();
+      });
+
+      expect(seenProfiles).toHaveLength(1);
+      expect(seenProfiles[0]).toEqual({ preset: "M", avoidThumbOnBlack: true, preferStablePosition: false });
+      expect(container.textContent).toContain("Warnings: 1");
+
+      // Rapidly click S then L without awaiting S in between -> S gets cancelled, L completes cleanly
+      const btnS = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "S")!;
+      const btnL = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "L")!;
+
+      await act(async () => {
+        btnS.click();
+        btnL.click();
+        await Promise.resolve();
+      });
+
+      // Flush both stale S and active L worker responses
+      await act(async () => {
+        while (pendingResolvers.length > 0) {
+          pendingResolvers.shift()?.();
+        }
+        await Promise.resolve();
+      });
+
+      expect(seenProfiles).toHaveLength(3);
+      expect(seenProfiles[1].preset).toBe("S");
+      expect(seenProfiles[2].preset).toBe("L");
+      // No error banner shown for cancelled S request, and L shows 1 wide-stretch warning
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(container.textContent).toContain("Warnings: 1");
+
+      // Toggle avoidThumbOnBlack & preferStablePosition -> triggers new worker solves
+      const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+      expect(checkboxes).toHaveLength(2);
+
+      await act(async () => {
+        checkboxes[0].click();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        pendingResolvers.shift()?.();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        checkboxes[1].click();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        pendingResolvers.shift()?.();
+        await Promise.resolve();
+      });
+
+      expect(seenProfiles).toHaveLength(5);
+      expect(seenProfiles[3]).toEqual({ preset: "L", avoidThumbOnBlack: false, preferStablePosition: false });
+      expect(seenProfiles[4]).toEqual({ preset: "L", avoidThumbOnBlack: false, preferStablePosition: true });
+
+      await act(async () => {
+        root.unmount();
+      });
+    } finally {
+      globalThis.window = prevWindow;
+      globalThis.document = prevDocument;
+      globalThis.DOMParser = prevDOMParser;
+      globalThis.XMLSerializer = prevXMLSerializer;
+      (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = prevActEnv;
+    }
   });
 });
