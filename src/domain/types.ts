@@ -1,6 +1,12 @@
 export type Hand = "RH" | "LH";
 export type Finger = 1 | 2 | 3 | 4 | 5;
 export type SpanPreset = "S" | "M" | "L";
+export type AnchorOverrideMode = "phrase" | "pinOnly";
+
+export interface AnchorOverride {
+  finger: Finger;
+  mode: AnchorOverrideMode;
+}
 
 export interface HandSpanProfile {
   preset: SpanPreset;

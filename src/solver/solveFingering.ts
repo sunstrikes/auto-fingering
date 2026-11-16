@@ -17,9 +17,9 @@ import {
 } from "./costModel";
 import { getMaxSpan, getSpanScale, toHandFramePos, whiteKeyIndex } from "./keyboard";
 
-const BEAM_WIDTH = 28; // SPEC 4.1: BEAM = 24-32
+export const BEAM_WIDTH = 28; // SPEC 4.1: BEAM = 24-32
 
-interface BeamNode {
+export interface BeamNode {
   fingers: Finger[];
   totalCost: number;
   rankScore: number;
@@ -27,12 +27,12 @@ interface BeamNode {
   stateKey: string;
 }
 
-interface HeldReservation {
+export interface HeldReservation {
   finger: Finger;
   untilSliceIdx: number;
 }
 
-function buildHeldFingerMapFromBeam(
+export function buildHeldFingerMapFromBeam(
   slice: OnsetSlice,
   slices: OnsetSlice[],
   layers: BeamNode[][],
@@ -64,7 +64,7 @@ function buildHeldFingerMapFromBeam(
   return heldMap;
 }
 
-function resolveActiveNoteFingers(
+export function resolveActiveNoteFingers(
   slice: OnsetSlice,
   cand: Finger[],
   slices: OnsetSlice[],
@@ -101,7 +101,7 @@ function resolveActiveNoteFingers(
   return result;
 }
 
-function computeAnchorLookahead(
+export function computeAnchorLookahead(
   slices: OnsetSlice[],
   candidatesBySlice: Finger[][][],
   profile: HandSpanProfile
@@ -177,7 +177,7 @@ function computeAnchorLookahead(
   return { hFuture, reservationsByNoteUid };
 }
 
-function resolveCrossSliceAnchorConflicts(
+export function resolveCrossSliceAnchorConflicts(
   slices: OnsetSlice[],
   candidatesBySlice: Finger[][][],
   profile: HandSpanProfile,
@@ -246,7 +246,7 @@ function resolveCrossSliceAnchorConflicts(
   }
 }
 
-function buildStateKeyAndLookaheadPenalty(
+export function buildStateKeyAndLookaheadPenalty(
   slice: OnsetSlice,
   cand: Finger[],
   slices: OnsetSlice[],
@@ -483,7 +483,7 @@ function sliceHandBounds(
   return { thumbKey, pinkyKey, minMidi, maxMidi };
 }
 
-function derivePositionsAndCues(
+export function derivePositionsAndCues(
   slices: OnsetSlice[],
   fingerByNoteUid: Record<string, Finger>,
   profile: HandSpanProfile,

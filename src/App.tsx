@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
-  DEFAULT_HAND_SPAN_PROFILE,
+  type AnchorOverride,
+  type AnchorOverrideMode,
+  type Finger,
   type Hand,
   type HandSpanProfile,
   type ScoreDocument,
-  type SolveResult,
   type SpanPreset,
   type TransitionCue,
 } from "./domain/types";
 import type { MxlContainer } from "./musicxml/mxl";
 import { parseMusicXml } from "./musicxml/parser";
 import { exportScoreOutput, loadScoreInput, type ExportFormat } from "./musicxml/scoreSession";
-import { serializeScoreDocument, writeFingeringsToScore } from "./musicxml/writer";
+import { applyAnchorOverridesToSlices, localResolveFingering } from "./solver/localResolve";
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
+import { computeNextAnchorState, useStudioStore } from "./store/useStudioStore";
 import { buildMeasureRiskSummaries } from "./components/MarginRiskGutter";
 import { InspectorPanel } from "./components/InspectorPanel";
 import { DualTrackKeyboard } from "./components/DualTrackKeyboard";
@@ -75,28 +77,34 @@ export default function App({
 }: AppProps) {
   const solverClientRef = useRef<SolverClient | null>(null);
   const playbackEngineRef = useRef<PlaybackEngine | null>(null);
-  const [fileName, setFileName] = useState<string>("");
-  const [scoreTitle, setScoreTitle] = useState<string>("");
-  const [rawXmlText, setRawXmlText] = useState<string | null>(null);
-  const [mxlContainer, setMxlContainer] = useState<MxlContainer | undefined>(undefined);
-  const [exportFormat, setExportFormat] = useState<ExportFormat>("musicxml");
-  const [isSingleStaff, setIsSingleStaff] = useState<boolean>(false);
-  const [singleStaffHand, setSingleStaffHand] = useState<Hand>("RH");
-  const [handSpanProfile, setHandSpanProfile] = useState<HandSpanProfile>(
-    DEFAULT_HAND_SPAN_PROFILE
-  );
-  const [ignoreExistingFingerings, setIgnoreExistingFingerings] = useState<boolean>(false);
-  const [renderedXml, setRenderedXml] = useState<string | null>(null);
-  const [scoreDoc, setScoreDoc] = useState<ScoreDocument | null>(null);
-  const [solveResult, setSolveResult] = useState<SolveResult | null>(null);
-  const [selectedSliceId, setSelectedSliceId] = useState<string | null>(null);
-  const [selectedMeasureIndex, setSelectedMeasureIndex] = useState<number | null>(null);
-  const [status, setStatus] = useState<string>("Ready");
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isResolving, setIsResolving] = useState<boolean>(false);
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
   const [playbackSpeed, setPlaybackSpeed] = useState<PlaybackSpeed>(1.0);
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
+
+  const fileName = useStudioStore((s) => s.fileName);
+  const scoreTitle = useStudioStore((s) => s.scoreTitle);
+  const rawXmlText = useStudioStore((s) => s.rawXmlText);
+  const mxlContainer = useStudioStore((s) => s.mxlContainer);
+  const exportFormat = useStudioStore((s) => s.exportFormat);
+  const isSingleStaff = useStudioStore((s) => s.isSingleStaff);
+  const singleStaffHand = useStudioStore((s) => s.singleStaffHand);
+  const handSpanProfile = useStudioStore((s) => s.handSpanProfile);
+  const ignoreExistingFingerings = useStudioStore((s) => s.ignoreExistingFingerings);
+  const scoreDoc = useStudioStore((s) => s.scoreDoc);
+  const renderedXml = useStudioStore((s) => s.renderedXml);
+  const solveResult = useStudioStore((s) => s.solveResult);
+  const fingerByNoteUid = useStudioStore((s) => s.fingerByNoteUid);
+  const anchors = useStudioStore((s) => s.anchors);
+  const removedRawAnchorUids = useStudioStore((s) => s.removedRawAnchorUids);
+  const lastDiff = useStudioStore((s) => s.lastDiff);
+  const history = useStudioStore((s) => s.history);
+  const selectedNoteUid = useStudioStore((s) => s.selectedNoteUid);
+  const selectedSliceId = useStudioStore((s) => s.selectedSliceId);
+  const selectedMeasureIndex = useStudioStore((s) => s.selectedMeasureIndex);
+  const status = useStudioStore((s) => s.status);
+  const errorMsg = useStudioStore((s) => s.errorMsg);
 
   useEffect(() => {
     const client = solverClientFactory();
@@ -106,6 +114,12 @@ export default function App({
       solverClientRef.current = null;
     };
   }, [solverClientFactory]);
+
+  useEffect(() => {
+    return () => {
+      useStudioStore.getState().reset();
+    };
+  }, []);
 
   useEffect(() => {
     const audioEngine = createPianoAudioEngine({
@@ -122,8 +136,7 @@ export default function App({
       cancelAnimationFrame: audioDeps?.cancelAnimationFrame,
       onStateChange: setPlaybackState,
       onSliceChange: (slice) => {
-        setSelectedSliceId(slice.sliceId);
-        setSelectedMeasureIndex(slice.measureIndex);
+        useStudioStore.getState().selectSlice(slice.sliceId);
       },
       onCursorSync: setCursorTarget,
     });
@@ -136,36 +149,41 @@ export default function App({
 
   const solveAndRender = async (
     nextDoc: ScoreDocument,
+    nextRawXml: string,
+    nextFileName: string,
+    nextFormat: ExportFormat,
+    nextMxl: MxlContainer | undefined,
     profile: HandSpanProfile,
     ignoreAnchors: boolean,
-    resetSelection: boolean
+    resetHistory: boolean
   ) => {
     if (!solverClientRef.current) return;
     playbackEngineRef.current?.stop();
-    setScoreTitle(nextDoc.title);
-    setStatus("Solving fingerings in Web Worker...");
+    const store = useStudioStore.getState();
+    store.setStatus("Solving fingerings in Web Worker...");
 
-    const result = await solverClientRef.current.solve(nextDoc.onsetSlices, profile, {
-      ignoreExistingFingerings: ignoreAnchors,
+    const slicesToSolve = resetHistory
+      ? nextDoc.onsetSlices
+      : applyAnchorOverridesToSlices(
+          nextDoc.onsetSlices,
+          store.anchors,
+          store.removedRawAnchorUids,
+          ignoreAnchors
+        );
+
+    const result = await solverClientRef.current.solve(slicesToSolve, profile, {
+      ignoreExistingFingerings: resetHistory ? ignoreAnchors : false,
     });
 
-    writeFingeringsToScore(nextDoc, result.fingerByNoteUid, {
-      ignoreExistingFingerings: ignoreAnchors,
+    store.setSolvedScore({
+      scoreDoc: nextDoc,
+      rawXmlText: nextRawXml,
+      mxlContainer: nextMxl,
+      fileName: nextFileName,
+      exportFormat: nextFormat,
+      solveResult: result,
+      resetHistory,
     });
-    const exportedXml = serializeScoreDocument(nextDoc);
-
-    const preserved =
-      !resetSelection && selectedSliceId !== null
-        ? nextDoc.onsetSlices.find((s) => s.sliceId === selectedSliceId)
-        : undefined;
-    const nextSlice = preserved ?? nextDoc.onsetSlices[0] ?? null;
-
-    setScoreDoc(nextDoc);
-    setSolveResult(result);
-    setSelectedSliceId(nextSlice?.sliceId ?? null);
-    setSelectedMeasureIndex(nextSlice?.measureIndex ?? null);
-    setRenderedXml(exportedXml);
-    setStatus(`Solved ${nextDoc.noteEvents.length} notes in ${result.solveTimeMs.toFixed(1)} ms`);
   };
 
   const reSolveScore = async (
@@ -175,19 +193,29 @@ export default function App({
     profile: HandSpanProfile,
     ignoreAnchors: boolean
   ) => {
-    setErrorMsg(null);
+    const store = useStudioStore.getState();
+    store.setErrorMsg(null);
     try {
       const nextDoc = parseMusicXml(
         xmlText,
         singleStaff ? { singleStaffHandOverride: handOverride } : undefined
       );
-      await solveAndRender(nextDoc, profile, ignoreAnchors, false);
+      await solveAndRender(
+        nextDoc,
+        xmlText,
+        store.fileName,
+        store.exportFormat,
+        store.mxlContainer,
+        profile,
+        ignoreAnchors,
+        false
+      );
     } catch (err) {
       if (err instanceof SolverCancelledError) {
         return;
       }
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-      setStatus("Error");
+      store.setErrorMsg(err instanceof Error ? err.message : String(err));
+      store.setStatus("Error");
     }
   };
 
@@ -196,8 +224,9 @@ export default function App({
     if (!file || !solverClientRef.current) return;
 
     playbackEngineRef.current?.stop();
-    setErrorMsg(null);
-    setStatus("Parsing MusicXML...");
+    const store = useStudioStore.getState();
+    store.setErrorMsg(null);
+    store.setStatus("Parsing MusicXML...");
 
     try {
       const isMxl = file.name.toLowerCase().endsWith(".mxl");
@@ -205,40 +234,27 @@ export default function App({
         ? await loadScoreInput({ fileName: file.name, bytes: await file.arrayBuffer() })
         : await loadScoreInput({ fileName: file.name, text: await file.text() });
 
-      setFileName(file.name);
-      setRawXmlText(session.rawXmlText);
-      setMxlContainer(session.mxlContainer);
-      setExportFormat(session.sourceFormat);
-      setIsSingleStaff(session.scoreDoc.isSingleStaff);
-      setSingleStaffHand(session.scoreDoc.defaultSingleStaffHand);
-
       await solveAndRender(
         session.scoreDoc,
-        handSpanProfile,
-        ignoreExistingFingerings,
+        session.rawXmlText,
+        file.name,
+        session.sourceFormat,
+        session.mxlContainer,
+        store.handSpanProfile,
+        store.ignoreExistingFingerings,
         true
       );
     } catch (err) {
       if (err instanceof SolverCancelledError) {
         return;
       }
-      setRawXmlText(null);
-      setMxlContainer(undefined);
-      setIsSingleStaff(false);
-      setRenderedXml(null);
-      setScoreDoc(null);
-      setSolveResult(null);
-      setSelectedSliceId(null);
-      setSelectedMeasureIndex(null);
-      setScoreTitle("");
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-      setStatus("Unsupported or invalid score");
+      store.clearScoreErrorState(err instanceof Error ? err.message : String(err));
     }
   };
 
   const handleSingleStaffHandToggle = async (nextHand: Hand) => {
     if (!rawXmlText || !isSingleStaff || nextHand === singleStaffHand) return;
-    setSingleStaffHand(nextHand);
+    useStudioStore.getState().setSingleStaffHand(nextHand);
     await reSolveScore(
       rawXmlText,
       isSingleStaff,
@@ -249,7 +265,7 @@ export default function App({
   };
 
   const handleProfileChange = (nextProfile: HandSpanProfile) => {
-    setHandSpanProfile(nextProfile);
+    useStudioStore.getState().setHandSpanProfile(nextProfile);
     if (rawXmlText) {
       void reSolveScore(
         rawXmlText,
@@ -262,7 +278,7 @@ export default function App({
   };
 
   const handleIgnoreExistingToggle = (nextIgnore: boolean) => {
-    setIgnoreExistingFingerings(nextIgnore);
+    useStudioStore.getState().setIgnoreExistingFingerings(nextIgnore);
     if (rawXmlText) {
       void reSolveScore(
         rawXmlText,
@@ -272,6 +288,60 @@ export default function App({
         nextIgnore
       );
     }
+  };
+
+  const runLocalAnchorUpdate = async (
+    noteUid: string,
+    override: AnchorOverride | null
+  ) => {
+    const store = useStudioStore.getState();
+    if (!store.scoreDoc || !solverClientRef.current) return;
+    const targetNote = store.scoreDoc.noteEvents.find((n) => n.noteUid === noteUid);
+    if (!targetNote || targetNote.isTieStop) return;
+
+    const { anchors: nextAnchors, removedRawAnchorUids: nextRemoved } = computeNextAnchorState(
+      store.anchors,
+      store.removedRawAnchorUids,
+      targetNote,
+      override
+    );
+
+    setIsResolving(true);
+    try {
+      const input = {
+        onsetSlices: store.scoreDoc.onsetSlices,
+        profile: store.handSpanProfile,
+        priorFingerByNoteUid: store.fingerByNoteUid,
+        targetNoteUid: noteUid,
+        override,
+        anchors: nextAnchors,
+        removedRawAnchorUids: nextRemoved,
+        ignoreExistingFingerings: store.ignoreExistingFingerings,
+      };
+      const result = solverClientRef.current.resolveLocal
+        ? await solverClientRef.current.resolveLocal(input)
+        : localResolveFingering(input);
+
+      useStudioStore.getState().commitAnchorResolution({
+        targetNoteUid: noteUid,
+        override,
+        result,
+      });
+    } catch (err) {
+      if (!(err instanceof SolverCancelledError)) {
+        useStudioStore.getState().setErrorMsg(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setIsResolving(false);
+    }
+  };
+
+  const handleSetAnchor = (noteUid: string, finger: Finger, mode: AnchorOverrideMode) => {
+    void runLocalAnchorUpdate(noteUid, { finger, mode });
+  };
+
+  const handleRemoveAnchor = (noteUid: string) => {
+    void runLocalAnchorUpdate(noteUid, null);
   };
 
   const handleDownload = async () => {
@@ -306,9 +376,24 @@ export default function App({
 
   const anchoredNotes = useMemo<AnchorMarkerInfo[]>(() => {
     const repairedSet = new Set(solveResult?.repairedAnchorUids ?? []);
+    const removedSet = new Set(removedRawAnchorUids);
     const markers: AnchorMarkerInfo[] = [];
     for (const ev of noteEvents) {
+      if (ev.isTieStop) continue;
+      const userAnc = anchors[ev.noteUid];
+      if (userAnc) {
+        markers.push({
+          noteUid: ev.noteUid,
+          measureIndex: ev.measureIndex,
+          midi: ev.midi,
+          hand: ev.hand,
+          finger: userAnc.finger,
+          isConflict: repairedSet.has(ev.noteUid),
+        });
+        continue;
+      }
       if (ev.anchorFinger === undefined) continue;
+      if (removedSet.has(ev.noteUid)) continue;
       if (ignoreExistingFingerings && ev.anchorRawPreserved) continue;
       markers.push({
         noteUid: ev.noteUid,
@@ -320,26 +405,29 @@ export default function App({
       });
     }
     return markers;
-  }, [noteEvents, solveResult, ignoreExistingFingerings]);
+  }, [noteEvents, solveResult, anchors, removedRawAnchorUids, ignoreExistingFingerings]);
 
   const handleSelectWarning = (cue: TransitionCue) => {
-    setSelectedSliceId(cue.sliceId);
-    setSelectedMeasureIndex(cue.measureIndex);
+    useStudioStore.getState().selectWarning(cue);
   };
 
   const handleSelectMeasure = (measureIndex: number) => {
     const summary = measureRisks.find((m) => m.measureIndex === measureIndex);
-    setSelectedMeasureIndex(measureIndex);
-    setSelectedSliceId(summary?.firstWarningSliceId ?? summary?.firstSliceId ?? null);
+    useStudioStore
+      .getState()
+      .selectMeasure(measureIndex, summary?.firstWarningSliceId ?? summary?.firstSliceId ?? null);
   };
 
   const handleSelectSlice = (sliceId: string) => {
-    setSelectedSliceId(sliceId);
-    const slice = onsetSlices.find((s) => s.sliceId === sliceId);
-    if (slice) {
-      setSelectedMeasureIndex(slice.measureIndex);
-    }
+    useStudioStore.getState().selectSlice(sliceId);
   };
+
+  const handleSelectNote = (noteUid: string) => {
+    useStudioStore.getState().selectNote(noteUid);
+  };
+
+  const canUndo = history.past.length > 0;
+  const canRedo = history.future.length > 0;
 
   const handlePlay = () => {
     if (!scoreDoc || !playbackEngineRef.current) return;
@@ -486,6 +574,27 @@ export default function App({
               </label>
             </div>
 
+            <div className="inline-flex items-center gap-1.5">
+              <button
+                type="button"
+                data-testid="undo-btn"
+                disabled={!canUndo}
+                onClick={() => useStudioStore.getState().undo()}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                Undo
+              </button>
+              <button
+                type="button"
+                data-testid="redo-btn"
+                disabled={!canRedo}
+                onClick={() => useStudioStore.getState().redo()}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                Redo
+              </button>
+            </div>
+
             <AudioControls
               hasScore={Boolean(scoreDoc && onsetSlices.length > 0)}
               hasSelectedSlice={Boolean(selectedSliceId)}
@@ -503,7 +612,7 @@ export default function App({
               <select
                 aria-label="Export format"
                 value={exportFormat}
-                onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
+                onChange={(e) => useStudioStore.getState().setExportFormat(e.target.value as ExportFormat)}
                 disabled={!renderedXml}
                 className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -570,12 +679,16 @@ export default function App({
           <div className="min-w-0">
             <ScoreViewer
               xmlString={renderedXml}
+              noteEvents={noteEvents}
               measureRisks={measureRisks}
               anchoredNotes={anchoredNotes}
+              diffNotes={lastDiff}
               selectedMeasureIndex={selectedMeasureIndex}
               selectedSliceId={selectedSliceId}
+              selectedNoteUid={selectedNoteUid}
               cursorTarget={cursorTarget}
               onSelectMeasure={handleSelectMeasure}
+              onSelectNote={handleSelectNote}
               rendererFactory={scoreRendererFactory}
             />
           </div>
@@ -583,13 +696,26 @@ export default function App({
           <InspectorPanel
             warnings={solveResult?.warnings ?? []}
             onsetSlices={onsetSlices}
-            fingerByNoteUid={solveResult?.fingerByNoteUid ?? {}}
+            noteEvents={noteEvents}
+            fingerByNoteUid={fingerByNoteUid}
             handSpanProfile={handSpanProfile}
             selectedSliceId={selectedSliceId}
             selectedMeasureIndex={selectedMeasureIndex}
+            selectedNoteUid={selectedNoteUid}
+            anchors={anchors}
+            removedRawAnchorUids={removedRawAnchorUids}
+            lastDiff={lastDiff}
+            canUndo={canUndo}
+            canRedo={canRedo}
+            isResolving={isResolving}
             ignoreExistingFingerings={ignoreExistingFingerings}
             hasScore={Boolean(renderedXml)}
             onSelectWarning={handleSelectWarning}
+            onSelectNote={handleSelectNote}
+            onSetAnchor={handleSetAnchor}
+            onRemoveAnchor={handleRemoveAnchor}
+            onUndo={() => useStudioStore.getState().undo()}
+            onRedo={() => useStudioStore.getState().redo()}
           />
         </div>
 

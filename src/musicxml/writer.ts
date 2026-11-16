@@ -61,6 +61,7 @@ function insertNotationsInXsdOrder(xmlDoc: Document, noteEl: Element): Element {
 
 export interface WriteFingeringsOptions {
   ignoreExistingFingerings?: boolean;
+  forceWriteNoteUids?: Set<string>;
 }
 
 /**
@@ -73,6 +74,7 @@ export function writeFingeringsToScore(
   options?: WriteFingeringsOptions
 ): void {
   const ignoreExisting = Boolean(options?.ignoreExistingFingerings);
+  const forceWriteNoteUids = options?.forceWriteNoteUids;
   const { xmlDoc, noteElementsByUid, noteEvents } = scoreDoc;
 
   for (const event of noteEvents) {
@@ -83,12 +85,24 @@ export function writeFingeringsToScore(
     if (!finger) {
       continue;
     }
-    if (!ignoreExisting && event.anchorRawPreserved) {
-      continue;
-    }
     const noteEl = noteElementsByUid.get(event.noteUid);
     if (!noteEl) {
       continue;
+    }
+
+    const isForced = forceWriteNoteUids?.has(event.noteUid) ?? false;
+    if (!ignoreExisting && event.anchorRawPreserved && !isForced) {
+      const notationsCheck = findDirectChild(noteEl, "notations");
+      const technicalCheck = notationsCheck ? findDirectChild(notationsCheck, "technical") : null;
+      const existingFingering = technicalCheck ? findPrimaryFingering(technicalCheck) : null;
+      const currentText = (existingFingering?.textContent ?? "").trim();
+      if (
+        !existingFingering ||
+        currentText === String(event.anchorFinger) ||
+        currentText.startsWith(`${event.anchorFinger}-`)
+      ) {
+        continue;
+      }
     }
 
     const notationsEl = insertNotationsInXsdOrder(xmlDoc, noteEl);
