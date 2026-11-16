@@ -33,6 +33,10 @@ import {
   type PianoAudioEngine,
 } from "./audio/pianoAudio";
 import {
+  clampMetronomeVolume,
+  type MetronomeBeatEvent,
+} from "./audio/metronome";
+import {
   createPlaybackEngine,
   type CursorSyncTarget,
   type PlaybackEngine,
@@ -69,6 +73,10 @@ export default function App({
   const [isResolving, setIsResolving] = useState<boolean>(false);
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
   const [playbackSpeed, setPlaybackSpeed] = useState<SpeedMultiplier>(1.0);
+  const [metronomeEnabled, setMetronomeEnabled] = useState<boolean>(false);
+  const [metronomeVolume, setMetronomeVolume] = useState<number>(0.7);
+  const [countInEnabled, setCountInEnabled] = useState<boolean>(false);
+  const [activeMetronomeBeat, setActiveMetronomeBeat] = useState<MetronomeBeatEvent | null>(null);
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
   const [playbackFrame, setPlaybackFrame] = useState<PlaybackFrame | null>(null);
@@ -136,6 +144,7 @@ export default function App({
       },
       onCursorSync: setCursorTarget,
       onFrame: setPlaybackFrame,
+      onMetronomeBeat: setActiveMetronomeBeat,
     });
     playbackEngineRef.current = engine;
     return () => {
@@ -542,6 +551,13 @@ export default function App({
   const handlePlay = () => {
     if (!scoreDoc || !playbackEngineRef.current) return;
     setPopoverOpen(false);
+    if (playbackState === "stopped" && selectedMeasureIndex !== null && selectedMeasureIndex > 0) {
+      const tl = scoreDoc.measureTimelines[selectedMeasureIndex];
+      if (tl) {
+        void playbackEngineRef.current.play(scoreDoc, { fromScoreSec: tl.startSec });
+        return;
+      }
+    }
     void playbackEngineRef.current.play(scoreDoc);
   };
 
@@ -562,6 +578,28 @@ export default function App({
   const handleSpeedChange = (nextSpeed: SpeedMultiplier) => {
     setPlaybackSpeed(nextSpeed);
     playbackEngineRef.current?.setSpeed(nextSpeed);
+  };
+
+  const handleToggleMetronome = () => {
+    setMetronomeEnabled((prev) => {
+      const next = !prev;
+      playbackEngineRef.current?.setMetronomeEnabled(next);
+      return next;
+    });
+  };
+
+  const handleChangeMetronomeVolume = (volume: number) => {
+    const clamped = clampMetronomeVolume(volume);
+    setMetronomeVolume(clamped);
+    playbackEngineRef.current?.setMetronomeVolume(clamped);
+  };
+
+  const handleToggleCountIn = () => {
+    setCountInEnabled((prev) => {
+      const next = !prev;
+      playbackEngineRef.current?.setCountInEnabled(next);
+      return next;
+    });
   };
 
   return (
@@ -920,6 +958,10 @@ export default function App({
         measureCount={measureCount}
         measureTimelines={scoreDoc?.measureTimelines ?? []}
         activeMeasureIndex={cursorTarget?.measureIndex ?? selectedMeasureIndex}
+        metronomeEnabled={metronomeEnabled}
+        metronomeVolume={metronomeVolume}
+        countInEnabled={countInEnabled}
+        activeMetronomeBeat={activeMetronomeBeat}
         onPlay={handlePlay}
         onPlayFromSlice={handlePlayFromSlice}
         onPause={handlePause}
@@ -927,6 +969,9 @@ export default function App({
         onJumpToStart={handleJumpToStart}
         onJumpToMeasure={handleSelectMeasure}
         onChangeSpeed={handleSpeedChange}
+        onToggleMetronome={handleToggleMetronome}
+        onChangeMetronomeVolume={handleChangeMetronomeVolume}
+        onToggleCountIn={handleToggleCountIn}
       />
 
       {/* Bottom Pane: Full-Width 88-Key Physical Piano & Dual-Hand Posture Simulation */}

@@ -83,7 +83,7 @@ function normalizeTimeSignaturePoints(points: TimeSignaturePoint[]): TimeSignatu
   return timeline;
 }
 
-function buildTickToSecMapper(
+export function buildTickToSecMapper(
   timeline: TempoPoint[],
   ticksPerQuarter: number
 ): (tick: number) => number {
