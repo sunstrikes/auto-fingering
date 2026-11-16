@@ -30,7 +30,7 @@
 
 ## Quick start
 
-Requirements: **Node.js `^20.19.0 || >=22.12.0`** (required by Vite 8) and npm.
+Requirements: **Node.js `>=22.12.0`** (required by Vite 8 and Vitest 5) and npm.
 
 ```bash
 git clone git@github.com:sunstrikes/auto-fingering.git
@@ -124,7 +124,7 @@ The regression corpus lives in [`test-corpus/`](test-corpus/) and enforces the a
 
 This is a purely static SPA: run `npm run build` and serve `dist/` from any static host. There is no server-side code and no SPA route fallback needed (the app only uses the root path).
 
-- `ci.yml` runs typecheck, tests and the production build on Node 20/22.
+- `ci.yml` runs typecheck, tests and the production build on Node 22/24.
 - `deploy-edgeone.yml` publishes `dist/` to EdgeOne Pages on tags or manual dispatch; configure the `EDGEONE_PAGES_API_TOKEN` secret and, optionally, the `EDGEONE_PROJECT_NAME` repository variable.
 - Step-by-step EdgeOne Pages instructions, anonymous previews and project claiming are in [docs/deployment-edgeone.md](docs/deployment-edgeone.md).
 

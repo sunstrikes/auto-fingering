@@ -30,7 +30,7 @@
 
 ## 快速开始
 
-环境要求：**Node.js `^20.19.0 || >=22.12.0`**（Vite 8 要求）与 npm。
+环境要求：**Node.js `>=22.12.0`**（Vite 8 / Vitest 5 工具链要求）与 npm。
 
 ```bash
 git clone git@github.com:sunstrikes/auto-fingering.git
@@ -124,7 +124,7 @@ test-corpus/       # 01–05 回归样本（含真实曲目《武昌》）
 
 本项目是纯静态 SPA，`npm run build` 后把 `dist/` 部署到任意静态托管即可，无服务端依赖、无需 SPA 路由回退（单页应用只有根路径）。
 
-- `.github/workflows/ci.yml`：在 Node 20/22 上运行类型检查、测试与生产构建。
+- `.github/workflows/ci.yml`：在 Node 22/24 上运行类型检查、测试与生产构建。
 - `.github/workflows/deploy-edgeone.yml`：打 `v*` tag 或手动触发，把 `dist/` 发布到 EdgeOne Pages；需配置 `EDGEONE_PAGES_API_TOKEN` secret（可选 `EDGEONE_PROJECT_NAME` 变量）。
 - EdgeOne Pages 部署步骤、匿名预览与项目认领说明见 [docs/deployment-edgeone.md](docs/deployment-edgeone.md)。
 
