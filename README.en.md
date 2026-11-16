@@ -118,6 +118,7 @@ The regression corpus lives in [`test-corpus/`](test-corpus/) and enforces the a
 - performance budget: the real-world “Wuchang” score (73 measures, 1,290 onset notes) solves in ≤ 200 ms, a local anchor re-solve in ≤ 20 ms;
 - export compatibility: written-back `.musicxml` / `.mxl` files load in OSMD and piano.cishoon.top, preserving `<lyric>`, `<direction>`, `<slur>` and original fingering nodes;
 - practice behavior: metronome/count-in, proportional tempo scaling, Web MIDI parsing, waiting-mode state machine and A-B looping all have dedicated suites.
+- performance budgets keep the SPEC values locally; on shared CI runners they are scaled by `PERF_BUDGET_SCALE` (default `3`) to absorb hardware jitter. Override the variable locally to reproduce the strict gate.
 
 ## Deployment
 

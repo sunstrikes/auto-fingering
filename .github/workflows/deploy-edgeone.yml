@@ -45,4 +45,4 @@ jobs:
         run: npm run build
 
       - name: Deploy
-        run: npx --yes edgeone@latest makers deploy ./dist -n "$EDGEONE_PROJECT_NAME" -t "$EDGEONE_PAGES_API_TOKEN" --json
+        run: npx --yes edgeone@1.7.2 makers deploy ./dist -n "$EDGEONE_PROJECT_NAME" -t "$EDGEONE_PAGES_API_TOKEN" --json

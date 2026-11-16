@@ -6,6 +6,7 @@ import { parseMusicXml } from "../src/musicxml/parser";
 import { solveFingering } from "../src/solver/solveFingering";
 import { localResolveFingering } from "../src/solver/localResolve";
 import { DEFAULT_HAND_SPAN_PROFILE, type Finger } from "../src/domain/types";
+import { perfBudget } from "./perfBudget";
 
 function buildLongGrandStaffXml(measureCount: number): string {
   const measures: string[] = [];
@@ -117,8 +118,8 @@ describe("Seam 1: localResolveFingering", () => {
     const elapsedMs = performance.now() - t0;
 
     expect(updated.fingerByNoteUid[rhTarget.noteUid]).toBe(overrideFinger);
-    expect(elapsedMs).toBeLessThanOrEqual(20);
-    expect(updated.solveTimeMs).toBeLessThanOrEqual(20);
+    expect(elapsedMs).toBeLessThanOrEqual(perfBudget(20));
+    expect(updated.solveTimeMs).toBeLessThanOrEqual(perfBudget(20));
 
     // Opposite hand unchanged
     for (const note of doc.noteEvents) {

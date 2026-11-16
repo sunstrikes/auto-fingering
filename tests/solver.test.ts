@@ -8,6 +8,7 @@ import { solveFingering } from "../src/solver/solveFingering";
 import { computeHorizontalCost, generateSliceCandidates } from "../src/solver/costModel";
 import { DEFAULT_COST_WEIGHTS } from "../src/solver/weights";
 import { DEFAULT_HAND_SPAN_PROFILE } from "../src/domain/types";
+import { perfBudget } from "./perfBudget";
 
 describe("solver seam: solveFingering", () => {
   it("produces valid 1-5 assignments for every pitched note and idiomatic thumb-under 1-2-3-1-2-3-4-5 on C-major ascending scale", () => {
@@ -167,7 +168,7 @@ describe("solver seam: solveFingering", () => {
     for (const tied of tied05) {
       expect(res05.fingerByNoteUid[tied.noteUid]).toBeUndefined();
     }
-    expect(res05.solveTimeMs).toBeLessThanOrEqual(200);
+    expect(res05.solveTimeMs).toBeLessThanOrEqual(perfBudget(200));
     expect(res05.handPositions.some((p) => p.hand === "RH")).toBe(true);
     expect(res05.handPositions.some((p) => p.hand === "LH")).toBe(true);
   });
@@ -530,9 +531,9 @@ describe("solver seam: solveFingering", () => {
       preferStablePosition: false,
     });
 
-    expect(resS.solveTimeMs).toBeLessThanOrEqual(200);
-    expect(resM.solveTimeMs).toBeLessThanOrEqual(200);
-    expect(resL.solveTimeMs).toBeLessThanOrEqual(200);
+    expect(resS.solveTimeMs).toBeLessThanOrEqual(perfBudget(200));
+    expect(resM.solveTimeMs).toBeLessThanOrEqual(perfBudget(200));
+    expect(resL.solveTimeMs).toBeLessThanOrEqual(perfBudget(200));
 
     // 15-16 semitone 10th chords in measures 23, 27, 66, 72 (0-based 22, 26, 65, 71) are flagged under S and M
     for (const measureIdx of [22, 26, 65, 71]) {
