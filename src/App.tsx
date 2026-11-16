@@ -43,22 +43,6 @@ const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
   { preset: "L", title: "Large hand span (1.18x)" },
 ];
 
-function countMeasuresInScoreDoc(doc: ScoreDocument): number {
-  const firstPart = doc.xmlDoc.getElementsByTagName("part")[0];
-  if (firstPart) {
-    let count = 0;
-    for (let i = 0; i < firstPart.children.length; i++) {
-      const child = firstPart.children[i];
-      if (child.localName === "measure" || child.tagName === "measure") {
-        count++;
-      }
-    }
-    if (count > 0) return count;
-  }
-  const maxIdx = doc.noteEvents.reduce((max, n) => Math.max(max, n.measureIndex), -1);
-  return maxIdx + 1;
-}
-
 export interface AppAudioDeps extends PianoAudioDeps {
   requestAnimationFrame?: (cb: FrameRequestCallback) => number;
   cancelAnimationFrame?: (id: number) => void;
@@ -364,10 +348,7 @@ export default function App({
 
   const onsetSlices = scoreDoc?.onsetSlices ?? [];
   const noteEvents = scoreDoc?.noteEvents ?? [];
-  const measureCount = useMemo(
-    () => (scoreDoc ? countMeasuresInScoreDoc(scoreDoc) : 0),
-    [scoreDoc]
-  );
+  const measureCount = scoreDoc?.measureCount ?? 0;
 
   const measureRisks = useMemo(
     () => buildMeasureRiskSummaries(measureCount, onsetSlices, solveResult?.warnings ?? []),
@@ -386,6 +367,8 @@ export default function App({
           noteUid: ev.noteUid,
           measureIndex: ev.measureIndex,
           midi: ev.midi,
+          staff: ev.staff,
+          onsetTick: ev.onsetTick,
           hand: ev.hand,
           finger: userAnc.finger,
           isConflict: repairedSet.has(ev.noteUid),
@@ -399,6 +382,8 @@ export default function App({
         noteUid: ev.noteUid,
         measureIndex: ev.measureIndex,
         midi: ev.midi,
+        staff: ev.staff,
+        onsetTick: ev.onsetTick,
         hand: ev.hand,
         finger: ev.anchorFinger,
         isConflict: repairedSet.has(ev.noteUid),

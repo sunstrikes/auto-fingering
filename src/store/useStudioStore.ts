@@ -20,6 +20,7 @@ import { midiToPitchLabel } from "../solver/keyboard";
 export interface NoteDiffEntry {
   noteUid: string;
   measureIndex: number;
+  midi: number;
   pitchLabel: string;
   hand: Hand;
   before: Finger | undefined;
@@ -112,6 +113,7 @@ export function computeNoteDiff(
       diffs.push({
         noteUid: note.noteUid,
         measureIndex: note.measureIndex,
+        midi: note.midi,
         pitchLabel: midiToPitchLabel(note.midi),
         hand: note.hand,
         before,
@@ -152,14 +154,9 @@ export function computeNextAnchorState(
 
 function buildForceWriteUids(
   anchors: Record<string, AnchorOverride>,
-  removedRawAnchorUids: string[],
-  extraUids: string[] = []
+  removedRawAnchorUids: string[]
 ): Set<string> {
-  return new Set([
-    ...Object.keys(anchors),
-    ...removedRawAnchorUids,
-    ...extraUids,
-  ]);
+  return new Set([...Object.keys(anchors), ...removedRawAnchorUids]);
 }
 
 function syncXmlOutput(
@@ -168,12 +165,11 @@ function syncXmlOutput(
   anchors: Record<string, AnchorOverride>,
   removedRawAnchorUids: string[],
   ignoreExistingFingerings: boolean,
-  extraForceUids: string[] = [],
   xmlDeps?: XmlDomDeps
 ): string {
   writeFingeringsToScore(scoreDoc, fingerByNoteUid, {
     ignoreExistingFingerings,
-    forceWriteNoteUids: buildForceWriteUids(anchors, removedRawAnchorUids, extraForceUids),
+    forceWriteNoteUids: buildForceWriteUids(anchors, removedRawAnchorUids),
   });
   return serializeScoreDocument(scoreDoc, xmlDeps);
 }
@@ -289,7 +285,6 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
       nextAnchors,
       nextRemoved,
       state.ignoreExistingFingerings,
-      [],
       xmlDeps
     );
 
@@ -405,7 +400,6 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
       nextAnchors,
       nextRemoved,
       state.ignoreExistingFingerings,
-      [targetNoteUid],
       xmlDeps
     );
 
@@ -431,7 +425,6 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
 
     const previous = history.past[history.past.length - 1];
     const currentSnapshot = createSnapshot(state);
-    const prevDiffUids = state.lastDiff.map((d) => d.noteUid);
 
     const exportedXml = syncXmlOutput(
       scoreDoc,
@@ -439,7 +432,6 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
       previous.anchors,
       previous.removedRawAnchorUids,
       state.ignoreExistingFingerings,
-      prevDiffUids,
       xmlDeps
     );
 
@@ -465,7 +457,6 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
 
     const next = history.future[0];
     const currentSnapshot = createSnapshot(state);
-    const nextDiffUids = next.lastDiff.map((d) => d.noteUid);
 
     const exportedXml = syncXmlOutput(
       scoreDoc,
@@ -473,7 +464,6 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
       next.anchors,
       next.removedRawAnchorUids,
       state.ignoreExistingFingerings,
-      nextDiffUids,
       xmlDeps
     );
 

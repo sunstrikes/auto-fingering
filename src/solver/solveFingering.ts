@@ -14,6 +14,7 @@ import {
   computeHorizontalCost,
   computeVerticalCost,
   generateSliceCandidates,
+  resolveDepartureFingers,
 } from "./costModel";
 import { getMaxSpan, getSpanScale, toHandFramePos, whiteKeyIndex } from "./keyboard";
 
@@ -37,10 +38,11 @@ export function buildHeldFingerMapFromBeam(
   slices: OnsetSlice[],
   layers: BeamNode[][],
   t: number,
-  pIdx: number
+  pIdx: number,
+  priorFingerByNoteUid?: Record<string, Finger>
 ): Map<Finger, number> {
   const heldMap = new Map<Finger, number>();
-  if (slice.heldNotes.length === 0 || t === 0) {
+  if (slice.heldNotes.length === 0) {
     return heldMap;
   }
   const heldByUid = new Map<string, number>();
@@ -48,7 +50,7 @@ export function buildHeldFingerMapFromBeam(
     heldByUid.set(h.noteUid, h.midi);
   }
   let cursor = pIdx;
-  for (let back = t - 1; back >= 0 && heldByUid.size > 0; back--) {
+  for (let back = t - 1; back >= 0 && heldByUid.size > 0 && cursor >= 0; back--) {
     const prevSlice = slices[back];
     const node = layers[back][cursor];
     for (let i = 0; i < prevSlice.notes.length; i++) {
@@ -60,6 +62,14 @@ export function buildHeldFingerMapFromBeam(
       }
     }
     cursor = node.prevIdx;
+  }
+  if (priorFingerByNoteUid) {
+    for (const [uid, midi] of heldByUid.entries()) {
+      const priorF = priorFingerByNoteUid[uid];
+      if (priorF) {
+        heldMap.set(priorF, midi);
+      }
+    }
   }
   return heldMap;
 }
@@ -274,16 +284,21 @@ export function buildStateKeyAndLookaheadPenalty(
   return { stateKey, penalty };
 }
 
-function solvePhraseSegment(
+export interface SegmentBeamContext {
+  candidatesBySlice: Finger[][][];
+  lookahead: { hFuture: number[][]; reservationsByNoteUid: Map<string, HeldReservation[]> } | null;
+}
+
+/**
+ * Generates slice candidates, resolves cross-slice anchor conflicts, and computes
+ * phrase-level lookahead bounds/reservations shared by full and local Beam Search DP.
+ */
+export function prepareSegmentBeamContext(
   slices: OnsetSlice[],
   profile: HandSpanProfile,
-  fingerByNoteUid: Record<string, Finger>,
-  repairedAnchorUids: string[],
   anchorConflictSliceIds: Set<string>,
   ignoreExistingFingerings = false
-): void {
-  if (slices.length === 0) return;
-
+): SegmentBeamContext {
   const candidatesBySlice: Finger[][][] = [];
   let hasAnyAnchors = false;
 
@@ -311,106 +326,195 @@ function solvePhraseSegment(
     ? computeAnchorLookahead(slices, candidatesBySlice, profile)
     : null;
 
-  const layers: BeamNode[][] = [];
+  return { candidatesBySlice, lookahead };
+}
 
-  for (let t = 0; t < slices.length; t++) {
-    const slice = slices[t];
-    const candidates = candidatesBySlice[t];
-    const nextSliceHeldUids =
-      t + 1 < slices.length ? slices[t + 1].heldNotes.map((h) => h.noteUid) : [];
+export interface AdvanceBeamLayerOptions {
+  slices: OnsetSlice[];
+  layers: BeamNode[][];
+  t: number;
+  candidates: Finger[][];
+  nextSliceHeldUids: string[];
+  lookahead: SegmentBeamContext["lookahead"];
+  profile: HandSpanProfile;
+  ignoreExistingFingerings?: boolean;
+  priorFingerByNoteUid?: Record<string, Finger>;
+  prevPrefixSlice?: OnsetSlice | null;
+  prevPrefixFingers?: Finger[] | null;
+}
 
-    const nextBeam: BeamNode[] = [];
+/**
+ * Expands and prunes one Beam Search DP layer (`BEAM_WIDTH`) for slice index `t`.
+ */
+export function advanceBeamLayer(opts: AdvanceBeamLayerOptions): BeamNode[] {
+  const {
+    slices,
+    layers,
+    t,
+    candidates,
+    nextSliceHeldUids,
+    lookahead,
+    profile,
+    ignoreExistingFingerings = false,
+    priorFingerByNoteUid,
+    prevPrefixSlice,
+    prevPrefixFingers,
+  } = opts;
 
-    if (t === 0) {
-      const emptyHeld = new Map<Finger, number>();
+  const slice = slices[t];
+  const nextBeam: BeamNode[] = [];
+
+  if (t === 0) {
+    const heldFingers = buildHeldFingerMapFromBeam(
+      slice,
+      slices,
+      layers,
+      0,
+      -1,
+      priorFingerByNoteUid
+    );
+    for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
+      const cand = candidates[cIdx];
+      const vertCost = computeVerticalCost(slice, cand, heldFingers, profile).cost;
+      const horizCost =
+        prevPrefixSlice && prevPrefixFingers
+          ? computeHorizontalCost(
+              prevPrefixSlice,
+              prevPrefixFingers,
+              slice,
+              cand,
+              profile,
+              ignoreExistingFingerings
+            ).cost
+          : 0;
+      const totalCost = vertCost + horizCost;
+      const { stateKey, penalty } = buildStateKeyAndLookaheadPenalty(
+        slice,
+        cand,
+        slices,
+        layers,
+        t,
+        -1,
+        cIdx,
+        nextSliceHeldUids,
+        lookahead
+      );
+      nextBeam.push({
+        fingers: cand,
+        totalCost,
+        rankScore: totalCost + penalty,
+        prevIdx: -1,
+        stateKey,
+      });
+    }
+  } else {
+    const prevBeam = layers[t - 1];
+    const prevSlice = slices[t - 1];
+    const cachedVertCosts =
+      slice.heldNotes.length === 0
+        ? candidates.map(
+            (cand) => computeVerticalCost(slice, cand, new Map<Finger, number>(), profile).cost
+          )
+        : null;
+
+    for (let pIdx = 0; pIdx < prevBeam.length; pIdx++) {
+      const prevNode = prevBeam[pIdx];
+      const heldFingers =
+        slice.heldNotes.length > 0
+          ? buildHeldFingerMapFromBeam(
+              slice,
+              slices,
+              layers,
+              t,
+              pIdx,
+              priorFingerByNoteUid
+            )
+          : null;
+
       for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
         const cand = candidates[cIdx];
-        const { cost } = computeVerticalCost(slice, cand, emptyHeld, profile);
+        const vertCost =
+          cachedVertCosts !== null
+            ? cachedVertCosts[cIdx]
+            : computeVerticalCost(slice, cand, heldFingers!, profile).cost;
+        const horiz = computeHorizontalCost(
+          prevSlice,
+          prevNode.fingers,
+          slice,
+          cand,
+          profile,
+          ignoreExistingFingerings
+        );
+        const totalCost = prevNode.totalCost + vertCost + horiz.cost;
         const { stateKey, penalty } = buildStateKeyAndLookaheadPenalty(
           slice,
           cand,
           slices,
           layers,
           t,
-          -1,
+          pIdx,
           cIdx,
           nextSliceHeldUids,
           lookahead
         );
         nextBeam.push({
           fingers: cand,
-          totalCost: cost,
-          rankScore: cost + penalty,
-          prevIdx: -1,
+          totalCost,
+          rankScore: totalCost + penalty,
+          prevIdx: pIdx,
           stateKey,
         });
       }
-    } else {
-      const prevBeam = layers[t - 1];
-      const prevSlice = slices[t - 1];
-
-      const cachedVertCosts =
-        slice.heldNotes.length === 0
-          ? candidates.map(
-              (cand) => computeVerticalCost(slice, cand, new Map<Finger, number>(), profile).cost
-            )
-          : null;
-
-      for (let pIdx = 0; pIdx < prevBeam.length; pIdx++) {
-        const prevNode = prevBeam[pIdx];
-        const heldFingers =
-          slice.heldNotes.length > 0
-            ? buildHeldFingerMapFromBeam(slice, slices, layers, t, pIdx)
-            : null;
-
-        for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
-          const cand = candidates[cIdx];
-          const vertCost =
-            cachedVertCosts !== null
-              ? cachedVertCosts[cIdx]
-              : computeVerticalCost(slice, cand, heldFingers!, profile).cost;
-          const horiz = computeHorizontalCost(
-            prevSlice,
-            prevNode.fingers,
-            slice,
-            cand,
-            profile
-          );
-          const totalCost = prevNode.totalCost + vertCost + horiz.cost;
-          const { stateKey, penalty } = buildStateKeyAndLookaheadPenalty(
-            slice,
-            cand,
-            slices,
-            layers,
-            t,
-            pIdx,
-            cIdx,
-            nextSliceHeldUids,
-            lookahead
-          );
-
-          nextBeam.push({
-            fingers: cand,
-            totalCost,
-            rankScore: totalCost + penalty,
-            prevIdx: pIdx,
-            stateKey,
-          });
-        }
-      }
     }
+  }
 
-    // Deduplicate dominated Markov states before pruning to BEAM_WIDTH
-    nextBeam.sort((a, b) => a.rankScore - b.rankScore || a.totalCost - b.totalCost);
-    const deduped: BeamNode[] = [];
-    const seenStates = new Set<string>();
-    for (const node of nextBeam) {
-      if (seenStates.has(node.stateKey)) continue;
-      seenStates.add(node.stateKey);
-      deduped.push(node);
-      if (deduped.length >= BEAM_WIDTH) break;
-    }
-    layers.push(deduped);
+  // Deduplicate dominated Markov states before pruning to BEAM_WIDTH
+  nextBeam.sort((a, b) => a.rankScore - b.rankScore || a.totalCost - b.totalCost);
+  const deduped: BeamNode[] = [];
+  const seenStates = new Set<string>();
+  for (const node of nextBeam) {
+    if (seenStates.has(node.stateKey)) continue;
+    seenStates.add(node.stateKey);
+    deduped.push(node);
+    if (deduped.length >= BEAM_WIDTH) break;
+  }
+  return deduped;
+}
+
+function solvePhraseSegment(
+  slices: OnsetSlice[],
+  profile: HandSpanProfile,
+  fingerByNoteUid: Record<string, Finger>,
+  repairedAnchorUids: string[],
+  anchorConflictSliceIds: Set<string>,
+  ignoreExistingFingerings = false
+): void {
+  if (slices.length === 0) return;
+
+  const { candidatesBySlice, lookahead } = prepareSegmentBeamContext(
+    slices,
+    profile,
+    anchorConflictSliceIds,
+    ignoreExistingFingerings
+  );
+
+  const layers: BeamNode[][] = [];
+
+  for (let t = 0; t < slices.length; t++) {
+    const nextSliceHeldUids =
+      t + 1 < slices.length ? slices[t + 1].heldNotes.map((h) => h.noteUid) : [];
+    layers.push(
+      advanceBeamLayer({
+        slices,
+        layers,
+        t,
+        candidates: candidatesBySlice[t],
+        nextSliceHeldUids,
+        lookahead,
+        profile,
+        ignoreExistingFingerings,
+      })
+    );
   }
 
   // Backtrack best terminal node
@@ -487,7 +591,8 @@ export function derivePositionsAndCues(
   slices: OnsetSlice[],
   fingerByNoteUid: Record<string, Finger>,
   profile: HandSpanProfile,
-  anchorConflictSliceIds: Set<string>
+  anchorConflictSliceIds: Set<string>,
+  ignoreExistingFingerings = false
 ): { handPositions: HandPosition[]; transitionCues: TransitionCue[] } {
   const handPositions: HandPosition[] = [];
   const transitionCues: TransitionCue[] = [];
@@ -521,6 +626,7 @@ export function derivePositionsAndCues(
       }
 
       // Check vertical chord & active held+struck span warnings
+      let emittedChordExceeds5 = false;
       for (let i = 0; i < slice.notes.length; i++) {
         const posI = toHandFramePos(slice.notes[i].midi, hand);
         for (let j = i + 1; j < slice.notes.length; j++) {
@@ -529,7 +635,8 @@ export function derivePositionsAndCues(
           if (fingers[i] === fingers[j]) {
             const isValidDouble =
               (fingers[i] === 1 || fingers[i] === 5) && semitoneDiff <= 2 && dist <= 1.5;
-            if (!isValidDouble) {
+            if (!isValidDouble && !emittedChordExceeds5) {
+              emittedChordExceeds5 = true;
               transitionCues.push({
                 sliceId: slice.sliceId,
                 hand,
@@ -537,7 +644,7 @@ export function derivePositionsAndCues(
                 type: "unreachable-span",
                 severity: "danger",
                 cost: dist + 10,
-                label: "Chord exceeds 5 fingers (arpeggiate/split)",
+                label: "Chord exceeds 5 fingers (arpeggiate / split)",
               });
             }
             continue;
@@ -599,7 +706,11 @@ export function derivePositionsAndCues(
 
       if (idx > 0 && handSlices[idx - 1].phraseId === slice.phraseId) {
         const prev = handSlices[idx - 1];
-        const prevFingers = prev.notes.map((n) => fingerByNoteUid[n.noteUid]);
+        const prevFingers = resolveDepartureFingers(
+          prev,
+          prev.notes.map((n) => fingerByNoteUid[n.noteUid]),
+          ignoreExistingFingerings
+        );
         const dt = Math.max(0.05, slice.onsetSec - prev.onsetSec);
 
         if (prev.notes.length === 1 && slice.notes.length === 1) {
@@ -798,7 +909,8 @@ export function solveFingering(
     onsetSlices,
     fingerByNoteUid,
     profile,
-    anchorConflictSliceIds
+    anchorConflictSliceIds,
+    ignoreExistingFingerings
   );
 
   const warnings = transitionCues.filter(

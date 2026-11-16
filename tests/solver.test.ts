@@ -365,11 +365,16 @@ describe("solver seam: solveFingering", () => {
     expect(f1).toEqual([1, 1, 2, 3, 4, 5]);
     expect(f2).toEqual([1, 2, 3, 4, 5, 5]);
 
-    // Chords 3 & 4 assign outer voices 1 & 5 and leave no note blank
+    // Chords 3 & 4 assign outer voices 1 & 5, distribute inner notes across 2..4 (no [1,2,3,4,5,5,5])
     expect(f3[0]).toBe(1);
     expect(f3[f3.length - 1]).toBe(5);
+    expect(f3.slice(1, -1).every((f) => f >= 2 && f <= 4)).toBe(true);
+    expect(new Set(f3.slice(1, -1))).toEqual(new Set([2, 3, 4]));
+
     expect(f4[0]).toBe(1);
     expect(f4[f4.length - 1]).toBe(5);
+    expect(f4.slice(1, -1).every((f) => f >= 2 && f <= 4)).toBe(true);
+    expect(new Set(f4.slice(1, -1))).toEqual(new Set([2, 3, 4]));
 
     // Chord 5 (2 octaves) assigns playable outer 1 & 5
     expect(f5).toEqual([1, 5]);
@@ -378,9 +383,25 @@ describe("solver seam: solveFingering", () => {
     expect(res.warnings.some((w) => w.sliceId === s1.sliceId && w.type === "unreachable-span")).toBe(false);
     expect(res.warnings.some((w) => w.sliceId === s2.sliceId && w.type === "unreachable-span")).toBe(false);
 
-    // Chords 3, 4, 5 MUST emit unreachable-span (danger)
-    expect(res.warnings.some((w) => w.sliceId === s3.sliceId && w.type === "unreachable-span" && w.severity === "danger")).toBe(true);
-    expect(res.warnings.some((w) => w.sliceId === s4.sliceId && w.type === "unreachable-span" && w.severity === "danger")).toBe(true);
+    // Chords 3, 4, 5 MUST emit unreachable-span (danger) with clear arpeggiate / split cue for >5 chords
+    expect(
+      res.warnings.some(
+        (w) =>
+          w.sliceId === s3.sliceId &&
+          w.type === "unreachable-span" &&
+          w.severity === "danger" &&
+          /arpeggiate\s*\/\s*split/i.test(w.label)
+      )
+    ).toBe(true);
+    expect(
+      res.warnings.some(
+        (w) =>
+          w.sliceId === s4.sliceId &&
+          w.type === "unreachable-span" &&
+          w.severity === "danger" &&
+          /arpeggiate\s*\/\s*split/i.test(w.label)
+      )
+    ).toBe(true);
     expect(res.warnings.some((w) => w.sliceId === s5.sliceId && w.type === "unreachable-span" && w.severity === "danger")).toBe(true);
   });
 
@@ -706,5 +727,45 @@ describe("solver seam: solveFingering", () => {
     expect(heldRes.fingerByNoteUid[c4Held.noteUid]).not.toBe(heldRes.fingerByNoteUid[e4Held.noteUid]);
     expect(heldRes.repairedAnchorUids).toHaveLength(1);
     expect(heldRes.warnings.some((w) => w.type === "anchor-conflict" && w.severity === "danger")).toBe(true);
+  });
+
+  it("uses hyphenated anchorExitFinger as the effective departure finger for horizontal transition cost", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const hyphenXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations><technical><fingering>1-3</fingering></technical></notations>
+      </note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(hyphenXml, { DOMParser });
+    const [c4, d4, e4] = doc.noteEvents;
+    expect(c4.anchorFinger).toBe(1);
+    expect(c4.anchorExitFinger).toBe(3);
+
+    const res = solveFingering(doc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    // Entry on C4 is 1, exit is 3 -> stepping up to D4 and E4 takes 4 and 5 rather than 2 and 3
+    expect(res.fingerByNoteUid[c4.noteUid]).toBe(1);
+    expect(res.fingerByNoteUid[d4.noteUid]).toBe(4);
+    expect(res.fingerByNoteUid[e4.noteUid]).toBe(5);
+
+    // Ignoring existing fingerings ignores anchorExitFinger too
+    const ignored = solveFingering(doc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE, {
+      ignoreExistingFingerings: true,
+    });
+    expect([
+      ignored.fingerByNoteUid[c4.noteUid],
+      ignored.fingerByNoteUid[d4.noteUid],
+      ignored.fingerByNoteUid[e4.noteUid],
+    ]).toEqual([1, 2, 3]);
   });
 });

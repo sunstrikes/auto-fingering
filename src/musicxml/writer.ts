@@ -1,22 +1,8 @@
 import type { Finger, ScoreDocument } from "../domain/types";
 import type { XmlDomDeps } from "./parser";
+import { createNsElement, findDirectChild } from "./xmlHelpers";
 
 const POST_NOTATIONS_TAGS = new Set(["lyric", "play", "listen"]);
-
-function createNsElement(xmlDoc: Document, tagName: string): Element {
-  const ns = xmlDoc.documentElement?.namespaceURI ?? null;
-  return xmlDoc.createElementNS(ns, tagName);
-}
-
-function findDirectChild(parent: Element, tagName: string): Element | null {
-  for (let i = 0; i < parent.children.length; i++) {
-    const child = parent.children[i];
-    if (child.localName === tagName || child.tagName === tagName) {
-      return child;
-    }
-  }
-  return null;
-}
 
 function findPrimaryFingering(technicalEl: Element): Element | null {
   for (let i = 0; i < technicalEl.children.length; i++) {
@@ -92,9 +78,30 @@ export function writeFingeringsToScore(
 
     const isForced = forceWriteNoteUids?.has(event.noteUid) ?? false;
     if (!ignoreExisting && event.anchorRawPreserved && !isForced) {
+      const originalClone = scoreDoc.originalFingeringByUid?.get(event.noteUid);
       const notationsCheck = findDirectChild(noteEl, "notations");
       const technicalCheck = notationsCheck ? findDirectChild(notationsCheck, "technical") : null;
       const existingFingering = technicalCheck ? findPrimaryFingering(technicalCheck) : null;
+
+      if (originalClone) {
+        if (existingFingering && existingFingering.isEqualNode(originalClone)) {
+          continue;
+        }
+        const restored = originalClone.cloneNode(true) as Element;
+        const notationsEl = notationsCheck ?? insertNotationsInXsdOrder(xmlDoc, noteEl);
+        let technicalEl = technicalCheck ?? findDirectChild(notationsEl, "technical");
+        if (!technicalEl) {
+          technicalEl = createNsElement(xmlDoc, "technical");
+          notationsEl.appendChild(technicalEl);
+        }
+        if (existingFingering) {
+          technicalEl.replaceChild(restored, existingFingering);
+        } else {
+          technicalEl.appendChild(restored);
+        }
+        continue;
+      }
+
       const currentText = (existingFingering?.textContent ?? "").trim();
       if (
         !existingFingering ||

@@ -138,6 +138,7 @@ describe("Seam 2: Zustand studio store (anchors, diff, undo/redo, selection)", (
       {
         noteUid: c4.noteUid,
         measureIndex: 0,
+        midi: 60,
         pitchLabel: "C4",
         hand: "RH",
         before: 1,
@@ -176,5 +177,93 @@ describe("Seam 2: Zustand studio store (anchors, diff, undo/redo, selection)", (
     expect(afterUndoAll.fingerByNoteUid[d4.noteUid]).toBe(2);
     expect(afterUndoAll.history.past).toHaveLength(0);
     expect(afterUndoAll.history.future).toHaveLength(2);
+  });
+
+  it("restores verbatim raw-preserved hyphenated <fingering> DOM nodes after override/removal and Undo", () => {
+    const { DOMParser, XMLSerializer } = new JSDOM("").window;
+    const rawHyphenXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations><technical><fingering placement="above" default-x="10">1-2</fingering></technical></notations>
+      </note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(rawHyphenXml, { DOMParser });
+    const initial = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const [c4] = scoreDoc.noteEvents;
+
+    const store = createStudioStore();
+    store.getState().setSolvedScore({
+      scoreDoc,
+      rawXmlText: rawHyphenXml,
+      fileName: "hyphen.musicxml",
+      exportFormat: "musicxml",
+      solveResult: initial,
+      resetHistory: true,
+      xmlDeps: { XMLSerializer },
+    });
+
+    expect(store.getState().renderedXml).toContain(
+      '<fingering placement="above" default-x="10">1-2</fingering>'
+    );
+
+    // Override C4 to 3 -> mutates DOM to >3<
+    const resOverride = localResolveFingering({
+      onsetSlices: scoreDoc.onsetSlices,
+      priorFingerByNoteUid: store.getState().fingerByNoteUid,
+      targetNoteUid: c4.noteUid,
+      override: { finger: 3, mode: "pinOnly" },
+      anchors: { [c4.noteUid]: { finger: 3, mode: "pinOnly" } },
+      profile: DEFAULT_HAND_SPAN_PROFILE,
+    });
+    store.getState().commitAnchorResolution({
+      targetNoteUid: c4.noteUid,
+      override: { finger: 3, mode: "pinOnly" },
+      result: resOverride,
+      xmlDeps: { XMLSerializer },
+    });
+    expect(store.getState().renderedXml).toContain(
+      '<fingering placement="above" default-x="10">3</fingering>'
+    );
+
+    // Undo override -> restores "1-2" verbatim with all original attributes
+    store.getState().undo({ XMLSerializer });
+    expect(store.getState().renderedXml).toContain(
+      '<fingering placement="above" default-x="10">1-2</fingering>'
+    );
+
+    // Remove raw anchor -> overwrites with solver finger, then Undo restores "1-2" verbatim
+    const resRemove = localResolveFingering({
+      onsetSlices: scoreDoc.onsetSlices,
+      priorFingerByNoteUid: store.getState().fingerByNoteUid,
+      targetNoteUid: c4.noteUid,
+      override: null,
+      anchors: {},
+      removedRawAnchorUids: [c4.noteUid],
+      profile: DEFAULT_HAND_SPAN_PROFILE,
+    });
+    store.getState().commitAnchorResolution({
+      targetNoteUid: c4.noteUid,
+      override: null,
+      result: resRemove,
+      xmlDeps: { XMLSerializer },
+    });
+    expect(store.getState().removedRawAnchorUids).toContain(c4.noteUid);
+    expect(store.getState().renderedXml).not.toContain(">1-2</fingering>");
+
+    store.getState().undo({ XMLSerializer });
+    expect(store.getState().removedRawAnchorUids).toEqual([]);
+    expect(store.getState().renderedXml).toContain(
+      '<fingering placement="above" default-x="10">1-2</fingering>'
+    );
   });
 });

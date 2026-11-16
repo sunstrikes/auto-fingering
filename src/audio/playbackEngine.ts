@@ -1,3 +1,4 @@
+import { computeTieChainEndByRoot } from "../domain/tieUtils";
 import type { Hand, OnsetSlice, ScoreDocument } from "../domain/types";
 import type { PianoAudioEngine } from "./pianoAudio";
 
@@ -68,22 +69,7 @@ export function buildPlaybackSchedule(
   scoreDoc: ScoreDocument,
   startFromSliceId?: string | null
 ): PlaybackSchedule {
-  const tieChainEndSecByRootUid = new Map<string, number>();
-  for (const ev of scoreDoc.noteEvents) {
-    if (ev.isGrace) continue;
-    const evEnd = ev.onsetSec + ev.durationSec;
-    if (!ev.isTieStop) {
-      tieChainEndSecByRootUid.set(
-        ev.noteUid,
-        Math.max(tieChainEndSecByRootUid.get(ev.noteUid) ?? 0, evEnd)
-      );
-    } else if (ev.tieChainRootUid) {
-      tieChainEndSecByRootUid.set(
-        ev.tieChainRootUid,
-        Math.max(tieChainEndSecByRootUid.get(ev.tieChainRootUid) ?? 0, evEnd)
-      );
-    }
-  }
+  const tieChainEndSecByRootUid = computeTieChainEndByRoot(scoreDoc.noteEvents, "sec");
 
   const slices = scoreDoc.onsetSlices;
   const startSliceIdx = startFromSliceId

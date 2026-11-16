@@ -14,6 +14,8 @@ export interface AnchorMarkerInfo {
   noteUid: string;
   measureIndex: number;
   midi: number;
+  staff?: number;
+  onsetTick?: number;
   hand: Hand;
   finger: Finger;
   isConflict: boolean;
@@ -33,6 +35,7 @@ export interface ScoreRendererHandle {
     measureCount: number;
     measureGeometry: MeasureGeometry[];
   }>;
+  setNoteEvents?(noteEvents: NoteEvent[]): void;
   highlightMeasure(measureIndex: number | null): void;
   markAnchoredNotes(anchors: AnchorMarkerInfo[]): void;
   markDiffNotes?(diffs: NoteDiffEntry[]): void;
@@ -111,6 +114,232 @@ export function matchHitToNoteEvent(
   return best;
 }
 
+export interface MatchableScoreItem {
+  noteUid: string;
+  measureIndex: number;
+  midi: number;
+  staff?: number;
+  onsetTick?: number;
+  isTieStop?: boolean;
+}
+
+interface GraphicalNoteEntry {
+  midi: number;
+  staff: number | undefined;
+  timestamp: number;
+  isTieContinuation: boolean;
+  noteSvg: SVGGElement;
+  order: number;
+}
+
+function isSourceNoteTieContinuation(src: unknown): boolean {
+  if (!src || typeof src !== "object") return false;
+  const s = src as {
+    NoteTies?: Array<{ StartNote?: unknown }>;
+    NoteTie?: { StartNote?: unknown };
+  };
+  return Boolean(
+    s.NoteTies?.some((t) => t.StartNote !== src) ||
+      (s.NoteTie && s.NoteTie.StartNote !== src)
+  );
+}
+
+function extractGraphicalNoteStaff(src: unknown, gm: unknown): number | undefined {
+  const s = src as
+    | {
+        ParentStaff?: { Id?: number };
+        ParentStaffEntry?: { ParentStaff?: { IdInMusicSystem?: number; Id?: number } };
+        ParentVoiceEntry?: { ParentStaff?: { id?: number; Id?: number } };
+      }
+    | undefined;
+  const m = gm as { ParentStaff?: { Id?: number } } | undefined;
+  return (
+    s?.ParentStaffEntry?.ParentStaff?.IdInMusicSystem ??
+    s?.ParentVoiceEntry?.ParentStaff?.id ??
+    s?.ParentStaff?.Id ??
+    s?.ParentStaffEntry?.ParentStaff?.Id ??
+    s?.ParentVoiceEntry?.ParentStaff?.Id ??
+    m?.ParentStaff?.Id
+  );
+}
+
+function collectMeasureGraphicalNotes(row: unknown[]): GraphicalNoteEntry[] {
+  const entries: GraphicalNoteEntry[] = [];
+  let order = 0;
+
+  for (const gm of row) {
+    const gmObj = gm as { staffEntries?: unknown[] } | undefined;
+    for (const staffEntry of gmObj?.staffEntries ?? []) {
+      const seObj = staffEntry as {
+        relInMeasureTimestamp?: { RealValue?: number };
+        graphicalVoiceEntries?: unknown[];
+      };
+      for (const gve of seObj?.graphicalVoiceEntries ?? []) {
+        const gveObj = gve as { notes?: unknown[] };
+        for (const gNote of gveObj?.notes ?? []) {
+          const gn = gNote as {
+            sourceNote?: {
+              Pitch?: { getHalfTone?: () => number };
+              isRest?: () => boolean;
+              ParentStaffEntry?: { Timestamp?: { RealValue?: number } };
+            };
+            getSVGGElement?: () => SVGGElement | undefined;
+          };
+          const src = gn?.sourceNote;
+          if (!src || src.isRest?.() || !src.Pitch?.getHalfTone) continue;
+          const noteSvg = gn.getSVGGElement?.();
+          if (!noteSvg) continue;
+
+          const timestamp =
+            seObj.relInMeasureTimestamp?.RealValue ??
+            src.ParentStaffEntry?.Timestamp?.RealValue ??
+            order;
+
+          entries.push({
+            midi: src.Pitch.getHalfTone() + 12,
+            staff: extractGraphicalNoteStaff(src, gm),
+            timestamp,
+            isTieContinuation: isSourceNoteTieContinuation(src),
+            noteSvg,
+            order: order++,
+          });
+        }
+      }
+    }
+  }
+
+  entries.sort(
+    (a, b) =>
+      a.timestamp - b.timestamp ||
+      (a.staff ?? 0) - (b.staff ?? 0) ||
+      a.midi - b.midi ||
+      a.order - b.order
+  );
+  return entries;
+}
+
+function pickBestGraphicalEntryIndex(
+  entries: GraphicalNoteEntry[],
+  used: Set<number>,
+  midi: number,
+  targetStaff: number | undefined,
+  targetTieStop: boolean | undefined,
+  includeTieStops: boolean
+): number {
+  const pool: number[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    if (used.has(i)) continue;
+    const entry = entries[i];
+    if (!includeTieStops && entry.isTieContinuation) continue;
+    if (entry.midi === midi) {
+      pool.push(i);
+    }
+  }
+  if (pool.length === 0) return -1;
+
+  let narrowed = pool;
+  if (targetTieStop !== undefined) {
+    const tieFiltered = narrowed.filter((idx) => entries[idx].isTieContinuation === targetTieStop);
+    if (tieFiltered.length > 0) narrowed = tieFiltered;
+  }
+  if (targetStaff !== undefined) {
+    const staffFiltered = narrowed.filter((idx) => entries[idx].staff === targetStaff);
+    if (staffFiltered.length > 0) narrowed = staffFiltered;
+  }
+
+  return narrowed[0];
+}
+
+/**
+ * Matches score items (anchors, diffs, or selected note) to exact OSMD SVG noteheads
+ * using measureIndex, midi, staff, TieContinuation exclusion, and chronological onset ordering.
+ */
+export function matchMeasureGraphicalNotes<T extends MatchableScoreItem>(
+  measureList: unknown[][] | undefined,
+  items: T[],
+  noteEvents: NoteEvent[],
+  includeTieStops: boolean,
+  onMatch: (item: T, noteSvg: SVGGElement) => void
+): void {
+  if (!measureList || items.length === 0) return;
+
+  const noteByUid = new Map<string, NoteEvent>();
+  const eventsByMeasure = new Map<number, NoteEvent[]>();
+  for (const ev of noteEvents) {
+    noteByUid.set(ev.noteUid, ev);
+    const list = eventsByMeasure.get(ev.measureIndex) ?? [];
+    list.push(ev);
+    eventsByMeasure.set(ev.measureIndex, list);
+  }
+
+  const itemsByMeasure = new Map<number, T[]>();
+  for (const item of items) {
+    const list = itemsByMeasure.get(item.measureIndex) ?? [];
+    list.push(item);
+    itemsByMeasure.set(item.measureIndex, list);
+  }
+
+  for (const [mIdx, measureItems] of itemsByMeasure.entries()) {
+    const row = measureList[mIdx];
+    if (!row) continue;
+
+    const gEntries = collectMeasureGraphicalNotes(row);
+    if (gEntries.length === 0) continue;
+
+    const used = new Set<number>();
+    const pendingByUid = new Map<string, T>();
+    for (const item of measureItems) {
+      const refEvent = noteByUid.get(item.noteUid);
+      const isTie = item.isTieStop ?? refEvent?.isTieStop ?? false;
+      if (!includeTieStops && isTie) continue;
+      pendingByUid.set(item.noteUid, item);
+    }
+
+    const measureEvents = eventsByMeasure.get(mIdx);
+    if (measureEvents && measureEvents.length > 0) {
+      for (const ev of measureEvents) {
+        if (!includeTieStops && ev.isTieStop) continue;
+        const idx = pickBestGraphicalEntryIndex(
+          gEntries,
+          used,
+          ev.midi,
+          ev.staff,
+          ev.isTieStop,
+          includeTieStops
+        );
+        if (idx === -1) continue;
+        used.add(idx);
+
+        const matchedItem = pendingByUid.get(ev.noteUid);
+        if (matchedItem) {
+          pendingByUid.delete(ev.noteUid);
+          onMatch(matchedItem, gEntries[idx].noteSvg);
+        }
+      }
+    }
+
+    if (pendingByUid.size > 0) {
+      const remaining = Array.from(pendingByUid.values()).sort(
+        (a, b) => (a.onsetTick ?? 0) - (b.onsetTick ?? 0) || a.midi - b.midi
+      );
+      for (const item of remaining) {
+        const refEvent = noteByUid.get(item.noteUid);
+        const idx = pickBestGraphicalEntryIndex(
+          gEntries,
+          used,
+          item.midi,
+          item.staff ?? refEvent?.staff,
+          item.isTieStop ?? refEvent?.isTieStop ?? false,
+          includeTieStops
+        );
+        if (idx === -1) continue;
+        used.add(idx);
+        onMatch(item, gEntries[idx].noteSvg);
+      }
+    }
+  }
+}
+
 /**
  * Default OpenSheetMusicDisplay renderer adapter for measure geometry,
  * SVG measure highlighting, anchor/diff/selection markers, click hit-testing, playback cursor sync, and scrolling.
@@ -124,6 +353,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     followCursor: true,
   });
   let lastCursorKey: { measureIndex: number; onsetTick: number; isGrace: boolean } | null = null;
+  let currentNoteEvents: NoteEvent[] = [];
 
   const getMeasureSvgElements = (measureIndex: number): SVGGElement[] => {
     const row = osmd.GraphicSheet?.MeasureList?.[measureIndex];
@@ -143,46 +373,18 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     }
   };
 
-  const iterateMeasureGraphicalNotes = <T extends { measureIndex: number; midi: number }>(
+  const iterateMeasureGraphicalNotes = <T extends MatchableScoreItem>(
     items: T[],
+    includeTieStops: boolean,
     onMatch: (item: T, noteSvg: SVGGElement) => void
   ) => {
-    const measureList = osmd.GraphicSheet?.MeasureList;
-    if (!measureList || items.length === 0) return;
-
-    const byMeasure = new Map<number, T[]>();
-    for (const item of items) {
-      const list = byMeasure.get(item.measureIndex) ?? [];
-      list.push(item);
-      byMeasure.set(item.measureIndex, list);
-    }
-
-    for (const [mIdx, measureItems] of byMeasure.entries()) {
-      const row = measureList[mIdx];
-      if (!row) continue;
-      const unmatched = [...measureItems];
-
-      for (const gm of row) {
-        for (const staffEntry of gm?.staffEntries ?? []) {
-          for (const gve of staffEntry?.graphicalVoiceEntries ?? []) {
-            for (const gNote of gve?.notes ?? []) {
-              const pitch = gNote?.sourceNote?.Pitch;
-              if (!pitch) continue;
-              const midi = pitch.getHalfTone() + 12;
-              const matchIdx = unmatched.findIndex((a) => a.midi === midi);
-              if (matchIdx === -1) continue;
-              const matched = unmatched.splice(matchIdx, 1)[0];
-              const noteSvg = (
-                gNote as { getSVGGElement?: () => SVGGElement | undefined }
-              ).getSVGGElement?.();
-              if (noteSvg) {
-                onMatch(matched, noteSvg);
-              }
-            }
-          }
-        }
-      }
-    }
+    matchMeasureGraphicalNotes(
+      osmd.GraphicSheet?.MeasureList,
+      items,
+      currentNoteEvents,
+      includeTieStops,
+      onMatch
+    );
   };
 
   const extractMeasureGeometry = (): MeasureGeometry[] => {
@@ -227,6 +429,10 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       };
     },
 
+    setNoteEvents(events: NoteEvent[]) {
+      currentNoteEvents = events;
+    },
+
     highlightMeasure(measureIndex: number | null) {
       clearElementsByAttr("data-studio-highlight", "data-active-measure");
       if (measureIndex === null) return;
@@ -258,7 +464,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
 
     markAnchoredNotes(anchors: AnchorMarkerInfo[]) {
       clearElementsByAttr("data-studio-anchor-marker", "data-anchor-note");
-      iterateMeasureGraphicalNotes(anchors, (matched, noteSvg) => {
+      iterateMeasureGraphicalNotes(anchors, false, (matched, noteSvg) => {
         noteSvg.setAttribute("data-anchor-note", matched.noteUid);
         if (typeof noteSvg.getBBox === "function") {
           try {
@@ -282,11 +488,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
 
     markDiffNotes(diffs: NoteDiffEntry[]) {
       clearElementsByAttr("data-studio-diff-marker", "data-diff-note");
-      const withMidi = diffs
-        .map((d) => ({ ...d, midi: pitchLabelToMidi(d.pitchLabel) }))
-        .filter((d): d is NoteDiffEntry & { midi: number } => d.midi !== null);
-
-      iterateMeasureGraphicalNotes(withMidi, (matched, noteSvg) => {
+      iterateMeasureGraphicalNotes(diffs, false, (matched, noteSvg) => {
         noteSvg.setAttribute("data-diff-note", matched.noteUid);
         if (typeof noteSvg.getBBox === "function") {
           try {
@@ -313,7 +515,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     highlightSelectedNote(note: NoteEvent | null) {
       clearElementsByAttr("data-studio-selected-note", "data-selected-note");
       if (!note) return;
-      iterateMeasureGraphicalNotes([note], (matched, noteSvg) => {
+      iterateMeasureGraphicalNotes([note], true, (matched, noteSvg) => {
         noteSvg.setAttribute("data-selected-note", matched.noteUid);
         if (typeof noteSvg.getBBox === "function") {
           try {
@@ -471,35 +673,6 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
   };
 }
 
-const PITCH_NAME_SEMITONE: Record<string, number> = {
-  C: 0,
-  "C#": 1,
-  Db: 1,
-  D: 2,
-  "D#": 3,
-  Eb: 3,
-  E: 4,
-  F: 5,
-  "F#": 6,
-  Gb: 6,
-  G: 7,
-  "G#": 8,
-  Ab: 8,
-  A: 9,
-  "A#": 10,
-  Bb: 10,
-  B: 11,
-};
-
-function pitchLabelToMidi(label: string): number | null {
-  const match = label.match(/^([A-G][#b]?)(-?\d+)$/);
-  if (!match) return null;
-  const semi = PITCH_NAME_SEMITONE[match[1]];
-  if (semi === undefined) return null;
-  const octave = Number.parseInt(match[2], 10);
-  return (octave + 1) * 12 + semi;
-}
-
 export interface ScoreViewerProps {
   xmlString: string | null;
   noteEvents?: NoteEvent[];
@@ -590,16 +763,19 @@ export function ScoreViewer({
 
   useEffect(() => {
     if (!isRendered || !rendererRef.current) return;
+    rendererRef.current.setNoteEvents?.(noteEvents);
     rendererRef.current.markAnchoredNotes(anchoredNotes);
-  }, [isRendered, anchoredNotes]);
+  }, [isRendered, anchoredNotes, noteEvents]);
 
   useEffect(() => {
     if (!isRendered || !rendererRef.current) return;
+    rendererRef.current.setNoteEvents?.(noteEvents);
     rendererRef.current.markDiffNotes?.(diffNotes);
-  }, [isRendered, diffNotes]);
+  }, [isRendered, diffNotes, noteEvents]);
 
   useEffect(() => {
     if (!isRendered || !rendererRef.current) return;
+    rendererRef.current.setNoteEvents?.(noteEvents);
     const selectedNote =
       selectedNoteUid !== null
         ? noteEvents.find((n) => n.noteUid === selectedNoteUid) ?? null

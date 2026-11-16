@@ -25,6 +25,7 @@ describe("musicxml pipeline seam: parseMusicXml", () => {
     const doc = parseMusicXml(xmlText, { DOMParser });
 
     expect(doc.xmlDeclaration).toBe('<?xml version="1.0" encoding="UTF-8"?>');
+    expect(doc.measureCount).toBe(4);
     expect(doc.noteEvents).toHaveLength(18);
     expect(doc.onsetSlices).toHaveLength(18);
 
@@ -37,12 +38,61 @@ describe("musicxml pipeline seam: parseMusicXml", () => {
     const m2Midis = doc.noteEvents.slice(8, 13).map((n) => n.midi);
     expect(m2Midis).toEqual([72, 70, 69, 66, 78]);
 
-    // Measure 3 rest creates a phrase boundary before G5
+    // Measure 3 has a short quarter rest (0.6s < 1.5s, < 1 measure), so phraseId stays continuous
     const m1Phrase = doc.onsetSlices[0].phraseId;
     const m3FirstNoteSlice = doc.onsetSlices[13];
     expect(m3FirstNoteSlice.measureIndex).toBe(2);
     expect(m3FirstNoteSlice.notes[0].midi).toBe(79); // G5
-    expect(m3FirstNoteSlice.phraseId).toBeGreaterThan(m1Phrase);
+    expect(m3FirstNoteSlice.phraseId).toBe(m1Phrase);
+  });
+
+  it("splits phrases only on whole-measure+ rests, repeat/ending barlines, or >=1.5s un-held gaps (not short sub-measure rests)", () => {
+    const { DOMParser } = createJsdomDom();
+    // Fast tempo (240 BPM = 0.25s/quarter) so 2/4 measure = 0.5s (< 1.5s), isolating whole-measure rest vs sub-measure rest
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>2</divisions>
+        <time><beats>2</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <direction><sound tempo="240"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+    <measure number="2">
+      <note><rest measure="yes"/><duration>4</duration><voice>1</voice></note>
+    </measure>
+    <measure number="3">
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
+    </measure>
+    <measure number="4">
+      <note><rest/><duration>4</duration><voice>1</voice></note>
+    </measure>
+    <measure number="5">
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
+    </measure>
+    <measure number="6">
+      <direction><sound tempo="60"/></direction>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><rest/><duration>2</duration><voice>1</voice></note>
+    </measure>
+    <measure number="7">
+      <note><rest/><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    const phrases = doc.onsetSlices.map((s) => s.phraseId);
+    // C4 (0), after 1/8 rest (0.125s) D4 (0), after <rest measure="yes"/> (0.5s) E4 (1),
+    // after full-measure duration rest (0.5s) F4 (2), G4 (2), after 2.0s un-held gap across barline A4 (3)
+    expect(phrases).toEqual([0, 0, 1, 2, 2, 3]);
   });
 
   it("writes <notations><technical><fingering placement='above'> in XSD order without xmlns='', preserves header/DOCTYPE, and reloads cleanly", () => {
@@ -447,8 +497,10 @@ describe("musicxml pipeline seam: parseMusicXml", () => {
     const doc = parseMusicXml(anchorXml, { DOMParser });
     const [n1, n2, n3] = doc.noteEvents;
     expect(n1.anchorFinger).toBe(1);
+    expect(n1.anchorExitFinger).toBe(2);
     expect(n1.anchorRawPreserved).toBe(true);
     expect(n2.anchorFinger).toBeUndefined();
+    expect(n2.anchorExitFinger).toBeUndefined();
     expect(n2.anchorRawPreserved).toBe(false);
     expect(n3.anchorFinger).toBeUndefined();
     expect(n3.anchorRawPreserved).toBe(false);
