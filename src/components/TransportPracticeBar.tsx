@@ -24,9 +24,13 @@ export interface TransportPracticeBarProps {
   midiStatusLabel?: string;
   onOpenSettings?: () => void;
   metronomeEnabled?: boolean;
+  metronomePaused?: boolean;
   metronomeVolume?: number;
   countInEnabled?: boolean;
   activeMetronomeBeat?: MetronomeBeatEvent | null;
+  waitingModeEnabled?: boolean;
+  skipGraceNotes?: boolean;
+  midiLocalSound?: boolean;
   onPlay: () => void;
   onPlayFromSlice: () => void;
   onPause: () => void;
@@ -37,6 +41,9 @@ export interface TransportPracticeBarProps {
   onToggleMetronome?: () => void;
   onChangeMetronomeVolume?: (volume: number) => void;
   onToggleCountIn?: () => void;
+  onToggleWaitingMode?: () => void;
+  onToggleSkipGraceNotes?: () => void;
+  onToggleMidiLocalSound?: () => void;
 }
 
 const SPEED_STEP = 0.05;
@@ -82,9 +89,13 @@ export function TransportPracticeBar({
   midiStatusLabel,
   onOpenSettings,
   metronomeEnabled = false,
+  metronomePaused = false,
   metronomeVolume = 0.7,
   countInEnabled = false,
   activeMetronomeBeat = null,
+  waitingModeEnabled = false,
+  skipGraceNotes = false,
+  midiLocalSound = true,
   onPlay,
   onPlayFromSlice,
   onPause,
@@ -95,6 +106,9 @@ export function TransportPracticeBar({
   onToggleMetronome,
   onChangeMetronomeVolume,
   onToggleCountIn,
+  onToggleWaitingMode,
+  onToggleSkipGraceNotes,
+  onToggleMidiLocalSound,
 }: TransportPracticeBarProps) {
   const [editingBpm, setEditingBpm] = useState(false);
   const [bpmDraft, setBpmDraft] = useState("");
@@ -333,20 +347,25 @@ export function TransportPracticeBar({
 
             <span
               data-testid="metronome-beat-indicator"
+              data-metronome-paused={metronomeEnabled && metronomePaused ? "true" : "false"}
               aria-live="polite"
               className={`inline-flex min-w-[44px] items-center justify-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold transition ${
-                activeMetronomeBeat
-                  ? activeMetronomeBeat.isAccent
-                    ? "border-amber-500 bg-amber-100 text-amber-900"
-                    : "border-blue-400 bg-blue-100 text-blue-900"
-                  : "border-slate-200 bg-slate-50 text-slate-400"
+                metronomeEnabled && metronomePaused
+                  ? "border-amber-300 bg-amber-50 text-amber-700"
+                  : activeMetronomeBeat
+                    ? activeMetronomeBeat.isAccent
+                      ? "border-amber-500 bg-amber-100 text-amber-900"
+                      : "border-blue-400 bg-blue-100 text-blue-900"
+                    : "border-slate-200 bg-slate-50 text-slate-400"
               }`}
             >
-              {activeMetronomeBeat
-                ? `${activeMetronomeBeat.beatNumber}/${activeMetronomeBeat.totalBeats}`
-                : metronomeEnabled
-                  ? "Ready"
-                  : "Off"}
+              {metronomeEnabled && metronomePaused
+                ? "Paused"
+                : activeMetronomeBeat
+                  ? `${activeMetronomeBeat.beatNumber}/${activeMetronomeBeat.totalBeats}`
+                  : metronomeEnabled
+                    ? "Ready"
+                    : "Off"}
             </span>
 
             {activeMetronomeBeat?.isCountIn && (
@@ -358,6 +377,21 @@ export function TransportPracticeBar({
               </span>
             )}
           </div>
+
+          <button
+            type="button"
+            data-testid="waiting-mode-toggle-btn"
+            aria-pressed={waitingModeEnabled}
+            onClick={onToggleWaitingMode}
+            title="Pause at each Practice Step until matching pitches are played"
+            className={`rounded-md border px-2.5 py-1 text-xs font-medium transition ${
+              waitingModeEnabled
+                ? "border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700"
+                : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+            }`}
+          >
+            Waiting Mode
+          </button>
 
           <button
             type="button"
@@ -404,6 +438,40 @@ export function TransportPracticeBar({
                   aria-label="One-Measure Count-In"
                   checked={countInEnabled}
                   onChange={() => onToggleCountIn?.()}
+                  className="h-4 w-4 accent-blue-600"
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div>
+                  <div className="font-medium text-slate-900">Skip Grace Notes in Waiting Mode</div>
+                  <div className="text-[11px] text-slate-500">
+                    Auto-skip ornamental grace notes and wait only on main beats
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  data-testid="skip-grace-notes-toggle"
+                  aria-label="Skip Grace Notes in Waiting Mode"
+                  checked={skipGraceNotes}
+                  onChange={() => onToggleSkipGraceNotes?.()}
+                  className="h-4 w-4 accent-blue-600"
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div>
+                  <div className="font-medium text-slate-900">MIDI Local Sound</div>
+                  <div className="text-[11px] text-slate-500">
+                    Route live played notes to browser piano audio (off by default in Waiting Mode)
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  data-testid="midi-local-sound-toggle"
+                  aria-label="MIDI Local Sound"
+                  checked={midiLocalSound}
+                  onChange={() => onToggleMidiLocalSound?.()}
                   className="h-4 w-4 accent-blue-600"
                 />
               </div>

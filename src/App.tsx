@@ -5,10 +5,20 @@ import {
   type Finger,
   type Hand,
   type HandSpanProfile,
+  type PracticeMode,
+  type PracticeStep,
   type ScoreDocument,
   type SpanPreset,
   type TransitionCue,
+  type WaitingModeState,
 } from "./domain/types";
+import {
+  buildPracticeSteps,
+  createWaitingModeState,
+  doesNoteOnMatchPausedStep,
+  handleWaitingNoteOff,
+  handleWaitingNoteOn,
+} from "./practice/waitingMode";
 import type { MxlContainer } from "./musicxml/mxl";
 import { parseMusicXml } from "./musicxml/parser";
 import { exportScoreOutput, loadScoreInput, type ExportFormat } from "./musicxml/scoreSession";
@@ -47,6 +57,7 @@ import {
   type PianoAudioEngine,
 } from "./audio/pianoAudio";
 import {
+  buildMetronomeBeats,
   clampMetronomeVolume,
   type MetronomeBeatEvent,
 } from "./audio/metronome";
@@ -98,6 +109,10 @@ export default function App({
   const [metronomeVolume, setMetronomeVolume] = useState<number>(0.7);
   const [countInEnabled, setCountInEnabled] = useState<boolean>(false);
   const [activeMetronomeBeat, setActiveMetronomeBeat] = useState<MetronomeBeatEvent | null>(null);
+  const [practiceMode, setPracticeMode] = useState<PracticeMode>("both");
+  const [waitingModeEnabled, setWaitingModeEnabled] = useState<boolean>(false);
+  const [skipGraceNotes, setSkipGraceNotes] = useState<boolean>(false);
+  const [waitingState, setWaitingState] = useState<WaitingModeState>(() => createWaitingModeState(0));
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
   const [playbackFrame, setPlaybackFrame] = useState<PlaybackFrame | null>(null);
@@ -195,7 +210,10 @@ export default function App({
         next.add(event.midi);
         return next;
       });
-      if (event.source !== "midi" || midiLocalSoundRef.current) {
+      const shouldPlayLocalAudio = waitingModeEnabled
+        ? midiLocalSoundRef.current
+        : event.source !== "midi" || midiLocalSoundRef.current;
+      if (shouldPlayLocalAudio) {
         const audio = audioEngineRef.current;
         if (audio) {
           void audio.prepare().then(() => {
@@ -209,6 +227,9 @@ export default function App({
           });
         }
       }
+      if (waitingModeEnabled) {
+        processWaitingNoteOn(event.midi);
+      }
       return;
     }
 
@@ -219,6 +240,9 @@ export default function App({
         next.delete(event.midi);
         return next;
       });
+      if (waitingModeEnabled) {
+        setWaitingState((prev) => handleWaitingNoteOff(prev, event.midi));
+      }
       return;
     }
 
@@ -525,6 +549,100 @@ export default function App({
     return noteEvents.find((n) => n.noteUid === selectedNoteUid) ?? null;
   }, [selectedNoteUid, noteEvents]);
 
+  const effectivePracticeMode: PracticeMode = isSingleStaff
+    ? singleStaffHand === "LH"
+      ? "lh-only"
+      : "rh-only"
+    : practiceMode;
+
+  const practiceSteps = useMemo(
+    () =>
+      scoreDoc
+        ? buildPracticeSteps(scoreDoc, effectivePracticeMode, { skipGraceNotes })
+        : [],
+    [scoreDoc, effectivePracticeMode, skipGraceNotes]
+  );
+
+  const scoreMetronomeBeats = useMemo(
+    () => (scoreDoc ? buildMetronomeBeats(scoreDoc) : []),
+    [scoreDoc]
+  );
+
+  const totalScoreDurationSec = useMemo(() => {
+    if (!scoreDoc) return 0;
+    let maxEnd = 0;
+    for (const ev of scoreDoc.noteEvents) {
+      maxEnd = Math.max(maxEnd, ev.onsetSec + ev.durationSec);
+    }
+    return maxEnd;
+  }, [scoreDoc]);
+
+  const syncToPracticeStep = (step: PracticeStep | null, frameState: PlaybackState) => {
+    if (!step) {
+      setCursorTarget(null);
+      setPlaybackFrame(null);
+      return;
+    }
+    if (step.primarySliceId) {
+      useStudioStore.getState().selectSlice(step.primarySliceId);
+    }
+    setCursorTarget({
+      sliceId: step.primarySliceId ?? `step-${step.stepIndex}`,
+      measureIndex: step.measureIndex,
+      onsetTick: step.onsetTick,
+      isGrace: step.isGrace,
+      midis: step.expectedMidis,
+    });
+    setPlaybackFrame({
+      scoreSec: step.onsetSec,
+      totalDurationSec: totalScoreDurationSec,
+      state: frameState,
+    });
+  };
+
+  const playAccompanimentNotes = (step: PracticeStep) => {
+    if (effectivePracticeMode === "both" || step.accompanimentNotes.length === 0) return;
+    const audio = audioEngineRef.current;
+    if (!audio) return;
+    void audio.prepare().then(() => {
+      const ctx = audio.getAudioContext();
+      const now = ctx.currentTime;
+      for (const note of step.accompanimentNotes) {
+        audio.triggerNote({
+          midi: note.midi,
+          time: now,
+          duration: Math.max(0.08, note.durationSec / playbackSpeed),
+        });
+      }
+    });
+  };
+
+  const triggerStepAdvanceMetronome = (step: PracticeStep) => {
+    if (!metronomeEnabled || !playbackEngineRef.current) return;
+    const beat =
+      scoreMetronomeBeats.find(
+        (b) => b.measureIndex === step.measureIndex && Math.abs(b.tick - step.onsetTick) < 1e-4
+      ) ?? {
+        measureIndex: step.measureIndex,
+        beatIndex: 0,
+        beatNumber: 1,
+        totalBeats: scoreDoc?.measureTimelines[step.measureIndex]?.timeBeats ?? 4,
+        isAccent: false,
+        isCountIn: false,
+      };
+    playbackEngineRef.current.setMetronomePaused(false);
+    playbackEngineRef.current.triggerMetronomeBeat({
+      measureIndex: beat.measureIndex,
+      beatIndex: beat.beatIndex,
+      beatNumber: beat.beatNumber,
+      totalBeats: beat.totalBeats,
+      isAccent: beat.isAccent,
+      isCountIn: false,
+    });
+    // Re-pause metronome immediately while waiting on the next step
+    playbackEngineRef.current.setMetronomePaused(true);
+  };
+
   useEffect(() => {
     setWarningNavIndex(-1);
   }, [solveResult]);
@@ -554,6 +672,15 @@ export default function App({
       .getState()
       .selectMeasure(measureIndex, summary?.firstWarningSliceId ?? summary?.firstSliceId ?? null);
     setPopoverOpen(false);
+    if (waitingModeEnabled && practiceSteps.length > 0) {
+      const stepIdx = practiceSteps.findIndex((s) => s.measureIndex >= measureIndex);
+      const targetIdx = stepIdx >= 0 ? stepIdx : 0;
+      setWaitingState(createWaitingModeState(targetIdx));
+      if (playbackState !== "stopped") {
+        syncToPracticeStep(practiceSteps[targetIdx] ?? null, playbackState);
+      }
+      return;
+    }
     if (playbackState === "playing" && scoreDoc && playbackEngineRef.current) {
       const tl = scoreDoc.measureTimelines[measureIndex];
       if (tl) {
@@ -569,6 +696,13 @@ export default function App({
     setPopoverOpen(false);
     const firstSliceId = onsetSlices[0]?.sliceId ?? null;
     useStudioStore.getState().selectMeasure(0, firstSliceId);
+    if (waitingModeEnabled) {
+      setWaitingState(createWaitingModeState(0));
+      if (playbackState !== "stopped") {
+        syncToPracticeStep(practiceSteps[0] ?? null, playbackState);
+      }
+      return;
+    }
     if (playbackState === "playing" && playbackEngineRef.current) {
       void playbackEngineRef.current.play(scoreDoc, { restart: true });
     } else if (playbackState === "paused") {
@@ -581,7 +715,7 @@ export default function App({
   };
 
   const handleSelectNote = (noteUid: string, anchorRect?: PopoverAnchorRect) => {
-    if (playbackState !== "stopped") {
+    if (playbackState !== "stopped" || waitingModeEnabled) {
       setPopoverOpen(false);
       const clickedNote = noteEvents.find((n) => n.noteUid === noteUid);
       const targetSlice =
@@ -595,6 +729,19 @@ export default function App({
           : undefined);
       if (targetSlice) {
         useStudioStore.getState().selectSlice(targetSlice.sliceId);
+        if (waitingModeEnabled && practiceSteps.length > 0) {
+          const stepIdx = practiceSteps.findIndex(
+            (s) =>
+              s.primarySliceId === targetSlice.sliceId ||
+              (s.measureIndex === targetSlice.measureIndex && s.onsetTick >= targetSlice.onsetTick)
+          );
+          const targetIdx = stepIdx >= 0 ? stepIdx : 0;
+          setWaitingState(createWaitingModeState(targetIdx));
+          if (playbackState !== "stopped") {
+            syncToPracticeStep(practiceSteps[targetIdx] ?? null, playbackState);
+          }
+          return;
+        }
         if (playbackState === "playing" && scoreDoc && playbackEngineRef.current) {
           void playbackEngineRef.current.play(scoreDoc, { fromSliceId: targetSlice.sliceId });
         }
@@ -606,6 +753,39 @@ export default function App({
     setPopoverOpen(true);
   };
 
+  const processWaitingNoteOn = (midi: number) => {
+    if (!waitingModeEnabled || practiceSteps.length === 0) return;
+
+    let isPlayingNow = playbackState === "playing";
+    if (playbackState === "paused") {
+      const currentStep = practiceSteps[waitingState.currentStepIndex];
+      if (!doesNoteOnMatchPausedStep(currentStep, midi)) {
+        return;
+      }
+      isPlayingNow = true;
+      setPlaybackState("playing");
+      playbackEngineRef.current?.setMetronomePaused(true);
+      syncToPracticeStep(currentStep, "playing");
+    }
+
+    if (!isPlayingNow) return;
+
+    const result = handleWaitingNoteOn(waitingState, practiceSteps, midi);
+    setWaitingState(result.nextState);
+
+    if (result.completedStep) {
+      playAccompanimentNotes(result.completedStep);
+      if (result.advancedToStep) {
+        triggerStepAdvanceMetronome(result.advancedToStep);
+        syncToPracticeStep(result.advancedToStep, "playing");
+      } else if (result.completedScore) {
+        setPlaybackState("stopped");
+        playbackEngineRef.current?.setMetronomePaused(false);
+        setActiveMetronomeBeat(null);
+        syncToPracticeStep(null, "stopped");
+      }
+    }
+  };
   useEffect(() => {
     const activeQwertyMidis = new Map<string, number>();
 
@@ -697,6 +877,21 @@ export default function App({
   const handlePlay = () => {
     if (!scoreDoc || !playbackEngineRef.current) return;
     setPopoverOpen(false);
+    if (waitingModeEnabled) {
+      if (practiceSteps.length === 0) return;
+      let startIdx = 0;
+      if (playbackState === "paused" && waitingState.currentStepIndex < practiceSteps.length) {
+        startIdx = waitingState.currentStepIndex;
+      } else if (selectedMeasureIndex !== null && selectedMeasureIndex > 0) {
+        const idx = practiceSteps.findIndex((s) => s.measureIndex >= selectedMeasureIndex);
+        startIdx = idx >= 0 ? idx : 0;
+      }
+      setWaitingState(createWaitingModeState(startIdx));
+      setPlaybackState("playing");
+      playbackEngineRef.current.setMetronomePaused(true);
+      syncToPracticeStep(practiceSteps[startIdx] ?? null, "playing");
+      return;
+    }
     if (playbackState === "stopped" && selectedMeasureIndex !== null && selectedMeasureIndex > 0) {
       const tl = scoreDoc.measureTimelines[selectedMeasureIndex];
       if (tl) {
@@ -710,15 +905,84 @@ export default function App({
   const handlePlayFromSlice = () => {
     if (!scoreDoc || !selectedSliceId || !playbackEngineRef.current) return;
     setPopoverOpen(false);
+    if (waitingModeEnabled) {
+      if (practiceSteps.length === 0) return;
+      const slice = onsetSlices.find((s) => s.sliceId === selectedSliceId);
+      const idx = slice
+        ? practiceSteps.findIndex(
+            (s) =>
+              s.primarySliceId === slice.sliceId ||
+              (s.measureIndex === slice.measureIndex && s.onsetTick >= slice.onsetTick)
+          )
+        : 0;
+      const startIdx = idx >= 0 ? idx : 0;
+      setWaitingState(createWaitingModeState(startIdx));
+      setPlaybackState("playing");
+      playbackEngineRef.current.setMetronomePaused(true);
+      syncToPracticeStep(practiceSteps[startIdx] ?? null, "playing");
+      return;
+    }
     void playbackEngineRef.current.play(scoreDoc, { fromSliceId: selectedSliceId });
   };
 
   const handlePause = () => {
+    if (waitingModeEnabled) {
+      if (playbackState !== "playing") return;
+      setPlaybackState("paused");
+      playbackEngineRef.current?.setMetronomePaused(true);
+      syncToPracticeStep(practiceSteps[waitingState.currentStepIndex] ?? null, "paused");
+      return;
+    }
     playbackEngineRef.current?.pause();
   };
 
   const handleStop = () => {
     playbackEngineRef.current?.stop();
+    playbackEngineRef.current?.setMetronomePaused(false);
+    setWaitingState(createWaitingModeState(0));
+    if (waitingModeEnabled) {
+      setPlaybackState("stopped");
+      setCursorTarget(null);
+      setPlaybackFrame(null);
+      setActiveMetronomeBeat(null);
+    }
+  };
+
+  const handleToggleWaitingMode = () => {
+    setWaitingModeEnabled((prev) => {
+      const next = !prev;
+      if (next) {
+        // Keep MIDI Local Sound off by default whenever Waiting Mode is enabled
+        setMidiLocalSound(false);
+        setPopoverOpen(false);
+        if (playbackEngineRef.current?.getState() === "playing") {
+          playbackEngineRef.current.stop();
+          const currentIdx = selectedSliceId
+            ? Math.max(
+                0,
+                practiceSteps.findIndex((s) => s.primarySliceId === selectedSliceId)
+              )
+            : 0;
+          setWaitingState(createWaitingModeState(currentIdx));
+          setPlaybackState("playing");
+          playbackEngineRef.current.setMetronomePaused(true);
+          syncToPracticeStep(practiceSteps[currentIdx] ?? null, "playing");
+        }
+      } else {
+        playbackEngineRef.current?.setMetronomePaused(false);
+        setWaitingState(createWaitingModeState(0));
+      }
+      return next;
+    });
+  };
+
+  const handleToggleSkipGraceNotes = () => {
+    setSkipGraceNotes((prev) => !prev);
+    setWaitingState(createWaitingModeState(0));
+  };
+
+  const handleToggleMidiLocalSound = () => {
+    setMidiLocalSound((prev) => !prev);
   };
 
   const handleSpeedChange = (nextSpeed: SpeedMultiplier) => {
@@ -771,6 +1035,44 @@ export default function App({
                 onChange={handleFileChange}
               />
             </label>
+
+            <div
+              data-testid="practice-mode-selector"
+              className="inline-flex rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-xs font-medium"
+              role="group"
+              aria-label="Practice Mode"
+            >
+              {(
+                [
+                  { mode: "both" as const, label: "Both Hands" },
+                  { mode: "rh-only" as const, label: "Right Hand Only" },
+                  { mode: "lh-only" as const, label: "Left Hand Only" },
+                ] as const
+              ).map(({ mode, label }) => {
+                const isActive = effectivePracticeMode === mode;
+                const isLockedOut = isSingleStaff && !isActive;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    data-testid={`practice-mode-${mode}`}
+                    aria-pressed={isActive}
+                    disabled={isLockedOut}
+                    onClick={() => {
+                      setPracticeMode(mode);
+                      setWaitingState(createWaitingModeState(0));
+                    }}
+                    className={`rounded-md px-2.5 py-1.5 transition ${
+                      isActive
+                        ? "bg-white text-slate-900 shadow-xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    } disabled:cursor-not-allowed disabled:opacity-40`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
 
             {isSingleStaff && (
               <div
@@ -1116,9 +1418,13 @@ export default function App({
         midiStatusLabel={formatMidiStatusLabel(midiState)}
         onOpenSettings={() => setSettingsOpen(true)}
         metronomeEnabled={metronomeEnabled}
+        metronomePaused={waitingModeEnabled && playbackState === "playing"}
         metronomeVolume={metronomeVolume}
         countInEnabled={countInEnabled}
         activeMetronomeBeat={activeMetronomeBeat}
+        waitingModeEnabled={waitingModeEnabled}
+        skipGraceNotes={skipGraceNotes}
+        midiLocalSound={midiLocalSound}
         onPlay={handlePlay}
         onPlayFromSlice={handlePlayFromSlice}
         onPause={handlePause}
@@ -1129,6 +1435,9 @@ export default function App({
         onToggleMetronome={handleToggleMetronome}
         onChangeMetronomeVolume={handleChangeMetronomeVolume}
         onToggleCountIn={handleToggleCountIn}
+        onToggleWaitingMode={handleToggleWaitingMode}
+        onToggleSkipGraceNotes={handleToggleSkipGraceNotes}
+        onToggleMidiLocalSound={handleToggleMidiLocalSound}
       />
 
       {/* Bottom Pane: Full-Width 88-Key Physical Piano & Dual-Hand Posture Simulation */}
@@ -1139,6 +1448,9 @@ export default function App({
           selectedSliceId={selectedSliceId}
           handSpanProfile={handSpanProfile}
           playbackFrame={playbackFrame}
+          practiceMode={effectivePracticeMode}
+          wrongMidis={waitingState.wrongMidis}
+          hitMidis={waitingState.hitMidis}
           pressedMidis={pressedMidis}
           sustainPedalPressed={sustainPedalPressed}
           onSelectSlice={handleSelectSlice}
@@ -1173,10 +1485,12 @@ export default function App({
         baseBpm={scoreDoc?.tempoPoints[0]?.bpm ?? 100}
         countInEnabled={countInEnabled}
         metronomeVolume={metronomeVolume}
+        skipGraceNotes={skipGraceNotes}
         onSelectDevice={(deviceId) => midiControllerRef.current?.setSelectedDeviceId(deviceId)}
         onToggleLocalSound={setMidiLocalSound}
         onToggleCountIn={handleToggleCountIn}
         onChangeMetronomeVolume={handleChangeMetronomeVolume}
+        onToggleSkipGraceNotes={handleToggleSkipGraceNotes}
         onClose={() => setSettingsOpen(false)}
       />
     </div>

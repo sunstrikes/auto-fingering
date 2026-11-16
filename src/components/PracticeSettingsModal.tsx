@@ -9,10 +9,12 @@ export interface PracticeSettingsModalProps {
   baseBpm: number;
   countInEnabled: boolean;
   metronomeVolume: number;
+  skipGraceNotes?: boolean;
   onSelectDevice: (deviceId: string | null) => void;
   onToggleLocalSound: (enabled: boolean) => void;
   onToggleCountIn: () => void;
   onChangeMetronomeVolume: (volume: number) => void;
+  onToggleSkipGraceNotes?: () => void;
   onClose: () => void;
 }
 
@@ -58,10 +60,12 @@ export function PracticeSettingsModal({
   baseBpm,
   countInEnabled,
   metronomeVolume,
+  skipGraceNotes = false,
   onSelectDevice,
   onToggleLocalSound,
   onToggleCountIn,
   onChangeMetronomeVolume,
+  onToggleSkipGraceNotes,
   onClose,
 }: PracticeSettingsModalProps) {
   if (!open) return null;
@@ -191,6 +195,23 @@ export function PracticeSettingsModal({
               aria-label="One-Measure Count-In"
               checked={countInEnabled}
               onChange={onToggleCountIn}
+              className="h-4 w-4 accent-blue-600"
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div>
+              <div className="font-medium text-slate-900">Skip Grace Notes in Waiting Mode</div>
+              <div className="text-[11px] text-slate-500">
+                Auto-skip ornamental grace notes and wait only on main beats
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              data-testid="skip-grace-notes-toggle"
+              aria-label="Skip Grace Notes in Waiting Mode"
+              checked={skipGraceNotes}
+              onChange={() => onToggleSkipGraceNotes?.()}
               className="h-4 w-4 accent-blue-600"
             />
           </div>

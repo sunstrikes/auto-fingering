@@ -80,6 +80,9 @@ export interface PlaybackEngine {
   setSpeed(speed: PlaybackSpeed): void;
   isMetronomeEnabled(): boolean;
   setMetronomeEnabled(enabled: boolean): void;
+  isMetronomePaused(): boolean;
+  setMetronomePaused(paused: boolean): void;
+  triggerMetronomeBeat(event: MetronomeBeatEvent): void;
   getMetronomeVolume(): number;
   setMetronomeVolume(volume: number): void;
   isCountInEnabled(): boolean;
@@ -227,6 +230,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
   let state: PlaybackState = "stopped";
   let speed: PlaybackSpeed = 1.0;
   let metronomeEnabled = false;
+  let metronomePaused = false;
   let countInEnabled = false;
   let runToken = 0;
   let rafId: number | null = null;
@@ -293,7 +297,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
   };
 
   const scheduleUpcomingBeats = () => {
-    if (!metronomeEnabled) return;
+    if (!metronomeEnabled || metronomePaused) return;
     const ctx = deps.audioEngine.getAudioContext();
     const horizonScoreSec =
       anchorScoreSec + (ctx.currentTime + scheduleAheadRealSec - anchorAudioTime) * speed;
@@ -536,6 +540,33 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     },
 
     getMetronomeVolume: () => metronomeAudio.getVolume(),
+
+    isMetronomePaused: () => metronomePaused,
+
+    setMetronomePaused(paused: boolean) {
+      if (metronomePaused === paused) return;
+      metronomePaused = paused;
+      if (paused) {
+        metronomeAudio.cancelPending();
+      } else if (state === "playing" && metronomeEnabled) {
+        const currentScore = getCurrentScoreSec();
+        while (
+          nextScoreBeatIndex < activeScoreBeats.length &&
+          activeScoreBeats[nextScoreBeatIndex].scoreSec < currentScore - 1e-4
+        ) {
+          nextScoreBeatIndex += 1;
+        }
+        scheduleUpcomingBeats();
+        emitActiveMetronomeBeat();
+      }
+    },
+
+    triggerMetronomeBeat(event: MetronomeBeatEvent) {
+      if (!metronomeEnabled || metronomePaused) return;
+      const ctx = deps.audioEngine.getAudioContext();
+      metronomeAudio.triggerClick({ time: ctx.currentTime, isAccent: event.isAccent });
+      deps.onMetronomeBeat?.(event);
+    },
 
     setMetronomeVolume(volume: number) {
       metronomeAudio.setVolume(volume);

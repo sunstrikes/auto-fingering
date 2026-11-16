@@ -137,3 +137,24 @@ export interface ScoreDocument {
   timeSignaturePoints: TimeSignaturePoint[];
   measureTimelines: MeasureTimeline[];
 }
+
+export type PracticeMode = "both" | "rh-only" | "lh-only";
+
+export interface PracticeStep {
+  stepIndex: number;
+  onsetTick: number;
+  onsetSec: number;
+  measureIndex: number;
+  isGrace: boolean;
+  graceOrder?: number;
+  expectedMidis: number[];
+  expectedNotes: NoteEvent[];
+  accompanimentNotes: NoteEvent[];
+  primarySliceId: string | null;
+}
+
+export interface WaitingModeState {
+  currentStepIndex: number;
+  hitMidis: Set<number>;
+  wrongMidis: Set<number>;
+}
