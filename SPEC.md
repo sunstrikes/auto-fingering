@@ -1,9 +1,10 @@
 # 纯浏览器端 MusicXML 钢琴自动指法推导工具 — 产品与技术规格说明书 (SPEC)
 
-> **定位**：100% 运行于浏览器本地（TypeScript + Web Worker，零后端）的钢琴指法自动推导、手位预览、局部微调与无损导出工具。输入 `.musicxml` / `.xml` / `.mxl`，输出带有标准 W3C MusicXML `<notations><technical><fingering>` 标注的乐谱文件，可直接导入 `piano.cishoon.top`、MuseScore 等第三方工具。
+> **定位**：100% 运行于浏览器本地（TypeScript + Web Worker，零后端）的钢琴指法自动推导、手位模拟、交互练琴（节拍器 / Web MIDI 电钢琴等待模式 / A-B 循环）与无损导出工作室。输入 `.musicxml` / `.xml` / `.mxl`，输出带有标准 W3C MusicXML `<notations><technical><fingering>` 标注的乐谱文件，可直接导入 `piano.cishoon.top`、MuseScore 等第三方工具。
 >
 > **前置基准文档**：
 > - 领域词汇表：[GLOSSARY.md](./GLOSSARY.md)
+> - 架构决策记录：[ADR-0001 双手88键时间轴工作室](./docs/adr/0001-dual-hand-88key-timeline-studio.md)、[ADR-0002 交互练琴（节拍器/MIDI/等待模式/A-B循环）](./docs/adr/0002-interactive-practice-midi-waiting-loop.md)
 > - 回归测试样本集：[test-corpus/README.md](./test-corpus/README.md)（含真实样本 [05-realworld-wuchang.musicxml](./test-corpus/05-realworld-wuchang.musicxml)）
 > - 交互原型参考：[prototype-preview-ux.html](./.scratch/musicxml-auto-fingering/prototype-preview-ux.html)
 
@@ -12,13 +13,13 @@
 ## 1. 产品目标与范围边界
 
 ### 1.1 核心工作流
-1. **导入乐谱**：上传 `.musicxml` / `.xml` / `.mxl` 文件，主线程无损解析为 `Score Document` 并提取左右手 `Note Event` 与已有 `Finger Anchor`。
-2. **本地推导**：在 Web Worker 中运行基于 `Onset Slice` 的束搜索动态规划（Beam Search DP），依据用户选定的 `Hand Span Profile`（`S`/`M`/`L` 及偏好开关）求解全曲 `1–5` 指法，并反推稳定的 `Hand Position` 与 `Transition Cue`。
-3. **预览与微调**：采用「左谱右控工作室 + 上下分离双轨键盘」界面查看谱面指法、逐拍手位框与穿跨/大跨度预警；支持点击音符设置新 `Finger Anchor` 后局部重算、预览 `Before → After` 差异、切换「仅锁定单音」、一键撤销，以及基础版钢琴音色试听。
+1. **导入乐谱**：上传 `.musicxml` / `.xml` / `.mxl` 文件，主线程无损解析为 `Score Document` 并提取左右手 `Note Event`、已有 `Finger Anchor` 与 `Measure Timeline`（小节边界、拍号与速度曲线）。
+2. **本地推导**：在 Web Worker 中运行基于 `Onset Slice` 的束搜索动态规划（Beam Search DP），依据用户选定的 `Hand Span Profile`（`S`/`M`/`L` 及偏好开关）求解全曲 `1–5` 指法，并反推稳定的 `Hand Position`、`Hand Posture` 与 `Transition Cue`。
+3. **预览、微调与交互练琴**：采用「顶栏精简控制 + 滚动五线谱与内联指法气泡 + 走带练琴条 + 底部统一 88 键物理键盘与连续双手模拟」工作区；支持点击音符设锚点局部重算、一键撤销、连续倍速/BPM 调速、独立节拍器与 1 小节 `Count-In`、电钢琴 Web MIDI 接入、`Practice Mode`（双手 / 只练右手 / 只练左手）、`Waiting Mode` 逐拍等待练琴，以及整小节 `A-B Loop`。
 4. **无损导出**：在主线程精准回写 `<notations><technical><fingering>`，完整保留原谱排版与记谱信息，默认按原输入格式（支持互切 `.musicxml` / `.mxl`）下载。
 
 ### 1.2 明确不纳入范围（Out of Scope）
-- 复刻 `piano.cishoon.top` 练琴生态（ChordPro 和弦谱编辑与伴奏、简谱切换、歌词卡拉 OK、Waiting Mode、A-B 循环、Web MIDI 外设接入、云端账号与曲库同步）。
+- 复刻 `piano.cishoon.top` 其余周边生态（ChordPro 和弦谱编辑与伴奏、简谱切换、歌词卡拉 OK、符号解释模式、循环每遍自动加速、Web MIDI Out 自动演奏回传、云端账号与曲库同步）。
 - 三行及以上复杂总谱、四手联弹、非钢琴乐器指法、巴赫 3–4 声部严格赋格独立声部指法优化，以及 `<score-timewise>` 格式自动双向转写。
 - 依赖 Python 或远端服务器的后端指法推理。
 
@@ -112,6 +113,78 @@ export interface SolveResult {
   repairedAnchorUids: string[];    // 因物理互斥被局部软降级提示的原锚点
   solveTimeMs: number;
 }
+
+export interface TempoPoint {
+  tick: number;
+  bpm: number;
+}
+
+export interface TimeSignaturePoint {
+  measureIndex: number;
+  tick: number;
+  beats: number;
+  beatType: number;
+}
+
+export interface MeasureTimeline {
+  measureIndex: number;            // 0-based 小节序号
+  startTick: number;
+  endTick: number;
+  startSec: number;                // 原始速度下的小节起始秒数
+  endSec: number;
+  timeBeats: number;
+  timeBeatType: number;
+  isPickup: boolean;               // 弱起/不完整小节标记（<attributes>/<implicit> 或不足满小节）
+}
+
+export type PracticeMode = "both" | "rh-only" | "lh-only";
+
+export interface PracticeStep {
+  stepId: string;
+  measureIndex: number;
+  onsetTick: number;
+  onsetSec: number;
+  isGrace: boolean;
+  graceOrder?: number;
+  expectedMidis: number[];         // 当前练习手在本步必须命中的唯一 MIDI 集合（不含 Tie Continuation）
+  expectedNotes: NoteEvent[];      // 对应待弹音符（用于指法高亮与谱面光标）
+  accompanimentNotes: NoteEvent[]; // 单手练习模式下，另一只手随本步自动伴奏的音符
+}
+
+export interface LoopRange {
+  enabled: boolean;
+  startMeasureIndex: number;       // 0-based 闭区间起点 A（自动保证 <= endMeasureIndex）
+  endMeasureIndex: number;         // 0-based 闭区间终点 B
+  gapMeasure: boolean;             // 每遍间隔一小节空拍（Count-In）
+}
+
+export interface MetronomeConfig {
+  enabled: boolean;
+  countIn: boolean;                // 起播前先打 1 小节预备拍
+  volume: number;                  // 0.0 .. 1.0
+}
+
+export interface MidiDeviceInfo {
+  id: string;
+  name: string;
+  manufacturer?: string;
+  state: "connected" | "disconnected";
+}
+
+export interface WaitingState {
+  enabled: boolean;
+  skipGraceNotes: boolean;
+  currentStepIndex: number;
+  hitMidis: number[];              // 当前 Practice Step 已累计命中的 MIDI 音高
+  wrongMidis: number[];            // 当前按错的 MIDI 音高（88 键键盘标红提示）
+}
+
+export interface ScoreTimelineMetadata {
+  ticksPerQuarter: number;
+  tempoPoints: TempoPoint[];
+  timeSignaturePoints: TimeSignaturePoint[];
+  measureTimelines: MeasureTimeline[];
+}
 ```
 
 ---
@@ -123,9 +196,10 @@ export interface SolveResult {
    - `.musicxml` / `.xml`：UTF-8 文本解析，提取并缓存文件首行原始 XML 声明（如 `<?xml version="1.0" encoding="UTF-8" standalone="no"?>`）。
    - `.mxl`：主线程使用 `JSZip.loadAsync(buffer)` 读取 `META-INF/container.xml`，选取 `container > rootfiles > rootfile` 的第 1 个条目获取 `full-path`（去除可能的前导 `/`），加载主 XML 文本；保留原 `JSZip` 实例以便导出时原样留存附带资源。
    - 使用 `DOMParser.parseFromString(xmlText, "application/xml")` 解析，检查 `doc.querySelector("parsererror")`。若根元素为 `<score-timewise>` 或钢琴谱表总数 `> 2`，阻断并提示仅支持标准双谱表以下 `score-partwise`。
-2. **统一时间轴抽取（Score Order）**：
+2. **统一时间轴与 `Measure Timeline` 抽取（Score Order）**：
    - 按谱面线性小节顺序抽取每个物理 `<note>` 一次，**不物理展开反复次数**（避免同一 XML `<note>` 在第 1/2 遍产生冲突指法）。
-   - 追踪每个 `<measure>` 内 `<attributes><divisions>` 变更、`<backup>`、`<forward>` 与 `<sound tempo>`，将所有击键统一到全局最小公倍数基准刻度（或精确有理拍数）。
+   - 追踪每个 `<measure>` 内 `<attributes><divisions>`、`<time>` 拍号变更、`<backup>`、`<forward>` 与 `<sound tempo>`，将所有击键统一到全局最小公倍数基准刻度 `ticksPerQuarter`（即 `globalLcm`）。
+   - 在 `Score Document` 中保留 `ticksPerQuarter`、`tempoPoints`（缺省 `100` BPM）、`timeSignaturePoints` 与逐小节 `measureTimelines`（含每小节精确起止 tick/sec 及 `isPickup` 弱起判定），作为节拍器、调速显示、小节标尺与 `A-B Loop` 的唯一时间基准。
    - **休止符与乐句切分**：遇到整小节及以上休止符、`<repeat direction="backward"/>`、跳房子边界（`<ending>`），或单手无 `Held Finger` 且相邻击键间隔 `≥ 1.5s` 时，递增 `phraseId` 标记乐句弱边界（允许手位自然重置）。
 
 ### 3.2 `Hand Assignment` 与边缘音符规则
@@ -201,43 +275,86 @@ export interface SolveResult {
 ## 5. 前端架构、状态管理与 UI/UX 交互规范
 
 ### 5.1 技术栈与目录结构
-- **技术栈**：`Vite` + `React 18+` + `TypeScript (strict)` + `Tailwind CSS` + `opensheetmusicdisplay (OSMD)` + `Zustand` + `JSZip` + 原生 Web Worker（轻量强类型 RPC，新请求自动取消未完成旧计算）。
+- **技术栈**：`Vite` + `React 18+` + `TypeScript (strict)` + `Tailwind CSS` + `opensheetmusicdisplay (OSMD)` + `Zustand` + `JSZip` + Web Audio API + Web MIDI API + 原生 Web Worker（轻量强类型 RPC，新请求自动取消未完成旧计算）。
 - **目录规范**：
   ```text
   src/
-  ├── domain/        # 纯 TypeScript 领域模型与数据契约
-  ├── musicxml/      # ScoreDocument 抽取、XSD 无损回写、JSZip .mxl 打包（可注入 DOM）
+  ├── domain/        # 纯 TypeScript 领域模型与数据契约（含 PracticeStep / LoopRange 等纯投影构建）
+  ├── musicxml/      # ScoreDocument 抽取（含 MeasureTimeline）、XSD 无损回写、JSZip .mxl 打包（可注入 DOM）
   ├── solver/        # 纯 TS 束搜索 DP、代价矩阵、手位/过渡推导、局部锚点重算（零 DOM 依赖）
   ├── workers/       # Web Worker 入口与 RPC 封装
-  ├── audio/         # Web Audio 轻量钢琴试听引擎与时钟同步
-  ├── store/         # Zustand 全局状态、Undo/Redo 历史栈与 Before/After Diff 计算
-  └── components/    # 左谱右控 Studio UI（ScoreViewer, RiskGutter, InspectorPanel 等）
+  ├── audio/         # Web Audio 钢琴试听引擎、独立节拍器 Click 合成、播放/等待/A-B循环调度器
+  ├── midi/          # Web MIDI 热插拔监听、端口选择、软件键盘/QWERTY 模拟输入适配器
+  ├── store/         # Zustand 全局状态、Undo/Redo 历史栈、Diff 计算与练琴/MIDI/循环状态
+  └── components/    # 工作室 UI（ScoreViewer, NoteAnchorPopover, TransportPracticeBar, PracticeSettingsModal, UnifiedPiano88）
   tests/             # Vitest 单元测试与 test-corpus 回归门禁
   ```
 
-### 5.2 确认的 UI 布局与交互细节（源自原型 `B + C` 组合）
-1. **顶栏控制区**：文件导入/导出按钮（`.musicxml` / `.mxl` 切换）、单谱表左右手切换开关、`Hand Span Profile`（`S`/`M`/`L`）与 `avoidThumbOnBlack` / `preferStablePosition` 开关、「忽略原谱指法重算」开关、试听播放/倍速控制、撤销（Undo）。
-2. **左谱右控双栏主工作区（方案 B）**：
-   - **左侧（~65%）五线谱主视图**：OSMD 渲染 `<fingering>` 并支持点击拾音（`domToSvg` + `GetNearestNote`）；每小节左侧配**边缘风险指示条（Margin Risk Gutter）**，按该小节最高 `severity` 着红/黄色；发生局部重算后，谱面上受波及音符显示紫色 `Diff` 徽标，原始或手动锚点显示红色锚点标记。
-   - **右侧（~35% 吸顶检查面板 Sticky Inspector）**：
-     1. **拗手预警导航列表**：列出所有 `warn`/`danger` 预警（含小节号、手别、原因标签与代价值），点击直达并滚动高亮对应小节与拍点；
-     2. **选中音符编辑器 & `Before → After` 差异卡**：显示音高、手别与当前指法，提供 `1–5` 按钮（默认走 `phrase` 局部重算）、`仅锁单音 (pinOnly)` 快捷按钮与「移除锚点」；修改后展示逐音 `改前 → 改后` 变更清单并支持一键撤销。
-3. **底部双轨分离键盘预览区（方案 C）**：
-   - 拆分为**上方右手独立轨道（`Right Hand`）与下方左手独立轨道（`Left Hand`）**，彻底消除双手 `Hand Position` 区间框与 `Transition Cue` 弧线重叠遮挡；
-   - 每条轨道按三层渲染：**顶层** `Transition Cue` 方向弧线与技巧标签 → **中层** `Hand Position` 五指虚位区间框 → **底层**键帽实按 `1–5` 徽标及灰显 `Held Finger` / 延音占位标记。
+### 5.2 确认的 UI 布局与交互细节（[ADR-0001](./docs/adr/0001-dual-hand-88key-timeline-studio.md) + [ADR-0002](./docs/adr/0002-interactive-practice-midi-waiting-loop.md)）
+1. **精简顶栏控制区**：
+   - 文件导入/导出（`.musicxml` / `.mxl` 切换）、单谱表左右手切换开关、`Hand Span Profile`（`S`/`M`/`L`）与 `avoidThumbOnBlack` / `preferStablePosition` 开关、「忽略原谱指法重算」开关、`Undo/Redo`；
+   - **练习模式切换**：单一三态开关 **`双手` / `只练右手（左手自动伴奏）` / `只练左手（右手自动伴奏）`**（单谱表乐谱自动锁定为对应手别）；
+   - **练琴设置 & MIDI 状态入口**：显示当前电钢琴连接状态徽标（已连接设备数/名称或未连接/浏览器不支持提示），点击打开设置弹窗（`预备拍 Count-In`、`A-B 每遍间隔空拍`、`等待模式跳过倚音`、`MIDI 输入端口选择`、`MIDI 本地发声开关`、节拍器音量与电钢琴 USB 接线说明）。
+2. **上方全宽滚动五线谱区（`ScoreViewer` + 内联 `NoteAnchorPopover`）**：
+   - 默认单行横向滚动五线谱（可切换多行分页布局），顶部紧凑条展示求解状态、危险/警告计数与 `<` `>` 预警跳转、`Before → After` Diff 下拉；小节边栏或顶条显示 `Margin Risk Gutter` 红/黄风险标。
+   - **编辑 vs 练琴点击防冲突规则**：
+     - 处于**停止（`stopped`）且未处于等待选点/等待中**时，点击谱面音符弹出内联 `NoteAnchorPopover`（提供 `1–5` 指法按钮、`phrase`/`pinOnly` 切换、「移除锚点」与「从此拍试听」）；
+     - 处于**播放中或 `Waiting Mode` 激活状态**时，点击谱面小节或音符优先跳转练琴光标至对应位置（不弹出指法编辑气泡），防止练琴误触打断。
+3. **中部走带与练琴条（`TransportPracticeBar`）**：
+   - 位于五线谱与 88 键键盘之间，集中提供：
+     - **小节进度标尺（兼 A-B 选区条）**：显示各小节编号与当前光标小节，支持点击跳转；开启 A-B 循环选区时支持直接点选起点小节 A 与终点小节 B（或使用起止微调），并在标尺上高亮 `[A..B]` 区间。
+     - **播放走带**：`回到开头`、`播放 / 暂停`、`从选中拍起播`、`停止`；
+     - **速度控制**：快捷倍率档位（`0.25x / 0.5x / 0.6x / 0.75x / 0.9x / 1.0x / 1.25x / 1.5x`）、`-/+` 步进微调，以及可点击直接输入目标 BPM 的 `倍速 × ♩=BPM` 读数按钮；
+     - **练琴核心开关**：`节拍器`（附带当前拍点视觉闪烁指示）、`等待模式`、`A-B 循环`。
+4. **底部全宽 88 键物理键盘与连续双手模拟（`UnifiedPiano88`）**：
+   - 88 键共用物理键盘，左右手以靛蓝/青绿区分键帽高亮、上方双层 `Hand Position` / `Transition Cue` 通道，以及基于连续 `scoreSec` 驱动的半透明双手 `Hand Posture` SVG 骨骼模拟（含 `Held Finger` 锚定、穿跨指层级与提前量移位缓动）。
+   - 接入练琴扩展：在 `Practice Mode` 下对伴奏手视觉降噪突出当前练习手；`Waiting Mode` 下高亮当前待弹目标键并支持**错音红色警示键**与 **MIDI 实时按键按下反馈**；支持点击琴键或电脑键盘快捷键触发虚拟 MIDI `NoteOn`/`NoteOff` 以便无琴测试。
 
 ---
 
-## 6. 基础版钢琴音色试听与音画同步（`src/audio/`）
+## 6. 音频引擎、节拍器、Web MIDI 与交互练琴规范（`src/audio/` & `src/midi/`）
 
-- **音源加载**：首次点击「试听」时按需懒加载轻量钢琴采样（如 `smplr` 精简八度采样）；内置纯 Web Audio 泛音包络合成作为离线/网络异常零延迟兜底。
-- **调度与同步**：由 `AudioContext.currentTime` 精确调度播放队列，读取谱面 `<sound tempo>`（缺省 100 BPM），支持 `0.5x / 0.75x / 1.0x / 1.25x` 倍速与「从当前选中拍起播」；播放过程中通过 `requestAnimationFrame` 依据当前播放 `tick` 实时推进 OSMD `Cursor` 与双轨分离键盘高亮。
+### 6.1 钢琴音色与连续速度控制（`Speed Multiplier`）
+- **音源加载**：首次播放或试听时按需懒加载轻量钢琴采样（`smplr` 精简八度采样），内置纯 Web Audio 泛音包络合成作为离线/超时零延迟兜底。
+- **连续调速与等比缩放**：
+  - 支持 `0.25x–1.5x` 连续倍率、`0.25 / 0.5 / 0.6 / 0.75 / 0.9 / 1.0 / 1.25 / 1.5` 快捷档、`±0.05x`（或 `±5 BPM`）微调，以及点击 `♩=BPM` 直接输入目标基准拍速。
+  - 若乐谱含中途 `<sound tempo>` 变速，修改目标 BPM 时按 `speedMultiplier = targetBpm / initialBaseBpm` **等比缩放全曲所有速度段**，保留原谱相对快慢变化。
+  - **求解器隔离**：指法求解器（`src/solver/`）始终使用解析阶段按原谱 `<sound tempo>` 计算的 `NoteEvent.onsetSec`，不因练琴调速触发重算，保证指法方案稳定不跳变。
+
+### 6.2 独立节拍器与预备拍（`Metronome` & `Count-In`）
+- **拍点网格生成**：依据 `Score Document.measureTimelines` 与 `tempoPoints` 按小节生成强弱拍事件（每小节第 1 拍重音高音 Click，其余拍弱音低音 Click，支持中途变拍号如 `4/4 → 3/4 → 6/8`）；弱起小节（`isPickup`）仅调度落在该小节实际 tick 跨度内的拍点。
+- **独立音频路由**：使用独立 Web Audio 短脉冲合成节点（高/低木鱼音色）与增益控制，**不受 `PianoAudioEngine.stopAll()` 截断**。
+- **预备拍（`Count-In`）与等待联动**：
+  - 开启「预备拍」后，从任意小节起播前先按起始小节所在拍号与当前速度播放 **1 整小节**预备拍（屏幕显示倒数拍号），随后无缝进入正片播放。
+  - 节拍器支持独立开启，但在 **`Waiting Mode` 卡住等待用户输入期间自动暂停打拍**，避免节奏提示与等待卡顿产生节拍撕裂。
+
+### 6.3 电钢琴接入（`src/midi/`，Web MIDI API）
+- **连接与热插拔**：通过 `navigator.requestMIDIAccess()` 自动监听所有 MIDI 输入端口及 `onstatechange` 热插拔事件，默认合并所有已连接设备输入（亦可在设置弹窗中指定单一端口），并支持通过注入 Mock `MIDIAccess` 进行无硬件测试。若浏览器不支持 Web MIDI（如 Safari 或非安全上下文），在设置/状态徽标清晰提示降级原因并引导使用虚拟键盘模拟。
+- **事件解析**：规范处理标准 MIDI `NoteOn`（`0x90`, `velocity > 0`）、`NoteOff`（`0x80` 或 `velocity === 0` 的 `NoteOn`）及踏板 `CC 64`。
+- **MIDI 本地发声开关（`midiLocalSound`）**：
+  - 处于 `Waiting Mode` 时**默认关闭**本地发声，由电钢琴自带音源发声（避免浏览器合成音与电钢琴扬声器重叠回响）；
+  - 为无音源纯 MIDI 键盘或静音练琴用户提供设置内手动开启「MIDI 本地发声」，开启后实时将输入 `NoteOn`/`NoteOff` 路由至 `PianoAudioEngine`。
+- **软件模拟输入**：点击 88 键虚拟琴键或按下映射的电脑键盘按键可发出等价 `NoteOn`/`NoteOff` 事件驱动 `Waiting Mode` 判定。
+
+### 6.4 练习模式、等待模式（`Waiting Mode`）与 `A-B Loop`
+1. **跨手步进序列（`Practice Step`）构建**：
+   - 根据当前 `Practice Mode`（`both` / `rh-only` / `lh-only`），按 `(onsetTick, isGrace, graceOrder)` 合并同一拍上所有新击键音符：属于当前练习手的非 `Tie Continuation` 音符构成 `expectedMidis`；单手练习模式下，另一只手的同拍音符归入 `accompanimentNotes`。
+   - **倚音策略**：`Grace Note` 默认作为前置 `Practice Step` 依次等待弹奏；设置中开启「等待模式跳过倚音」时，自动跳过 `isGrace === true` 步进。
+2. **等待判定状态机（累计命中模型）**：
+   - 光标推进到下一个 `Practice Step` 时，若 `expectedMidis` 非空则暂停时间推进并高亮提示该步琴键与指法；伴奏手音符仅在当前步命中推进后触发演奏，**待弹手不由浏览器提前发声**。
+   - **累计命中（Rolled Chord 容错）**：在当前步等待期间，每收到属于 `expectedMidis` 的新 `NoteOn` 即将其加入 `hitMidis` 并持续保留（允许和弦各音先后落下、先落音短暂松开），当 `expectedMidis` 全部命中时立即推进至下一步并清空 `hitMidis` / `wrongMidis`。
+   - **防重复音穿透**：连续两步出现相同 MIDI 音高时，进入新一步会重置 `hitMidis`，必须收到**新的 `NoteOn`** 才算命中（不可靠上一步持续按住不放直接跳过）。
+   - **错音反馈**：收到不在 `expectedMidis` 中的 `NoteOn` 时，将该音记入 `wrongMidis` 并在 88 键键盘上**红色警示**（对应 `NoteOff` 或步进完成后清除），**不清空已正确命中的 `hitMidis`**。
+   - **暂停即弹起播**：在播放暂停且开启等待模式时，用户在电钢琴/模拟键盘上弹对当前光标所在 `Practice Step` 的音符后，自动从该步唤醒并继续等待模式练琴。
+3. **整小节 `A-B Loop`**：
+   - 仅按整小节闭区间 `[startMeasureIndex, endMeasureIndex]`（`0-based`，点选自动规范 `A ≤ B`）工作；
+   - 播放或等待模式完成 B 小节最后一个音符/小节末尾后：若关闭「每遍间隔空拍」，立即跳转回 A 小节首拍；若开启「每遍间隔一小节空拍（`gapMeasure`）」，先按 A 小节拍号打完 1 小节节拍器空拍再跳回 A 小节继续。
 
 ---
 
 ## 7. 测试策略与最终验收门禁（`tests/`）
 
-采用 `Vitest`（配合 `jsdom` / `@xmldom/xmldom`）覆盖 `src/solver` 与 `src/musicxml` 核心模块（**语句覆盖率 `≥ 85%`**），并将以下两条门禁固化为 CI/开发必过测试：
+采用 `Vitest`（配合 `jsdom` / `@xmldom/xmldom`）覆盖 `src/solver`、`src/musicxml`、`src/audio`、`src/midi`、`src/domain` 与核心交互状态（核心算法模块**语句覆盖率 `≥ 85%`**），并将以下门禁固化为 CI/开发必过测试：
 
 ### 7.1 算法与性能门禁（基于 `test-corpus/` 01–05）
 1. **硬约束零违规**：样本 `03` 及交互新增的 `Finger Anchor`（无自身物理冲突时）遵循率 `100%`；`Tie Continuation` 写回指法数为 `0`；同手同拍 `Onset Slice` 无非允许重指冲突。
@@ -252,3 +369,10 @@ export interface SolveResult {
 3. 样本 `03` 原有 `<fingering>` 与 `<lyric>`、样本 `05` 原始 `<direction>`（速度/力度记号）与 `<tied>`/`<slur>` 100% 无损保留。
 4. `Tie Continuation` 音符处不出现重复冗余指法。
 5. 导出 XML 通过元素子序与命名空间校验（无 `<notations>` 错排于 `<lyric>` 之后或多余 `xmlns=""`，`.mxl` 首文件为未压缩 `STORE` `mimetype`）。
+
+### 7.3 交互练琴（节拍器 / 调速 / Web MIDI / 等待模式 / A-B 循环）验收门禁
+1. **`MeasureTimeline` 与强弱拍**：含变拍号、中途 `<sound tempo>` 与弱起小节的乐谱可正确生成节拍网格，等比 BPM 缩放同步作用于播放器与节拍器，且不改变指法求解结果。
+2. **节拍器与预备拍**：独立音频调度在 `PianoAudioEngine.stopAll()` 时不被截断；开启 `Count-In` 时播放前准确触发 1 小节重弱拍；`Waiting Mode` 暂停等待期间节拍器停止发声。
+3. **Web MIDI 注入测试**：通过 Mock `MIDIAccess` 验证热插拔连接/断开状态同步、`NoteOn`/`NoteOff`（含 `velocity=0` 等价 `NoteOff`）解析，以及 `midiLocalSound` 开关在等待/非等待下的本地发声隔离。
+4. **`Waiting Mode` 状态机**：验证双手同拍跨手合并步进、和弦先后落键累计命中、重复同音防穿透、`Tie Continuation` 自动免弹、错音标红不清空已命中、倚音等待/跳过开关、单手 `Practice Mode` 伴奏手自动发声，以及暂停状态弹对当前音直接唤醒开播。
+5. **`A-B Loop` 门禁**：验证整小节 `[A..B]` 区间（含 `B < A` 自动规范）、直接跳回 A 小节与开启 `gapMeasure` 时插入 1 小节空拍再循环的行为，以及与 `Waiting Mode` 组合循环的连续性。

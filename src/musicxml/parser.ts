@@ -1,4 +1,13 @@
-import type { Finger, Hand, NoteEvent, OnsetSlice, ScoreDocument } from "../domain/types";
+import type {
+  Finger,
+  Hand,
+  MeasureTimeline,
+  NoteEvent,
+  OnsetSlice,
+  ScoreDocument,
+  TempoPoint,
+  TimeSignaturePoint,
+} from "../domain/types";
 import {
   findDirectChild as firstDirectChild,
   findDirectChildren as directChildrenByTag,
@@ -45,17 +54,8 @@ function extractXmlDeclaration(xmlText: string): string {
   return match ? match[0] : '<?xml version="1.0" encoding="UTF-8"?>';
 }
 
-interface TempoPoint {
-  tick: number;
-  bpm: number;
-}
-
-function buildTickToSecMapper(
-  tempoPoints: TempoPoint[],
-  ticksPerQuarter: number
-): (tick: number) => number {
+function normalizeTempoPoints(tempoPoints: TempoPoint[]): TempoPoint[] {
   const sorted = [...tempoPoints].sort((a, b) => a.tick - b.tick);
-  // Deduplicate same-tick points keeping the latest one encountered
   const timeline: TempoPoint[] = [{ tick: 0, bpm: 100 }];
   for (const pt of sorted) {
     const last = timeline[timeline.length - 1];
@@ -65,7 +65,28 @@ function buildTickToSecMapper(
       timeline.push({ tick: pt.tick, bpm: pt.bpm });
     }
   }
+  return timeline;
+}
 
+function normalizeTimeSignaturePoints(points: TimeSignaturePoint[]): TimeSignaturePoint[] {
+  const sorted = [...points].sort((a, b) => a.tick - b.tick);
+  const timeline: TimeSignaturePoint[] = [{ tick: 0, beats: 4, beatType: 4 }];
+  for (const pt of sorted) {
+    const last = timeline[timeline.length - 1];
+    if (pt.tick <= last.tick) {
+      last.beats = pt.beats;
+      last.beatType = pt.beatType;
+    } else {
+      timeline.push({ tick: pt.tick, beats: pt.beats, beatType: pt.beatType });
+    }
+  }
+  return timeline;
+}
+
+export function buildTickToSecMapper(
+  timeline: TempoPoint[],
+  ticksPerQuarter: number
+): (tick: number) => number {
   // Precompute cumulative seconds at each tempo change point
   const prefixSec: number[] = [0];
   for (let i = 1; i < timeline.length; i++) {
@@ -280,6 +301,14 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
 
   let noteSeq = 0;
   const tempoPoints: TempoPoint[] = [];
+  const timeSignaturePoints: TimeSignaturePoint[] = [];
+  const rawMeasureTimelines: Array<{
+    measureIndex: number;
+    startTick: number;
+    endTick: number;
+    timeBeats: number;
+    timeBeatType: number;
+  }> = [];
   const measureBoundaryBefore = new Set<number>();
 
   // Phrase tracking per hand across measures
@@ -355,6 +384,13 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
             ) {
               timeBeats = parsedBeats;
               timeBeatType = parsedBeatType;
+              if (partIndex === 0) {
+                timeSignaturePoints.push({
+                  tick: measureStartTick,
+                  beats: parsedBeats,
+                  beatType: parsedBeatType,
+                });
+              }
             }
           }
         } else if (tag === "barline") {
@@ -506,6 +542,20 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
         }
       }
 
+      if (partIndex === 0) {
+        rawMeasureTimelines.push({
+          measureIndex,
+          startTick: measureStartTick,
+          endTick: maxMeasureEndTick,
+          timeBeats,
+          timeBeatType,
+        });
+      } else if (rawMeasureTimelines[measureIndex]) {
+        if (maxMeasureEndTick > rawMeasureTimelines[measureIndex].endTick) {
+          rawMeasureTimelines[measureIndex].endTick = maxMeasureEndTick;
+        }
+      }
+
       measureStartTick = maxMeasureEndTick;
     });
   });
@@ -554,7 +604,24 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
     }
   }
 
-  const tickToSec = buildTickToSecMapper(tempoPoints, globalLcm);
+  const normalizedTempoPoints = normalizeTempoPoints(tempoPoints);
+  const normalizedTimeSigPoints = normalizeTimeSignaturePoints(timeSignaturePoints);
+  const tickToSec = buildTickToSecMapper(normalizedTempoPoints, globalLcm);
+
+  const measureTimelines: MeasureTimeline[] = rawMeasureTimelines.map((m) => {
+    const nominalTicks = (m.timeBeats * 4 * globalLcm) / m.timeBeatType;
+    const actualTicks = m.endTick - m.startTick;
+    return {
+      measureIndex: m.measureIndex,
+      startTick: m.startTick,
+      endTick: m.endTick,
+      startSec: tickToSec(m.startTick),
+      endSec: tickToSec(m.endTick),
+      timeBeats: m.timeBeats,
+      timeBeatType: m.timeBeatType,
+      isPickup: actualTicks > 0 && actualTicks < nominalTicks,
+    };
+  });
   const wholeRestBeforeByUid = new Map<string, boolean>();
   for (const item of rawNotes) {
     const startSec = tickToSec(item.event.onsetTick);
@@ -735,5 +802,9 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
     isSingleStaff,
     defaultSingleStaffHand,
     measureCount,
+    ticksPerQuarter: globalLcm,
+    tempoPoints: normalizedTempoPoints,
+    timeSignaturePoints: normalizedTimeSigPoints,
+    measureTimelines,
   };
 }

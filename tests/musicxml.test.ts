@@ -521,4 +521,79 @@ describe("musicxml pipeline seam: parseMusicXml", () => {
     expect(out).toContain('<fingering alternate="yes">2</fingering>');
     expect(out).toContain('<fingering placement="above">2</fingering>');
   });
+
+  it("extracts MeasureTimeline, tempoPoints, timeSignaturePoints, ticksPerQuarter, and isPickup across time/tempo changes", () => {
+    const { DOMParser } = createJsdomDom();
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list>
+    <score-part id="P1"><part-name>Piano</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="0" implicit="yes">
+      <attributes>
+        <divisions>2</divisions>
+        <time><beats>3</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <direction><sound tempo="120"/></direction>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>6</duration><voice>1</voice></note>
+    </measure>
+    <measure number="2">
+      <attributes>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <direction><sound tempo="60"/></direction>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    expect(doc.ticksPerQuarter).toBe(2);
+    expect(doc.tempoPoints).toEqual([
+      { tick: 0, bpm: 120 },
+      { tick: 8, bpm: 60 },
+    ]);
+    expect(doc.timeSignaturePoints).toEqual([
+      { tick: 0, beats: 3, beatType: 4 },
+      { tick: 8, beats: 4, beatType: 4 },
+    ]);
+    expect(doc.measureTimelines).toEqual([
+      {
+        measureIndex: 0,
+        startTick: 0,
+        endTick: 2,
+        startSec: 0,
+        endSec: 0.5,
+        timeBeats: 3,
+        timeBeatType: 4,
+        isPickup: true,
+      },
+      {
+        measureIndex: 1,
+        startTick: 2,
+        endTick: 8,
+        startSec: 0.5,
+        endSec: 2.0,
+        timeBeats: 3,
+        timeBeatType: 4,
+        isPickup: false,
+      },
+      {
+        measureIndex: 2,
+        startTick: 8,
+        endTick: 16,
+        startSec: 2.0,
+        endSec: 6.0,
+        timeBeats: 4,
+        timeBeatType: 4,
+        isPickup: false,
+      },
+    ]);
+  });
 });
