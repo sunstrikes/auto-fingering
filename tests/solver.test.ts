@@ -169,4 +169,177 @@ describe("solver seam: solveFingering", () => {
     expect(res05.handPositions.some((p) => p.hand === "RH")).toBe(true);
     expect(res05.handPositions.some((p) => p.hand === "LH")).toBe(true);
   });
+
+  it("enforces 100% anchor fidelity on 03-partial-fingering-hanon and uses phrase-level lookahead so far-ahead anchors are never pruned by beam search", () => {
+    const { DOMParser } = new JSDOM("").window;
+
+    // 1. 03-partial-fingering-hanon.musicxml: 100% anchor fidelity, zero repaired anchors or anchor-conflict
+    const xml03 = readFileSync(
+      resolve(__dirname, "../test-corpus/03-partial-fingering-hanon.musicxml"),
+      "utf-8"
+    );
+    const doc03 = parseMusicXml(xml03, { DOMParser });
+    const res03 = solveFingering(doc03.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+
+    expect(res03.repairedAnchorUids).toEqual([]);
+    expect(res03.transitionCues.some((c) => c.type === "anchor-conflict")).toBe(false);
+    for (const note of doc03.noteEvents) {
+      if (note.anchorFinger !== undefined) {
+        expect(res03.fingerByNoteUid[note.noteUid]).toBe(note.anchorFinger);
+      } else {
+        expect(res03.fingerByNoteUid[note.noteUid]).toBeGreaterThanOrEqual(1);
+        expect(res03.fingerByNoteUid[note.noteUid]).toBeLessThanOrEqual(5);
+      }
+    }
+
+    // 2. Far-ahead FingerAnchor lookahead with held note across 15 intermediate slices:
+    // C4 (unanchored, held for 16 sixteenth-note steps) + 15 intervals (F4, A4) / (G4, B4)
+    // followed at slice 15 by D4 anchored to finger 1 while C4 is still held.
+    // Without lookahead + state dedup, beam=28 fills up with C4=1 paths and steals finger 1 at slice 15.
+    const intermediateNotes = Array.from({ length: 15 }, (_, idx) => {
+      const low = idx % 2 === 0 ? "F" : "G";
+      const high = idx % 2 === 0 ? "A" : "B";
+      return `
+      <note><pitch><step>${low}</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>${high}</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>`;
+    }).join("");
+
+    const farAheadXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>16</duration><voice>2</voice>
+      </note>
+      <backup><duration>16</duration></backup>
+      ${intermediateNotes}
+      <note>
+        <pitch><step>D</step><octave>4</octave></pitch>
+        <duration>1</duration><voice>1</voice>
+        <notations><technical><fingering>1</fingering></technical></notations>
+      </note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const farDoc = parseMusicXml(farAheadXml, { DOMParser });
+    const farRes = solveFingering(farDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+
+    const heldC4 = farDoc.noteEvents.find((n) => n.midi === 60)!;
+    const anchoredD4 = farDoc.noteEvents.find((n) => n.midi === 62)!;
+
+    expect(farRes.fingerByNoteUid[anchoredD4.noteUid]).toBe(1);
+    // C4 must NOT be assigned finger 1 (which would cause a held-finger steal at D4=1)
+    expect(farRes.fingerByNoteUid[heldC4.noteUid]).not.toBe(1);
+    expect(farRes.repairedAnchorUids).toEqual([]);
+  });
+
+  it("detects physical anchor conflicts (duplicate chord finger, ordering inversion, impossible span, held-finger collision) with anchor-conflict cues and minimal repair", () => {
+    const { DOMParser } = new JSDOM("").window;
+
+    // 1. Simultaneous duplicate fingers in 3-note chord: C4=1, E4=1, G4=5 -> keeps C4=1 and G4=5, repairs only E4
+    const dupChordXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><notations><technical><fingering>1</fingering></technical></notations></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><notations><technical><fingering>1</fingering></technical></notations></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><notations><technical><fingering>5</fingering></technical></notations></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const dupDoc = parseMusicXml(dupChordXml, { DOMParser });
+    const dupRes = solveFingering(dupDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const [c4Dup, e4Dup, g4Dup] = dupDoc.noteEvents;
+    expect(dupRes.fingerByNoteUid[c4Dup.noteUid]).toBe(1);
+    expect(dupRes.fingerByNoteUid[g4Dup.noteUid]).toBe(5);
+    expect(dupRes.fingerByNoteUid[e4Dup.noteUid]).toBeGreaterThan(1);
+    expect(dupRes.fingerByNoteUid[e4Dup.noteUid]).toBeLessThan(5);
+    expect(dupRes.repairedAnchorUids).toEqual([e4Dup.noteUid]);
+    expect(dupRes.warnings.some((w) => w.type === "anchor-conflict" && w.severity === "danger")).toBe(true);
+
+    // 2. Ordering inversion in chord: RH C4=3, E4=2
+    const invXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><notations><technical><fingering>3</fingering></technical></notations></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><notations><technical><fingering>2</fingering></technical></notations></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const invDoc = parseMusicXml(invXml, { DOMParser });
+    const invRes = solveFingering(invDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const [c4Inv, e4Inv] = invDoc.noteEvents;
+    expect(invRes.fingerByNoteUid[c4Inv.noteUid]).toBeLessThan(invRes.fingerByNoteUid[e4Inv.noteUid]);
+    expect(invRes.repairedAnchorUids.length).toBe(1);
+    expect(invRes.warnings.some((w) => w.type === "anchor-conflict" && w.severity === "danger")).toBe(true);
+
+    // 3. Impossible span between anchored chord notes: C4=1, C5=2 (dist 7 > MAX_SPAN(1,2)=5.5) -> repairs to reachable
+    //    Whereas C4=1, F5=5 (outer 1-5 on 11th) is unreachable-span, NOT anchor-conflict
+    const spanConflictXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><notations><technical><fingering>1</fingering></technical></notations></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice><notations><technical><fingering>2</fingering></technical></notations></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const spanDoc = parseMusicXml(spanConflictXml, { DOMParser });
+    const spanRes = solveFingering(spanDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const [c4Span, c5Span] = spanDoc.noteEvents;
+    expect(spanRes.fingerByNoteUid[c4Span.noteUid]).toBe(1);
+    expect(spanRes.fingerByNoteUid[c5Span.noteUid]).toBeGreaterThanOrEqual(4);
+    expect(spanRes.repairedAnchorUids).toEqual([c5Span.noteUid]);
+    expect(spanRes.warnings.some((w) => w.type === "anchor-conflict" && w.severity === "danger")).toBe(true);
+
+    const outerEleventhXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><notations><technical><fingering>1</fingering></technical></notations></note>
+      <note><chord/><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice><notations><technical><fingering>5</fingering></technical></notations></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const eleventhDoc = parseMusicXml(outerEleventhXml, { DOMParser });
+    const eleventhRes = solveFingering(eleventhDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    expect(eleventhRes.repairedAnchorUids).toEqual([]);
+    expect(eleventhRes.warnings.some((w) => w.type === "anchor-conflict")).toBe(false);
+    expect(eleventhRes.warnings.some((w) => w.type === "unreachable-span")).toBe(true);
+
+    // 4. Held-finger anchor conflict across slices: C4 held (anchor=1) while E4 struck (anchor=1)
+    const heldConflictXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>2</voice><notations><technical><fingering>1</fingering></technical></notations></note>
+      <backup><duration>2</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><notations><technical><fingering>1</fingering></technical></notations></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const heldDoc = parseMusicXml(heldConflictXml, { DOMParser });
+    const heldRes = solveFingering(heldDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const c4Held = heldDoc.noteEvents.find((n) => n.midi === 60)!;
+    const e4Held = heldDoc.noteEvents.find((n) => n.midi === 64)!;
+    expect(heldRes.fingerByNoteUid[c4Held.noteUid]).not.toBe(heldRes.fingerByNoteUid[e4Held.noteUid]);
+    expect(heldRes.repairedAnchorUids).toHaveLength(1);
+    expect(heldRes.warnings.some((w) => w.type === "anchor-conflict" && w.severity === "danger")).toBe(true);
+  });
 });

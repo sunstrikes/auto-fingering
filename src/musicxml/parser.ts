@@ -152,9 +152,9 @@ function extractAnchorFinger(noteEl: Element): Finger | undefined {
         ) {
           continue;
         }
-        const match = (fingering.textContent ?? "").trim().match(/[1-5]/);
+        const match = (fingering.textContent ?? "").trim().match(/^([1-5])(?![0-9])/);
         if (match) {
-          return Number.parseInt(match[0], 10) as Finger;
+          return Number.parseInt(match[1], 10) as Finger;
         }
       }
     }

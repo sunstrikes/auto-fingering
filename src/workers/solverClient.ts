@@ -1,4 +1,4 @@
-import type { HandSpanProfile, OnsetSlice, SolveResult } from "../domain/types";
+import type { HandSpanProfile, OnsetSlice, SolveOptions, SolveResult } from "../domain/types";
 import type { WorkerRequest, WorkerResponse } from "./protocol";
 
 export class SolverCancelledError extends Error {
@@ -16,7 +16,11 @@ export interface WorkerLike {
 }
 
 export interface SolverClient {
-  solve(onsetSlices: OnsetSlice[], profile: HandSpanProfile): Promise<SolveResult>;
+  solve(
+    onsetSlices: OnsetSlice[],
+    profile: HandSpanProfile,
+    options?: SolveOptions
+  ): Promise<SolveResult>;
   dispose(): void;
 }
 
@@ -71,7 +75,11 @@ export function createSolverClient(
   }
 
   return {
-    solve(onsetSlices: OnsetSlice[], profile: HandSpanProfile): Promise<SolveResult> {
+    solve(
+      onsetSlices: OnsetSlice[],
+      profile: HandSpanProfile,
+      options?: SolveOptions
+    ): Promise<SolveResult> {
       if (activeRequest) {
         const superseded = activeRequest;
         activeRequest = null;
@@ -83,7 +91,12 @@ export function createSolverClient(
 
       return new Promise<SolveResult>((resolve, reject) => {
         activeRequest = { requestId, resolve, reject };
-        const req: WorkerRequest = { requestId, onsetSlices, profile };
+        const req: WorkerRequest = {
+          requestId,
+          onsetSlices,
+          profile,
+          ignoreExistingFingerings: options?.ignoreExistingFingerings,
+        };
         w.postMessage(req);
       });
     },

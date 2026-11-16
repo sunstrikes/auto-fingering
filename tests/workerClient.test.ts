@@ -75,4 +75,57 @@ describe("workers seam: createSolverClient", () => {
 
     client.dispose();
   });
+
+  it("forwards ignoreExistingFingerings through WorkerRequest to solveFingering and worker entrypoint", async () => {
+    const anchoredScale: OnsetSlice[] = [
+      {
+        ...makeDummySlice("s0", 60, 0),
+        notes: [
+          {
+            ...makeDummySlice("s0", 60, 0).notes[0],
+            anchorFinger: 5,
+            anchorRawPreserved: true,
+          },
+        ],
+      },
+      makeDummySlice("s1", 62, 1),
+      makeDummySlice("s2", 64, 2),
+    ];
+
+    const capturedRequests: WorkerRequest[] = [];
+    const fakeWorker: WorkerLike = {
+      onmessage: null,
+      onerror: null,
+      postMessage(msg: unknown) {
+        const req = msg as WorkerRequest;
+        capturedRequests.push(req);
+        queueMicrotask(() => {
+          const result = solveFingering(req.onsetSlices, req.profile, {
+            ignoreExistingFingerings: req.ignoreExistingFingerings,
+          });
+          const resp: WorkerResponse = {
+            requestId: req.requestId,
+            ok: true,
+            result,
+          };
+          fakeWorker.onmessage?.({ data: resp } as MessageEvent<WorkerResponse>);
+        });
+      },
+      terminate() {},
+    };
+
+    const client = createSolverClient(() => fakeWorker);
+
+    const withAnchors = await client.solve(anchoredScale, DEFAULT_HAND_SPAN_PROFILE);
+    expect(withAnchors.fingerByNoteUid["n-s0"]).toBe(5);
+    expect(capturedRequests[0].ignoreExistingFingerings).toBeUndefined();
+
+    const ignoringAnchors = await client.solve(anchoredScale, DEFAULT_HAND_SPAN_PROFILE, {
+      ignoreExistingFingerings: true,
+    });
+    expect(capturedRequests[1].ignoreExistingFingerings).toBe(true);
+    expect(ignoringAnchors.fingerByNoteUid["n-s0"]).toBe(1);
+
+    client.dispose();
+  });
 });

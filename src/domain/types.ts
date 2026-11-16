@@ -79,6 +79,10 @@ export interface HandPosition {
   maxMidi: number;
 }
 
+export interface SolveOptions {
+  ignoreExistingFingerings?: boolean;
+}
+
 export interface SolveResult {
   fingerByNoteUid: Record<string, Finger>;
   handPositions: HandPosition[];

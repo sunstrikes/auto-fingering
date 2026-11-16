@@ -209,9 +209,77 @@ describe("walking skeleton end-to-end headless pipeline", () => {
       )
     ).rejects.toThrow(/score-partwise/i);
 
-    // 4. App UI renders .musicxml/.xml/.mxl upload and export format controls
+    // 4. App UI renders .musicxml/.xml/.mxl upload, export format, and ignore-original-fingerings toggle
     const appHtml = renderToStaticMarkup(createElement(App));
     expect(appHtml).toContain('accept=".musicxml,.xml,.mxl"');
     expect(appHtml).toContain('aria-label="Export format"');
+    expect(appHtml).toMatch(/ignore original fingerings/i);
+  });
+
+  it("supports ignoreExistingFingerings toggle end-to-end: re-solves ignoring pre-existing anchors and replaces non-auxiliary <fingering> in exported XML", () => {
+    const { DOMParser, XMLSerializer } = new JSDOM("").window;
+
+    // Score with awkward/conflicting anchors + auxiliary substitution="yes" tag
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations>
+          <technical>
+            <fingering default-y="12" placement="above">5-4</fingering>
+            <fingering substitution="yes">2</fingering>
+          </technical>
+        </notations>
+      </note>
+      <note>
+        <chord/>
+        <pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations>
+          <technical>
+            <fingering placement="above">5</fingering>
+          </technical>
+        </notations>
+      </note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    // 1. Default mode: anchor-conflict emitted, original XML tags preserved 100% verbatim
+    const docDefault = parseMusicXml(xml, { DOMParser });
+    const resDefault = solveFingering(docDefault.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    expect(resDefault.warnings.some((w) => w.type === "anchor-conflict")).toBe(true);
+    expect(resDefault.repairedAnchorUids.length).toBeGreaterThan(0);
+
+    writeFingeringsToScore(docDefault, resDefault.fingerByNoteUid);
+    const outDefault = serializeScoreDocument(docDefault, { XMLSerializer });
+    expect(outDefault).toContain('<fingering default-y="12" placement="above">5-4</fingering>');
+    expect(outDefault).toContain('<fingering placement="above">5</fingering>');
+    expect(outDefault).toContain('<fingering substitution="yes">2</fingering>');
+
+    // 2. Ignore existing fingerings mode: zero anchor-conflict, chord solved naturally (C4=1, E4=3),
+    //    and non-auxiliary <fingering> values replaced in exported XML while preserving substitution="yes"
+    const docIgnore = parseMusicXml(xml, { DOMParser });
+    const resIgnore = solveFingering(docIgnore.onsetSlices, DEFAULT_HAND_SPAN_PROFILE, {
+      ignoreExistingFingerings: true,
+    });
+    expect(resIgnore.warnings.some((w) => w.type === "anchor-conflict")).toBe(false);
+    expect(resIgnore.repairedAnchorUids).toEqual([]);
+    const [c4, e4] = docIgnore.noteEvents;
+    expect(resIgnore.fingerByNoteUid[c4.noteUid]).toBe(1);
+    expect(resIgnore.fingerByNoteUid[e4.noteUid]).toBeLessThan(5);
+
+    writeFingeringsToScore(docIgnore, resIgnore.fingerByNoteUid, {
+      ignoreExistingFingerings: true,
+    });
+    const outIgnore = serializeScoreDocument(docIgnore, { XMLSerializer });
+    expect(outIgnore).not.toContain(">5-4<");
+    expect(outIgnore).toContain(`<fingering default-y="12" placement="above">${resIgnore.fingerByNoteUid[c4.noteUid]}</fingering>`);
+    expect(outIgnore).toContain(`<fingering placement="above">${resIgnore.fingerByNoteUid[e4.noteUid]}</fingering>`);
+    expect(outIgnore).toContain('<fingering substitution="yes">2</fingering>');
   });
 });

@@ -59,14 +59,20 @@ function insertNotationsInXsdOrder(xmlDoc: Document, noteEl: Element): Element {
   return notationsEl;
 }
 
+export interface WriteFingeringsOptions {
+  ignoreExistingFingerings?: boolean;
+}
+
 /**
  * Losslessly write deduced fingerings back into the ScoreDocument DOM tree
  * following MusicXML 4.0 XSD child ordering and namespace rules.
  */
 export function writeFingeringsToScore(
   scoreDoc: ScoreDocument,
-  fingerByNoteUid: Record<string, Finger>
+  fingerByNoteUid: Record<string, Finger>,
+  options?: WriteFingeringsOptions
 ): void {
+  const ignoreExisting = Boolean(options?.ignoreExistingFingerings);
   const { xmlDoc, noteElementsByUid, noteEvents } = scoreDoc;
 
   for (const event of noteEvents) {
@@ -77,7 +83,7 @@ export function writeFingeringsToScore(
     if (!finger) {
       continue;
     }
-    if (event.anchorRawPreserved && finger === event.anchorFinger) {
+    if (!ignoreExisting && event.anchorRawPreserved) {
       continue;
     }
     const noteEl = noteElementsByUid.get(event.noteUid);

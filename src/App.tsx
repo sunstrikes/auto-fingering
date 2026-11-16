@@ -16,6 +16,7 @@ export default function App() {
   const [exportFormat, setExportFormat] = useState<ExportFormat>("musicxml");
   const [isSingleStaff, setIsSingleStaff] = useState<boolean>(false);
   const [singleStaffHand, setSingleStaffHand] = useState<Hand>("RH");
+  const [ignoreExistingFingerings, setIgnoreExistingFingerings] = useState<boolean>(false);
   const [renderedXml, setRenderedXml] = useState<string | null>(null);
   const [solveResult, setSolveResult] = useState<SolveResult | null>(null);
   const [noteCount, setNoteCount] = useState<number>(0);
@@ -32,7 +33,8 @@ export default function App() {
   }, []);
 
   const solveAndRender = async (
-    scoreDoc: ReturnType<typeof parseMusicXml>
+    scoreDoc: ReturnType<typeof parseMusicXml>,
+    ignoreAnchors = ignoreExistingFingerings
   ) => {
     if (!solverClientRef.current) return;
     setScoreTitle(scoreDoc.title);
@@ -41,10 +43,13 @@ export default function App() {
 
     const result = await solverClientRef.current.solve(
       scoreDoc.onsetSlices,
-      DEFAULT_HAND_SPAN_PROFILE
+      DEFAULT_HAND_SPAN_PROFILE,
+      { ignoreExistingFingerings: ignoreAnchors }
     );
 
-    writeFingeringsToScore(scoreDoc, result.fingerByNoteUid);
+    writeFingeringsToScore(scoreDoc, result.fingerByNoteUid, {
+      ignoreExistingFingerings: ignoreAnchors,
+    });
     const exportedXml = serializeScoreDocument(scoreDoc);
 
     setSolveResult(result);
@@ -72,7 +77,7 @@ export default function App() {
       setIsSingleStaff(session.scoreDoc.isSingleStaff);
       setSingleStaffHand(session.scoreDoc.defaultSingleStaffHand);
 
-      await solveAndRender(session.scoreDoc);
+      await solveAndRender(session.scoreDoc, ignoreExistingFingerings);
     } catch (err) {
       if (err instanceof SolverCancelledError) {
         return;
@@ -95,7 +100,26 @@ export default function App() {
     setSingleStaffHand(nextHand);
     try {
       const scoreDoc = parseMusicXml(rawXmlText, { singleStaffHandOverride: nextHand });
-      await solveAndRender(scoreDoc);
+      await solveAndRender(scoreDoc, ignoreExistingFingerings);
+    } catch (err) {
+      if (err instanceof SolverCancelledError) {
+        return;
+      }
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+      setStatus("Error");
+    }
+  };
+
+  const handleIgnoreExistingToggle = async (nextIgnore: boolean) => {
+    setIgnoreExistingFingerings(nextIgnore);
+    if (!rawXmlText) return;
+    setErrorMsg(null);
+    try {
+      const scoreDoc = parseMusicXml(
+        rawXmlText,
+        isSingleStaff ? { singleStaffHandOverride: singleStaffHand } : undefined
+      );
+      await solveAndRender(scoreDoc, nextIgnore);
     } catch (err) {
       if (err instanceof SolverCancelledError) {
         return;
@@ -178,6 +202,16 @@ export default function App() {
               </div>
             )}
 
+            <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50">
+              <input
+                type="checkbox"
+                checked={ignoreExistingFingerings}
+                onChange={(e) => void handleIgnoreExistingToggle(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900"
+              />
+              Ignore original fingerings
+            </label>
+
             <div className="flex items-center gap-1.5">
               <select
                 aria-label="Export format"
@@ -222,6 +256,11 @@ export default function App() {
             {solveResult && (
               <span>
                 <strong>Transitions:</strong> {solveResult.transitionCues.length}
+              </span>
+            )}
+            {solveResult && solveResult.warnings.length > 0 && (
+              <span className="text-red-600">
+                <strong>Warnings:</strong> {solveResult.warnings.length}
               </span>
             )}
           </div>

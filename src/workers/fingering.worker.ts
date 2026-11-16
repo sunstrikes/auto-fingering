@@ -9,9 +9,9 @@ interface WorkerScopeLike {
 const workerScope = globalThis as unknown as WorkerScopeLike;
 
 workerScope.onmessage = (event: MessageEvent<WorkerRequest>) => {
-  const { requestId, onsetSlices, profile } = event.data;
+  const { requestId, onsetSlices, profile, ignoreExistingFingerings } = event.data;
   try {
-    const result = solveFingering(onsetSlices, profile);
+    const result = solveFingering(onsetSlices, profile, { ignoreExistingFingerings });
     workerScope.postMessage({ requestId, ok: true, result });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
