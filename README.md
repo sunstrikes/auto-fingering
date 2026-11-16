@@ -9,6 +9,7 @@
 [![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vite.dev/)
 [![Vitest](https://img.shields.io/badge/tested%20with-Vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev/)
 [![CI](https://github.com/sunstrikes/auto-fingering/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/sunstrikes/auto-fingering/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 ![MusicXML 钢琴自动指法工作室界面](docs/screenshots/studio.png)
 
@@ -147,4 +148,4 @@ test-corpus/       # 01–05 回归样本（含真实曲目《武昌》）
 
 ## 许可
 
-本仓库暂未添加开源许可证。如需复用、分发或商用，请先联系作者。
+本项目基于 [Apache License 2.0](LICENSE) 发布，版权归 sunstrikes 所有（见 [NOTICE](NOTICE)）。
