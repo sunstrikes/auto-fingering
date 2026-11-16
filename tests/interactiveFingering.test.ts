@@ -9,6 +9,7 @@ import { DEFAULT_HAND_SPAN_PROFILE } from "../src/domain/types";
 import {
   ScoreViewer,
   matchHitToNoteEvent,
+  matchMeasureGraphicalNotes,
   type ScoreRendererHandle,
 } from "../src/components/ScoreViewer";
 import { InspectorPanel } from "../src/components/InspectorPanel";
@@ -124,6 +125,7 @@ describe("Seam 3a: ScoreViewer OSMD note hit-testing & purple Diff badges", () =
       {
         noteUid: g4.noteUid,
         measureIndex: 0,
+        midi: 67,
         pitchLabel: "G4",
         hand: "RH" as const,
         before: 4 as const,
@@ -209,6 +211,7 @@ describe("Seam 3b: InspectorPanel note editor (1-5, pinOnly, remove, TieContinua
             {
               noteUid: e4.noteUid,
               measureIndex: 0,
+              midi: 64,
               pitchLabel: "E4",
               hand: "RH",
               before: 2,
@@ -450,5 +453,156 @@ describe("Seam 3c: Full App integration (OSMD click -> local resolve -> Diff/Key
     const tieNotice = mountedContainer.querySelector('[data-testid="tie-continuation-notice"]');
     expect(tieNotice).not.toBeNull();
     expect(tieNotice!.textContent).toContain("<fingering>");
+  });
+});
+
+describe("Seam 3d: OSMD SVG marker matching (staff, isTieStop exclusion, onset ordering)", () => {
+  it("distinguishes repeated pitches, cross-staff unisons, and excludes TieContinuation noteheads when marking anchors/diffs", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff>
+        <tie type="start"/>
+        <notations><technical><fingering>2</fingering></technical></notations>
+      </note>
+      <backup><duration>2</duration></backup>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>2</voice><staff>2</staff></note>
+    </measure>
+    <measure number="2">
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff>
+        <tie type="stop"/>
+      </note>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff>
+        <notations><technical><fingering>3</fingering></technical></notations>
+      </note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    const m0Staff1First = doc.noteEvents.find((n) => n.measureIndex === 0 && n.staff === 1 && n.onsetTick === 0)!;
+    const m0Staff1Second = doc.noteEvents.find((n) => n.measureIndex === 0 && n.staff === 1 && n.onsetTick === 1)!;
+    const m0Staff2 = doc.noteEvents.find((n) => n.measureIndex === 0 && n.staff === 2)!;
+    const m1TieStop = doc.noteEvents.find((n) => n.measureIndex === 1 && n.isTieStop)!;
+    const m1Struck = doc.noteEvents.find((n) => n.measureIndex === 1 && !n.isTieStop)!;
+
+    const svgDoc = document;
+    const mkSvg = (id: string) => {
+      const g = svgDoc.createElementNS("http://www.w3.org/2000/svg", "g") as unknown as SVGGElement;
+      g.setAttribute("data-id", id);
+      return g;
+    };
+
+    const gM0S1B0 = mkSvg("m0-s1-b0");
+    const gM0S1B1 = mkSvg("m0-s1-b1");
+    const gM0S2B0 = mkSvg("m0-s2-b0");
+    const gM1Tie = mkSvg("m1-tie");
+    const gM1Struck = mkSvg("m1-struck");
+
+    const mkGNote = (
+      id: string,
+      svg: SVGGElement,
+      midi: number,
+      staffId: number,
+      timestamp: number,
+      isTieCont = false,
+      startRef?: object
+    ) => {
+      const src: Record<string, unknown> = {
+        Pitch: { getHalfTone: () => midi - 12 },
+        ParentStaffEntry: {
+          ParentStaff: { IdInMusicSystem: staffId },
+          Timestamp: { RealValue: timestamp },
+        },
+        ParentVoiceEntry: { ParentStaff: { id: staffId } },
+      };
+      if (isTieCont) {
+        src.NoteTie = { StartNote: startRef ?? {} };
+      }
+      return {
+        id,
+        sourceNote: src,
+        getSVGGElement: () => svg,
+      };
+    };
+
+    const measureList = [
+      [
+        {
+          staffEntries: [
+            { relInMeasureTimestamp: { RealValue: 0 }, graphicalVoiceEntries: [{ notes: [mkGNote("n1", gM0S1B0, 60, 1, 0)] }] },
+            { relInMeasureTimestamp: { RealValue: 0.25 }, graphicalVoiceEntries: [{ notes: [mkGNote("n2", gM0S1B1, 60, 1, 0.25)] }] },
+          ],
+        },
+        {
+          staffEntries: [
+            { relInMeasureTimestamp: { RealValue: 0 }, graphicalVoiceEntries: [{ notes: [mkGNote("n3", gM0S2B0, 60, 2, 0)] }] },
+          ],
+        },
+      ],
+      [
+        {
+          staffEntries: [
+            { relInMeasureTimestamp: { RealValue: 0 }, graphicalVoiceEntries: [{ notes: [mkGNote("n4", gM1Tie, 60, 1, 0, true, {})] }] },
+            { relInMeasureTimestamp: { RealValue: 0.25 }, graphicalVoiceEntries: [{ notes: [mkGNote("n5", gM1Struck, 60, 1, 0.25, false)] }] },
+          ],
+        },
+      ],
+    ];
+
+    // 1. Anchors on 2nd C4 of m.1 (staff 1) and struck C4 of m.2 (skipping TieContinuation!)
+    const matchedAnchors: Array<{ uid: string; svgId: string | null }> = [];
+    matchMeasureGraphicalNotes(
+      measureList,
+      [
+        { noteUid: m0Staff1Second.noteUid, measureIndex: 0, midi: 60 },
+        { noteUid: m1Struck.noteUid, measureIndex: 1, midi: 60 },
+      ],
+      doc.noteEvents,
+      false,
+      (item, svg) => matchedAnchors.push({ uid: item.noteUid, svgId: svg.getAttribute("data-id") })
+    );
+    expect(matchedAnchors).toEqual([
+      { uid: m0Staff1Second.noteUid, svgId: "m0-s1-b1" },
+      { uid: m1Struck.noteUid, svgId: "m1-struck" },
+    ]);
+
+    // 2. Diff on staff 2 cross-staff unison in m.1 (even though staff 1 C4 appears earlier in measureList)
+    const matchedDiffs: Array<{ uid: string; svgId: string | null }> = [];
+    matchMeasureGraphicalNotes(
+      measureList,
+      [{ noteUid: m0Staff2.noteUid, measureIndex: 0, midi: 60 }],
+      doc.noteEvents,
+      false,
+      (item, svg) => matchedDiffs.push({ uid: item.noteUid, svgId: svg.getAttribute("data-id") })
+    );
+    expect(matchedDiffs).toEqual([{ uid: m0Staff2.noteUid, svgId: "m0-s2-b0" }]);
+
+    // 3. Selecting TieContinuation note highlights the TieContinuation SVG notehead (while selecting m0Staff1First picks b0)
+    const matchedSelected: Array<{ uid: string; svgId: string | null }> = [];
+    matchMeasureGraphicalNotes(
+      measureList,
+      [m0Staff1First, m1TieStop],
+      doc.noteEvents,
+      true,
+      (item, svg) => matchedSelected.push({ uid: item.noteUid, svgId: svg.getAttribute("data-id") })
+    );
+    expect(matchedSelected).toEqual([
+      { uid: m0Staff1First.noteUid, svgId: "m0-s1-b0" },
+      { uid: m1TieStop.noteUid, svgId: "m1-tie" },
+    ]);
   });
 });

@@ -7,14 +7,11 @@ import {
   type OnsetSlice,
   type SolveResult,
 } from "../domain/types";
-import { computeHorizontalCost, computeVerticalCost, generateSliceCandidates } from "./costModel";
 import { getMaxSpan, getSpanScale, toHandFramePos } from "./keyboard";
 import {
-  BEAM_WIDTH,
-  buildStateKeyAndLookaheadPenalty,
-  computeAnchorLookahead,
+  advanceBeamLayer,
   derivePositionsAndCues,
-  resolveCrossSliceAnchorConflicts,
+  prepareSegmentBeamContext,
   type BeamNode,
 } from "./solveFingering";
 
@@ -46,6 +43,7 @@ export function applyAnchorOverridesToSlices(
         return {
           ...note,
           anchorFinger: userOverride.finger,
+          anchorExitFinger: undefined,
           anchorMode: userOverride.mode,
           anchorRawPreserved: false,
         };
@@ -54,6 +52,7 @@ export function applyAnchorOverridesToSlices(
         return {
           ...note,
           anchorFinger: undefined,
+          anchorExitFinger: undefined,
           anchorMode: undefined,
           anchorRawPreserved: false,
         };
@@ -82,46 +81,6 @@ function slicePriorFingers(
     result.push(f);
   }
   return result;
-}
-
-function buildWindowHeldFingerMap(
-  slice: OnsetSlice,
-  windowSlices: OnsetSlice[],
-  layers: BeamNode[][],
-  localT: number,
-  pIdx: number,
-  priorFingerByNoteUid: Record<string, Finger>
-): Map<Finger, number> {
-  const heldMap = new Map<Finger, number>();
-  if (slice.heldNotes.length === 0) return heldMap;
-
-  const heldByUid = new Map<string, number>();
-  for (const h of slice.heldNotes) {
-    heldByUid.set(h.noteUid, h.midi);
-  }
-
-  let cursor = pIdx;
-  for (let back = localT - 1; back >= 0 && heldByUid.size > 0 && cursor >= 0; back--) {
-    const prevSlice = windowSlices[back];
-    const node = layers[back][cursor];
-    for (let i = 0; i < prevSlice.notes.length; i++) {
-      const uid = prevSlice.notes[i].noteUid;
-      const midi = heldByUid.get(uid);
-      if (midi !== undefined) {
-        heldMap.set(node.fingers[i], midi);
-        heldByUid.delete(uid);
-      }
-    }
-    cursor = node.prevIdx;
-  }
-
-  for (const [uid, midi] of heldByUid.entries()) {
-    const priorF = priorFingerByNoteUid[uid];
-    if (priorF) {
-      heldMap.set(priorF, midi);
-    }
-  }
-  return heldMap;
 }
 
 function resolvePinOnlyOverride(
@@ -192,28 +151,12 @@ function solveWindowWithConvergence(
 ): { endIdx: number; chosen: Finger[][]; convergedBackward: boolean } {
   const windowSlices = segment.slice(startIdx, maxIdx + 1);
   const localTargetIdx = targetSegIdx - startIdx;
-  const candidatesBySlice: Finger[][][] = [];
-  let hasAnyAnchors = false;
-
-  for (let i = 0; i < windowSlices.length; i++) {
-    const slice = windowSlices[i];
-    if (slice.notes.some((n) => n.anchorFinger !== undefined)) {
-      hasAnyAnchors = true;
-    }
-    const { candidates, hadAnchorConflict } = generateSliceCandidates(slice, false, profile);
-    if (hadAnchorConflict) {
-      anchorConflictSliceIds.add(slice.sliceId);
-    }
-    candidatesBySlice.push(candidates);
-  }
-
-  if (hasAnyAnchors) {
-    resolveCrossSliceAnchorConflicts(windowSlices, candidatesBySlice, profile, anchorConflictSliceIds);
-  }
-
-  const lookahead = hasAnyAnchors
-    ? computeAnchorLookahead(windowSlices, candidatesBySlice, profile)
-    : null;
+  const { candidatesBySlice, lookahead } = prepareSegmentBeamContext(
+    windowSlices,
+    profile,
+    anchorConflictSliceIds,
+    false
+  );
 
   const layers: BeamNode[][] = [];
   const prevPrefixSlice = startIdx > 0 ? segment[startIdx - 1] : null;
@@ -225,118 +168,22 @@ function solveWindowWithConvergence(
 
   for (let localT = 0; localT < windowSlices.length; localT++) {
     const slice = windowSlices[localT];
-    const candidates = candidatesBySlice[localT];
     const nextSliceHeldUids =
       localT + 1 < windowSlices.length
         ? windowSlices[localT + 1].heldNotes.map((h) => h.noteUid)
         : [];
-    const nextBeam: BeamNode[] = [];
-
-    if (localT === 0) {
-      const heldFingers = buildWindowHeldFingerMap(
-        slice,
-        windowSlices,
-        layers,
-        0,
-        -1,
-        priorFingerByNoteUid
-      );
-      for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
-        const cand = candidates[cIdx];
-        const vertCost = computeVerticalCost(slice, cand, heldFingers, profile).cost;
-        const horizCost =
-          prevPrefixSlice && prevPrefixFingers
-            ? computeHorizontalCost(prevPrefixSlice, prevPrefixFingers, slice, cand, profile).cost
-            : 0;
-        const totalCost = vertCost + horizCost;
-        const { stateKey, penalty } = buildStateKeyAndLookaheadPenalty(
-          slice,
-          cand,
-          windowSlices,
-          layers,
-          localT,
-          -1,
-          cIdx,
-          nextSliceHeldUids,
-          lookahead
-        );
-        nextBeam.push({
-          fingers: cand,
-          totalCost,
-          rankScore: totalCost + penalty,
-          prevIdx: -1,
-          stateKey,
-        });
-      }
-    } else {
-      const prevBeam = layers[localT - 1];
-      const prevSlice = windowSlices[localT - 1];
-      const cachedVertCosts =
-        slice.heldNotes.length === 0
-          ? candidates.map(
-              (cand) => computeVerticalCost(slice, cand, new Map<Finger, number>(), profile).cost
-            )
-          : null;
-
-      for (let pIdx = 0; pIdx < prevBeam.length; pIdx++) {
-        const prevNode = prevBeam[pIdx];
-        const heldFingers =
-          slice.heldNotes.length > 0
-            ? buildWindowHeldFingerMap(
-                slice,
-                windowSlices,
-                layers,
-                localT,
-                pIdx,
-                priorFingerByNoteUid
-              )
-            : null;
-
-        for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
-          const cand = candidates[cIdx];
-          const vertCost =
-            cachedVertCosts !== null
-              ? cachedVertCosts[cIdx]
-              : computeVerticalCost(slice, cand, heldFingers!, profile).cost;
-          const horiz = computeHorizontalCost(
-            prevSlice,
-            prevNode.fingers,
-            slice,
-            cand,
-            profile
-          );
-          const totalCost = prevNode.totalCost + vertCost + horiz.cost;
-          const { stateKey, penalty } = buildStateKeyAndLookaheadPenalty(
-            slice,
-            cand,
-            windowSlices,
-            layers,
-            localT,
-            pIdx,
-            cIdx,
-            nextSliceHeldUids,
-            lookahead
-          );
-          nextBeam.push({
-            fingers: cand,
-            totalCost,
-            rankScore: totalCost + penalty,
-            prevIdx: pIdx,
-            stateKey,
-          });
-        }
-      }
-    }
-
-    nextBeam.sort((a, b) => a.rankScore - b.rankScore || a.totalCost - b.totalCost);
-    const deduped: BeamNode[] = [];
-    const seenStates = new Set<string>();
-    for (const node of nextBeam) {
-      if (seenStates.has(node.stateKey)) continue;
-      seenStates.add(node.stateKey);
-      deduped.push(node);
-      if (deduped.length >= BEAM_WIDTH) break;
-    }
+    const deduped = advanceBeamLayer({
+      slices: windowSlices,
+      layers,
+      t: localT,
+      candidates: candidatesBySlice[localT],
+      nextSliceHeldUids,
+      lookahead,
+      profile,
+      priorFingerByNoteUid,
+      prevPrefixSlice,
+      prevPrefixFingers,
+    });
     layers.push(deduped);
 
     // Check forward convergence with prior solution after passing target slice
@@ -508,11 +355,18 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
     }
   }
 
-  const { handPositions, transitionCues } = derivePositionsAndCues(
+  const effectiveSlices = applyAnchorOverridesToSlices(
     input.onsetSlices,
+    input.anchors,
+    input.removedRawAnchorUids ?? [],
+    ignoreExistingFingerings
+  );
+  const { handPositions, transitionCues } = derivePositionsAndCues(
+    effectiveSlices,
     fingerByNoteUid,
     profile,
-    anchorConflictSliceIds
+    anchorConflictSliceIds,
+    ignoreExistingFingerings
   );
   const warnings = transitionCues.filter((c) => c.severity === "warn" || c.severity === "danger");
   const end = typeof performance !== "undefined" ? performance.now() : Date.now();

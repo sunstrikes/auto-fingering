@@ -1,3 +1,4 @@
+import { computeTieChainEndByRoot } from "../domain/tieUtils";
 import type {
   Finger,
   Hand,
@@ -7,7 +8,7 @@ import type {
   SolveResult,
   TransitionCue,
 } from "../domain/types";
-import { isBlackKey, whiteKeyIndex } from "../solver/keyboard";
+import { isBlackKey, midiToPitchLabel, whiteKeyIndex } from "../solver/keyboard";
 
 export interface KeyFingerBadge {
   noteUid: string;
@@ -50,17 +51,7 @@ export interface DualTrackState {
   lh: HandTrackState;
 }
 
-const NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
 const WHITE_STEP_SEMITONES = [0, 2, 4, 5, 7, 9, 11];
-
-/**
- * Formats a MIDI pitch (21..108) into a concise note label such as "C4" or "Gb5".
- */
-export function midiToNoteName(midi: number): string {
-  const pc = ((midi % 12) + 12) % 12;
-  const octave = Math.floor(midi / 12) - 1;
-  return `${NOTE_NAMES[pc]}${octave}`;
-}
 
 /**
  * Converts a white-key index from `whiteKeyIndex()` back into its MIDI pitch.
@@ -138,23 +129,6 @@ function computeTrackMidiRange(
   if (isBlackKey(maxMidi) && maxMidi < 108) maxMidi += 1;
 
   return { startMidi: minMidi, endMidi: maxMidi };
-}
-
-function computeChainEndTicks(scoreDoc: ScoreDocument): Map<string, number> {
-  const endByRoot = new Map<string, number>();
-  for (const ev of scoreDoc.noteEvents) {
-    if (ev.isGrace) continue;
-    const evEnd = ev.onsetTick + ev.durationTick;
-    if (!ev.isTieStop) {
-      endByRoot.set(ev.noteUid, Math.max(endByRoot.get(ev.noteUid) ?? 0, evEnd));
-    } else if (ev.tieChainRootUid) {
-      endByRoot.set(
-        ev.tieChainRootUid,
-        Math.max(endByRoot.get(ev.tieChainRootUid) ?? 0, evEnd)
-      );
-    }
-  }
-  return endByRoot;
 }
 
 function findSustainingHandSliceId(
@@ -401,7 +375,7 @@ export function projectDualTrackState(
   const sliceIndexById = new Map<string, number>();
   slices.forEach((s, i) => sliceIndexById.set(s.sliceId, i));
   const repairedSet = new Set(solveResult.repairedAnchorUids);
-  const chainEndByRoot = computeChainEndTicks(scoreDoc);
+  const chainEndByRoot = computeTieChainEndByRoot(scoreDoc.noteEvents, "tick");
 
   return {
     selectedSlice,
@@ -428,4 +402,4 @@ export function projectDualTrackState(
   };
 }
 
-export { whiteKeyIndex };
+export { midiToPitchLabel as midiToNoteName, whiteKeyIndex };

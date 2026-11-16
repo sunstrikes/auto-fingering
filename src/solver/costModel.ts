@@ -88,6 +88,17 @@ function collectAnchoredSubsets(
   }
 }
 
+function buildOuterPriorityChordTuple(count: number): Finger[] {
+  const tuple = new Array<Finger>(count);
+  tuple[0] = 1;
+  tuple[count - 1] = 5;
+  const innerCount = count - 2;
+  for (let i = 0; i < innerCount; i++) {
+    tuple[i + 1] = (2 + Math.floor((i * 3) / innerCount)) as Finger;
+  }
+  return tuple;
+}
+
 /**
  * Returns candidate finger tuples aligned to `slice.notes` (which are sorted by
  * midi ascending). In LH frame, fingers run descending (thumb=1 on highest note).
@@ -124,18 +135,12 @@ export function generateSliceCandidates(
       baseTuples.push([1, 2, 3, 4, 5, 5]);
     }
     if (baseTuples.length === 0) {
-      // >5-note chord without adjacent 2nds: prioritize outer 1/5 voices, keep all notes assigned
-      baseTuples = [
-        [1, 1, 2, 3, 4, 5],
-        [1, 2, 3, 4, 5, 5],
-      ];
+      // >5-note chord without adjacent 2nds: prioritize outer 1/5 voices and distribute inner notes across 2..4
+      baseTuples = [buildOuterPriorityChordTuple(k)];
     }
   } else {
-    // 7+ note fallback: assign [1, 2, 3, 4, 5, ..., 5] in hand-frame order
-    const fallback: Finger[] = orderedIndices.map((_, i) =>
-      (Math.min(5, i + 1) as Finger)
-    );
-    baseTuples = [fallback];
+    // 7+ note fallback: prioritize outer 1/5 voices and distribute inner notes across 2..4 for arpeggiation/splitting
+    baseTuples = [buildOuterPriorityChordTuple(k)];
   }
 
   const toSliceOrder = (handFrameTuple: Finger[]): Finger[] => {
@@ -346,16 +351,43 @@ export function computeVerticalCost(
   return { cost, hasUnreachableSpan, hasWideStretch };
 }
 
+/**
+ * Resolve effective departure fingers when transitioning out of a slice,
+ * honoring hyphenated `anchorExitFinger` unless anchors are ignored or overridden.
+ */
+export function resolveDepartureFingers(
+  slice: OnsetSlice,
+  fingers: Finger[],
+  ignoreAnchors = false
+): Finger[] {
+  if (ignoreAnchors) return fingers;
+  let changed = false;
+  const resolved = fingers.map((f, idx) => {
+    const note = slice.notes[idx];
+    if (
+      note.anchorExitFinger !== undefined &&
+      (note.anchorFinger === undefined || f === note.anchorFinger)
+    ) {
+      changed = true;
+      return note.anchorExitFinger;
+    }
+    return f;
+  });
+  return changed ? resolved : fingers;
+}
+
 export function computeHorizontalCost(
   prevSlice: OnsetSlice,
   prevFingers: Finger[],
   currSlice: OnsetSlice,
   currFingers: Finger[],
-  profile: HandSpanProfile
+  profile: HandSpanProfile,
+  ignoreAnchors = false
 ): { cost: number; hasWideStretch: boolean; hasUnreachableSpan: boolean } {
   const scale = getSpanScale(profile);
   const dt = Math.max(0.05, currSlice.onsetSec - prevSlice.onsetSec);
   const hand = currSlice.hand;
+  const effectivePrevFingers = resolveDepartureFingers(prevSlice, prevFingers, ignoreAnchors);
 
   let cost = 0;
   let hasWideStretch = false;
@@ -363,7 +395,7 @@ export function computeHorizontalCost(
 
   // Use outer/primary note representatives for monophonic or chord-to-chord transition
   const prevNote = prevSlice.notes[0];
-  const prevFinger = prevFingers[0];
+  const prevFinger = effectivePrevFingers[0];
   const currNote = currSlice.notes[0];
   const currFinger = currFingers[0];
 
@@ -436,14 +468,14 @@ export function computeHorizontalCost(
     for (let i = 0; i < prevSlice.notes.length; i++) {
       for (let j = 0; j < currSlice.notes.length; j++) {
         if (
-          prevFingers[i] === currFingers[j] &&
+          effectivePrevFingers[i] === currFingers[j] &&
           prevSlice.notes[i].midi !== currSlice.notes[j].midi
         ) {
           const dist = Math.abs(
             toHandFramePos(currSlice.notes[j].midi, hand) -
               toHandFramePos(prevSlice.notes[i].midi, hand)
           );
-          if (bothChords && prevFingers[i] === 1) {
+          if (bothChords && effectivePrevFingers[i] === 1) {
             cost += 1.2 + 0.3 * dist;
           } else {
             cost += 4.0 + 1.0 * dist;
@@ -454,7 +486,7 @@ export function computeHorizontalCost(
   }
 
   // Hand root shift & travel velocity
-  const prevRoot = computeHandRoot(prevSlice.notes, prevFingers, hand);
+  const prevRoot = computeHandRoot(prevSlice.notes, effectivePrevFingers, hand);
   const currRoot = computeHandRoot(currSlice.notes, currFingers, hand);
   const rootShift = Math.abs(currRoot - prevRoot);
 

@@ -37,6 +37,7 @@ export interface NoteEvent {
   isTieStart: boolean;
   tieChainRootUid?: string;
   anchorFinger?: Finger;
+  anchorExitFinger?: Finger;
   anchorRawPreserved?: boolean;
   anchorMode?: "phrase" | "pinOnly";
 }
@@ -103,8 +104,10 @@ export interface ScoreDocument {
   xmlDoc: Document;
   xmlDeclaration: string;
   noteElementsByUid: Map<string, Element>;
+  originalFingeringByUid?: Map<string, Element>;
   noteEvents: NoteEvent[];
   onsetSlices: OnsetSlice[];
   isSingleStaff: boolean;
   defaultSingleStaffHand: Hand;
+  measureCount: number;
 }
