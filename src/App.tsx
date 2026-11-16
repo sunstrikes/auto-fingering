@@ -888,6 +888,7 @@ export default function App({
           scoreDoc={scoreDoc}
           solveResult={solveResult}
           selectedSliceId={selectedSliceId}
+          handSpanProfile={handSpanProfile}
           playbackFrame={playbackFrame}
           onSelectSlice={handleSelectSlice}
           onAuditionMidi={handleAuditionMidi}

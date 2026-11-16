@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PlaybackFrame } from "../audio/playbackEngine";
-import type {
-  Finger,
-  Hand,
-  ScoreDocument,
-  SolveResult,
-  TransitionCue,
+import {
+  DEFAULT_HAND_SPAN_PROFILE,
+  type Finger,
+  type Hand,
+  type HandSpanProfile,
+  type ScoreDocument,
+  type SolveResult,
+  type TransitionCue,
 } from "../domain/types";
 import { isBlackKey, midiToPitchLabel } from "../solver/keyboard";
 import { whiteKeyIndexToMidi } from "./dualTrackModel";
@@ -36,6 +38,7 @@ export interface UnifiedPiano88Props {
   scoreDoc: ScoreDocument | null;
   solveResult: SolveResult | null;
   selectedSliceId: string | null;
+  handSpanProfile?: HandSpanProfile;
   playbackFrame?: PlaybackFrame | null;
   onSelectSlice?: (sliceId: string) => void;
   onAuditionMidi?: (midi: number) => void;
@@ -394,6 +397,7 @@ export function UnifiedPiano88({
   scoreDoc,
   solveResult,
   selectedSliceId,
+  handSpanProfile = DEFAULT_HAND_SPAN_PROFILE,
   playbackFrame = null,
   onSelectSlice,
   onAuditionMidi,
@@ -402,15 +406,15 @@ export function UnifiedPiano88({
 
   const postureIndex = useMemo(() => {
     if (!scoreDoc || !solveResult || scoreDoc.onsetSlices.length === 0) return null;
-    return buildHandPostureIndex(scoreDoc, solveResult);
-  }, [scoreDoc, solveResult]);
+    return buildHandPostureIndex(scoreDoc, solveResult, handSpanProfile);
+  }, [scoreDoc, solveResult, handSpanProfile]);
 
   const targetFrame = useMemo<DualHandPostureFrame>(() => {
     if (playbackFrame && postureIndex) {
       return computeDualHandPostureFrameAtTime(postureIndex, playbackFrame.scoreSec);
     }
-    return projectDualHandPostureAtSlice(scoreDoc, solveResult, selectedSliceId);
-  }, [playbackFrame, postureIndex, scoreDoc, solveResult, selectedSliceId]);
+    return projectDualHandPostureAtSlice(scoreDoc, solveResult, selectedSliceId, handSpanProfile);
+  }, [playbackFrame, postureIndex, scoreDoc, solveResult, selectedSliceId, handSpanProfile]);
 
   const [displayFrame, setDisplayFrame] = useState<DualHandPostureFrame>(targetFrame);
   const displayFrameRef = useRef<DualHandPostureFrame>(targetFrame);

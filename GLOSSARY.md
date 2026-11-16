@@ -55,3 +55,35 @@ _Avoid_: Move hint, arrow warning
 **Hand Span Profile**:
 A user-selected physical reach preset (`S`, `M`, `L`) combined with preference flags that parameterize comfortable and maximum finger-pair distances in the solver.
 _Avoid_: Hand size, difficulty level
+
+**Measure Timeline**:
+The parsed per-measure timing metadata in a Score Document—recording start/end ticks and seconds, active time signature (`beats`/`beat-type`), tempo points, and pickup-measure status—used to drive the metronome, count-in, and A-B Loop.
+_Avoid_: Bar map, measure cache, beat array
+
+**Speed Multiplier**:
+A continuous scalar (`0.25x–1.5x`, adjustable via presets, steppers, or target BPM input) that proportionally scales all `<sound tempo>` playback speeds without altering the Score Document's native tempo used by the fingering solver.
+_Avoid_: Tempo override, BPM clamp, playback pitch
+
+**Practice Mode**:
+The single active-hand practice selector (`Both Hands`, `Right Hand Only` with automatic left-hand accompaniment, or `Left Hand Only` with automatic right-hand accompaniment) governing Waiting Mode target filtering, keyboard emphasis, and browser accompaniment audio.
+_Avoid_: Mute/hide flags, channel solo, hand filter
+
+**Practice Step**:
+A cross-hand synchronized rehearsal step merging all non-`Tie Continuation` Note Events for the active practice hand(s) that share the same `onsetTick` and grace-note ordering; Waiting Mode advances strictly one Practice Step at a time.
+_Avoid_: Single-hand slice, beat chord, playback tick
+
+**Waiting Mode**:
+An interactive rehearsal state in which playback pauses at each Practice Step until all required MIDI pitches receive matching `NoteOn` events (accumulated across rolled/arpeggiated arrivals, ignoring `Tie Continuation`s, and flagging wrong notes in red on the 88-key keyboard).
+_Avoid_: Follow mode, pause-on-note, auto-step
+
+**Count-In**:
+A one-measure pre-roll of metronome clicks played at the current tempo before playback or loop iteration begins (and optionally between A-B Loop repetitions as a Loop Gap).
+_Avoid_: Lead-in beep, warmup ticks
+
+**A-B Loop**:
+A closed whole-measure range `[measureA, measureB]` (`0-based`) that repeats continuously during playback or Waiting Mode, optionally inserting a one-measure Count-In gap before each restart.
+_Avoid_: Slice loop, phrase repeat, segment pin
+
+**MIDI Input Device**:
+An external digital piano or controller connected via Web MIDI API (with hot-plug detection and optional virtual keyboard/computer-keyboard fallback) supplying `NoteOn`/`NoteOff` events to Waiting Mode and optional browser synth echo.
+_Avoid_: Hardware driver, USB instrument, audio input

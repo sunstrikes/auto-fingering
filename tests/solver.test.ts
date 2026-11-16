@@ -5,6 +5,8 @@ import { JSDOM } from "jsdom";
 import { parseMusicXml } from "../src/musicxml/parser";
 import { readMxlContainer } from "../src/musicxml/mxl";
 import { solveFingering } from "../src/solver/solveFingering";
+import { computeHorizontalCost, generateSliceCandidates } from "../src/solver/costModel";
+import { DEFAULT_COST_WEIGHTS } from "../src/solver/weights";
 import { DEFAULT_HAND_SPAN_PROFILE } from "../src/domain/types";
 
 describe("solver seam: solveFingering", () => {
@@ -767,5 +769,103 @@ describe("solver seam: solveFingering", () => {
       ignored.fingerByNoteUid[d4.noteUid],
       ignored.fingerByNoteUid[e4.noteUid],
     ]).toEqual([1, 2, 3]);
+  });
+
+  it("uses externalized PIG-calibrated weights.json and enforces IFR 3<->4 awkward crossing guard", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const doc = parseMusicXml(xml, { DOMParser });
+    const [s0, s1] = doc.onsetSlices;
+
+    // 4->3 ascending reverse crossing (E4=4 -> F4=3) incurs awkwardCrossingBase + awkward34Extra
+    const cost43 = computeHorizontalCost(s0, [4], s1, [3], DEFAULT_HAND_SPAN_PROFILE, false, DEFAULT_COST_WEIGHTS).cost;
+    // 5->4 ascending reverse crossing (E4=5 -> F4=4) lacks awkward34Extra
+    const cost54 = computeHorizontalCost(s0, [5], s1, [4], DEFAULT_HAND_SPAN_PROFILE, false, DEFAULT_COST_WEIGHTS).cost;
+    expect(cost43 - cost54).toBeGreaterThanOrEqual(DEFAULT_COST_WEIGHTS.horizontal.awkward34Extra * 0.9);
+    expect(DEFAULT_COST_WEIGHTS.vertical.heldStealPenalty).toBe(400);
+  });
+
+  it("uses A* admissible heuristic on unanchored held-note passages to avoid late-slice span traps", () => {
+    const { DOMParser } = new JSDOM("").window;
+    // Held C4 (unanchored!) sustains across 4 steps while upper voice climbs to D5 (9th above C4).
+    // At slice 0, C4=1 is required so upper D5=5 reaches C4..D5 within MAX_SPAN(1,5)=8.3;
+    // picking C4=2 would trigger unreachable-span at the final slice.
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>2</voice></note>
+      <backup><duration>4</duration></backup>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const doc = parseMusicXml(xml, { DOMParser });
+    const res = solveFingering(doc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const c4 = doc.noteEvents.find((n) => n.midi === 60)!;
+    const d5 = doc.noteEvents.find((n) => n.midi === 74)!;
+
+    expect(res.fingerByNoteUid[c4.noteUid]).toBe(1);
+    expect(res.fingerByNoteUid[d5.noteUid]).toBe(5);
+    expect(res.warnings.some((w) => w.type === "unreachable-span")).toBe(false);
+  });
+
+  it("assigns fixed optimal chord fingerings directly without searching over alternative chord shapes", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <!-- Root triad C4-E4-G4 -->
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <!-- 1st inversion E4-G4-C5 -->
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <!-- 4-note octave triad C4-E4-G4-C5 -->
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    expect(doc.onsetSlices).toHaveLength(3);
+
+    // Each unanchored block chord yields exactly 1 fixed optimal candidate
+    for (const slice of doc.onsetSlices) {
+      const { candidates } = generateSliceCandidates(slice, false, DEFAULT_HAND_SPAN_PROFILE);
+      expect(candidates).toHaveLength(1);
+    }
+
+    const res = solveFingering(doc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const s0Fingers = doc.onsetSlices[0].notes.map((n) => res.fingerByNoteUid[n.noteUid]);
+    const s1Fingers = doc.onsetSlices[1].notes.map((n) => res.fingerByNoteUid[n.noteUid]);
+    const s2Fingers = doc.onsetSlices[2].notes.map((n) => res.fingerByNoteUid[n.noteUid]);
+
+    expect(s0Fingers).toEqual([1, 3, 5]);
+    expect(s1Fingers).toEqual([1, 2, 5]);
+    expect(s2Fingers).toEqual([1, 2, 3, 5]);
   });
 });
