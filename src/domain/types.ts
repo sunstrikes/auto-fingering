@@ -42,6 +42,12 @@ export interface NoteEvent {
   anchorMode?: "phrase" | "pinOnly";
 }
 
+export interface PedalInterval {
+  startTick: number;
+  endTick: number;
+  freshPress: boolean;
+}
+
 export interface OnsetSlice {
   sliceId: string;
   hand: Hand;
@@ -55,6 +61,8 @@ export interface OnsetSlice {
     noteUid: string;
     midi: number;
     endTick: number;
+    onsetTick?: number;
+    pedalSustained?: boolean;
   }>;
 }
 
@@ -136,6 +144,7 @@ export interface ScoreDocument {
   tempoPoints: TempoPoint[];
   timeSignaturePoints: TimeSignaturePoint[];
   measureTimelines: MeasureTimeline[];
+  pedalIntervals?: PedalInterval[];
 }
 
 export type PracticeMode = "both" | "rh-only" | "lh-only";

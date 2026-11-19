@@ -2,7 +2,12 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createElement, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { createPianoAudioEngine, type AudioEngineStatus } from "../src/audio/pianoAudio";
+import {
+  createPianoAudioEngine,
+  DEFAULT_PIANO_TIMBRE,
+  type AudioEngineStatus,
+  type PianoTimbreId,
+} from "../src/audio/pianoAudio";
 import { buildPlaybackSchedule, createPlaybackEngine, type CursorSyncTarget, type PlaybackState } from "../src/audio/playbackEngine";
 import { ScoreViewer, type ScoreRendererHandle } from "../src/components/ScoreViewer";
 import App from "../src/App";
@@ -342,6 +347,8 @@ describe("Seam 2: Playback Scheduling, TieContinuations, Tempo & Clock Sync", ()
     const stopAllSpy = vi.fn();
     const audioEngine = {
       getStatus: () => "samples" as const,
+      getTimbre: () => DEFAULT_PIANO_TIMBRE,
+      setTimbre: vi.fn(() => null),
       getAudioContext: () => mockCtx,
       prepare: vi.fn(async () => "samples" as const),
       triggerNote: vi.fn((p: { midi: number; time: number; duration: number }) => {
@@ -727,6 +734,8 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     const stopAllSpy = vi.fn();
     const audioEngine = {
       getStatus: () => "samples" as const,
+      getTimbre: () => DEFAULT_PIANO_TIMBRE,
+      setTimbre: vi.fn(() => null),
       getAudioContext: () => mockCtx,
       prepare: vi.fn(async () => "samples" as const),
       triggerNote: vi.fn((p: { midi: number; time: number; duration: number }) => {
@@ -783,6 +792,8 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     const triggered: Array<{ midi: number; time: number; duration: number }> = [];
     const audioEngine = {
       getStatus: () => "samples" as const,
+      getTimbre: () => DEFAULT_PIANO_TIMBRE,
+      setTimbre: vi.fn(() => null),
       getAudioContext: () => mockCtx,
       prepare: vi.fn(async () => "samples" as const),
       triggerNote: vi.fn((p: { midi: number; time: number; duration: number }) => {
@@ -1252,5 +1263,157 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     expect(syncCursor).toHaveBeenLastCalledWith(
       expect.objectContaining({ measureIndex: 1, midis: [64] })
     );
+  });
+
+  it("defaults to electric piano timbre, preserves lazy-loading when switching while idle, and reloads cleanly while discarding stale loads", async () => {
+    const ctx = createMockAudioContext(0);
+    const loadedTimbres: PianoTimbreId[] = [];
+    const disconnected: PianoTimbreId[] = [];
+    let resolvePending: () => void = () => {};
+
+    const engine = createPianoAudioEngine({
+      getAudioContext: () => ctx,
+      loadSmplrPiano: async (_ctx, timbre) => {
+        loadedTimbres.push(timbre);
+        if (timbre === "ep-cp80") {
+          await new Promise<void>((resolve) => {
+            resolvePending = resolve;
+          });
+        }
+        return {
+          load: Promise.resolve(),
+          start: vi.fn(),
+          stop: vi.fn(),
+          disconnect: () => disconnected.push(timbre),
+        };
+      },
+    });
+
+    expect(engine.getTimbre()).toBe(DEFAULT_PIANO_TIMBRE);
+    expect(DEFAULT_PIANO_TIMBRE).toBe("ep-fluid-ep1");
+
+    // Switching while idle should NOT trigger sample loading
+    const idleResult = engine.setTimbre("ep-cp80");
+    expect(idleResult).toBeNull();
+    expect(engine.getTimbre()).toBe("ep-cp80");
+    expect(loadedTimbres).toEqual([]);
+
+    // Start preparing ep-cp80 (stays in-flight), then switch immediately to ep-musyng-ep1
+    const firstPrepare = engine.prepare();
+    await Promise.resolve();
+    expect(loadedTimbres).toEqual(["ep-cp80"]);
+
+    const secondPrepare = engine.setTimbre("ep-musyng-ep1");
+    expect(secondPrepare).not.toBeNull();
+    expect(await secondPrepare).toBe("samples");
+    expect(engine.getTimbre()).toBe("ep-musyng-ep1");
+    expect(engine.getStatus()).toBe("samples");
+
+    // Now resolve the stale ep-cp80 load -> it must be disconnected and never overwrite active engine
+    resolvePending();
+    await firstPrepare;
+    expect(disconnected).toContain("ep-cp80");
+    expect(engine.getTimbre()).toBe("ep-musyng-ep1");
+  });
+
+  it("allows selecting and previewing electric piano timbre in PracticeSettingsModal and reflects it on TransportPracticeBar", async () => {
+    globalThis.localStorage?.removeItem("auto-fingering:piano-timbre");
+    const inProcessWorkerFactory = (): WorkerLike => {
+      const worker: WorkerLike = {
+        onmessage: null,
+        onerror: null,
+        postMessage(msg: unknown) {
+          const req = msg as WorkerRequest;
+          queueMicrotask(() => {
+            const result = solveFingering(req.onsetSlices, req.profile, {
+              ignoreExistingFingerings: req.ignoreExistingFingerings,
+            });
+            const resp: WorkerResponse = { requestId: req.requestId, ok: true, result };
+            worker.onmessage?.({ data: resp } as MessageEvent<WorkerResponse>);
+          });
+        },
+        terminate() {},
+      };
+      return worker;
+    };
+
+    const startSpy = vi.fn();
+    const loadSmplrPiano = vi.fn(async (_ctx: AudioContext, _timbre: PianoTimbreId) => ({
+      load: Promise.resolve(),
+      start: startSpy,
+      stop: vi.fn(),
+      disconnect: vi.fn(),
+    }));
+    const mockCtx = createMockAudioContext(0);
+
+    mountedContainer = document.createElement("div");
+    document.body.appendChild(mountedContainer);
+    mountedRoot = createRoot(mountedContainer);
+
+    await act(async () => {
+      mountedRoot!.render(
+        createElement(App, {
+          solverClientFactory: () => createSolverClient(inProcessWorkerFactory),
+          scoreRendererFactory: () => ({
+            render: async () => ({
+              measureCount: 1,
+              measureGeometry: [{ measureIndex: 0, top: 0, height: 100 }],
+            }),
+            highlightMeasure: () => {},
+            markAnchoredNotes: () => {},
+            scrollToMeasure: () => {},
+            syncCursor: () => {},
+            dispose: () => {},
+          }),
+          audioDeps: {
+            getAudioContext: () => mockCtx,
+            loadSmplrPiano,
+            requestAnimationFrame: () => 1,
+            cancelAnimationFrame: () => {},
+          },
+        })
+      );
+    });
+
+    const settingsBtn = mountedContainer.querySelector('[data-testid="practice-settings-btn"]') as HTMLButtonElement;
+    await act(async () => {
+      settingsBtn.click();
+    });
+
+    const timbreSelect = mountedContainer.querySelector('[data-testid="piano-timbre-select"]') as HTMLSelectElement;
+    expect(timbreSelect.value).toBe("ep-fluid-ep1");
+    expect(loadSmplrPiano).not.toHaveBeenCalled();
+
+    // Switch to Yamaha CP-80 while idle, then click Preview button
+    await act(async () => {
+      timbreSelect.value = "ep-cp80";
+      timbreSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(loadSmplrPiano).not.toHaveBeenCalled();
+
+    const previewBtn = mountedContainer.querySelector('[data-testid="piano-timbre-preview-btn"]') as HTMLButtonElement;
+    await act(async () => {
+      previewBtn.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(loadSmplrPiano).toHaveBeenCalledTimes(1);
+    expect(loadSmplrPiano).toHaveBeenLastCalledWith(mockCtx, "ep-cp80");
+    expect(startSpy).toHaveBeenCalledTimes(4);
+
+    const statusBadge = mountedContainer.querySelector('[data-testid="audio-engine-status"]')!;
+    expect(statusBadge.textContent).toContain("Yamaha CP-80");
+
+    // Switching timbre while already active triggers immediate reload of new timbre
+    await act(async () => {
+      timbreSelect.value = "ep-wurlitzer";
+      timbreSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(loadSmplrPiano).toHaveBeenCalledTimes(2);
+    expect(loadSmplrPiano).toHaveBeenLastCalledWith(mockCtx, "ep-wurlitzer");
+    expect(statusBadge.textContent).toContain("Wurlitzer EP200");
   });
 });

@@ -922,4 +922,94 @@ describe("solver seam: solveFingering", () => {
     expect(impossibleInv.cost).toBeGreaterThanOrEqual(IMPOSSIBLE_COST);
     expect(impossibleInv.hasUnreachableSpan).toBe(true);
   });
+
+  it("releases unreachable held bass notes during ascending arpeggios (m.19/m.20 pattern) instead of forcing consecutive thumb jumps, and honors <pedal>", () => {
+    const { DOMParser } = new JSDOM("").window;
+
+    const buildMeasuresXml = (withPedal: boolean): string => `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="19">
+      <attributes>
+        <divisions>4</divisions>
+        <clef><sign>F</sign><line>4</line></clef>
+      </attributes>
+      ${withPedal ? '<direction placement="below"><direction-type><pedal type="start" line="yes"/></direction-type></direction>' : ""}
+      <note><pitch><step>B</step><alter>-1</alter><octave>2</octave></pitch><duration>16</duration><voice>2</voice></note>
+      <backup><duration>16</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><alter>-1</alter><octave>3</octave></pitch><duration>6</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><alter>-1</alter><octave>3</octave></pitch><duration>4</duration><voice>1</voice></note>
+      ${withPedal ? '<direction placement="below"><direction-type><pedal type="stop" line="yes"/></direction-type></direction>' : ""}
+    </measure>
+    <measure number="20">
+      ${withPedal ? '<direction placement="below"><direction-type><pedal type="start" line="yes"/></direction-type></direction>' : ""}
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>16</duration><voice>2</voice></note>
+      <backup><duration>16</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>6</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
+      ${withPedal ? '<direction placement="below"><direction-type><pedal type="stop" line="yes"/></direction-type></direction>' : ""}
+    </measure>
+  </part>
+</score-partwise>`;
+
+    // 1. Without <pedal> under profile M: Bb2 and C3 release monotonically when upper arpeggio exceeds span
+    const docNoPedal = parseMusicXml(buildMeasuresXml(false), { DOMParser });
+    const resNoPedal = solveFingering(docNoPedal.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+
+    const m19Notes = docNoPedal.noteEvents.filter((n) => n.measureIndex === 0);
+    const m19Bb2 = m19Notes.find((n) => n.midi === 46)!;
+    const m19C4 = m19Notes.find((n) => n.midi === 60)!;
+    const m19D4 = m19Notes.find((n) => n.midi === 62)!;
+    const m19LastBb3 = m19Notes[m19Notes.length - 1];
+
+    expect(resNoPedal.fingerByNoteUid[m19Bb2.noteUid]).toBe(5);
+    expect(resNoPedal.fingerByNoteUid[m19C4.noteUid]).toBeGreaterThan(
+      resNoPedal.fingerByNoteUid[m19D4.noteUid]
+    ); // No consecutive 1->1 thumb jump on C4->D4
+
+    const m20Notes = docNoPedal.noteEvents.filter((n) => n.measureIndex === 1);
+    const m20D4 = m20Notes.find((n) => n.midi === 62)!;
+    const m20E4 = m20Notes.find((n) => n.midi === 64)!;
+    expect(resNoPedal.fingerByNoteUid[m20D4.noteUid]).toBeGreaterThan(
+      resNoPedal.fingerByNoteUid[m20E4.noteUid]
+    ); // C3 pre-released at D4 so D4->E4 flows without 9th stretch
+
+    // C4 & D4 slices in m.19 emit unreachable-span with "use pedal" hint, whereas beat-4 Bb3 does not emit a spurious held warning
+    const m19C4Slice = docNoPedal.onsetSlices.find((s) => s.notes.some((n) => n.noteUid === m19C4.noteUid))!;
+    const m19D4Slice = docNoPedal.onsetSlices.find((s) => s.notes.some((n) => n.noteUid === m19D4.noteUid))!;
+    const m19LastSlice = docNoPedal.onsetSlices.find((s) => s.notes.some((n) => n.noteUid === m19LastBb3.noteUid))!;
+
+    expect(
+      resNoPedal.warnings.some(
+        (w) => w.sliceId === m19C4Slice.sliceId && w.type === "unreachable-span" && /use pedal/i.test(w.label)
+      )
+    ).toBe(true);
+    expect(
+      resNoPedal.warnings.some(
+        (w) => w.sliceId === m19D4Slice.sliceId && w.type === "unreachable-span" && /use pedal/i.test(w.label)
+      )
+    ).toBe(true);
+    expect(resNoPedal.warnings.some((w) => w.sliceId === m19LastSlice.sliceId)).toBe(false);
+
+    // 2. With <pedal type="start"/>: zero unreachable-span warnings and clean arpeggio fingering
+    const docPedal = parseMusicXml(buildMeasuresXml(true), { DOMParser });
+    const resPedal = solveFingering(docPedal.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    expect(resPedal.warnings.filter((w) => w.type === "unreachable-span")).toHaveLength(0);
+
+    const m19PedalNotes = docPedal.noteEvents.filter((n) => n.measureIndex === 0);
+    const m19PedalC4 = m19PedalNotes.find((n) => n.midi === 60)!;
+    const m19PedalD4 = m19PedalNotes.find((n) => n.midi === 62)!;
+    expect(resPedal.fingerByNoteUid[m19PedalC4.noteUid]).toBeGreaterThan(
+      resPedal.fingerByNoteUid[m19PedalD4.noteUid]
+    );
+  });
 });

@@ -1,5 +1,95 @@
 export type AudioEngineStatus = "idle" | "loading" | "samples" | "synth";
 
+export type PianoTimbreId =
+  | "ep-fluid-ep1"
+  | "ep-musyng-ep1"
+  | "ep-fluid-ep2"
+  | "ep-cp80"
+  | "ep-wurlitzer"
+  | "ep-tx81z"
+  | "grand-splendid";
+
+export interface PianoTimbrePreset {
+  id: PianoTimbreId;
+  label: string;
+  shortLabel: string;
+  kind: "electric" | "acoustic";
+  source: "soundfont" | "electric-piano" | "splendid-grand";
+  kit?: "FluidR3_GM" | "MusyngKite";
+  instrument?: string;
+}
+
+export const DEFAULT_PIANO_TIMBRE: PianoTimbreId = "ep-fluid-ep1";
+
+export const PIANO_TIMBRE_PRESETS: readonly PianoTimbrePreset[] = [
+  {
+    id: "ep-fluid-ep1",
+    label: "电钢琴 1 · Rhodes (FluidR3_GM)",
+    shortLabel: "FluidR3 电钢 1",
+    kind: "electric",
+    source: "soundfont",
+    kit: "FluidR3_GM",
+    instrument: "electric_piano_1",
+  },
+  {
+    id: "ep-musyng-ep1",
+    label: "电钢琴 1 · Rhodes (MusyngKite)",
+    shortLabel: "MusyngKite 电钢 1",
+    kind: "electric",
+    source: "soundfont",
+    kit: "MusyngKite",
+    instrument: "electric_piano_1",
+  },
+  {
+    id: "ep-fluid-ep2",
+    label: "电钢琴 2 · FM / 合唱电钢 (FluidR3_GM)",
+    shortLabel: "FluidR3 电钢 2",
+    kind: "electric",
+    source: "soundfont",
+    kit: "FluidR3_GM",
+    instrument: "electric_piano_2",
+  },
+  {
+    id: "ep-cp80",
+    label: "Yamaha CP-80 舞台电钢 (SFZ 采样)",
+    shortLabel: "Yamaha CP-80",
+    kind: "electric",
+    source: "electric-piano",
+    instrument: "CP80",
+  },
+  {
+    id: "ep-wurlitzer",
+    label: "Wurlitzer EP200 复古电钢 (SFZ 采样)",
+    shortLabel: "Wurlitzer EP200",
+    kind: "electric",
+    source: "electric-piano",
+    instrument: "WurlitzerEP200",
+  },
+  {
+    id: "ep-tx81z",
+    label: "Yamaha TX81Z FM 电钢 (SFZ 采样)",
+    shortLabel: "Yamaha TX81Z",
+    kind: "electric",
+    source: "electric-piano",
+    instrument: "TX81Z",
+  },
+  {
+    id: "grand-splendid",
+    label: "原声三角钢琴 (Splendid Grand)",
+    shortLabel: "Splendid 三角钢",
+    kind: "acoustic",
+    source: "splendid-grand",
+  },
+] as const;
+
+export function isValidPianoTimbreId(value: unknown): value is PianoTimbreId {
+  return typeof value === "string" && PIANO_TIMBRE_PRESETS.some((p) => p.id === value);
+}
+
+export function getPianoTimbrePreset(id: PianoTimbreId): PianoTimbrePreset {
+  return PIANO_TIMBRE_PRESETS.find((p) => p.id === id) ?? PIANO_TIMBRE_PRESETS[0];
+}
+
 export interface TriggerNoteParams {
   midi: number;
   time: number;
@@ -18,6 +108,8 @@ export interface SmplrPianoLike {
 
 export interface PianoAudioEngine {
   getStatus(): AudioEngineStatus;
+  getTimbre(): PianoTimbreId;
+  setTimbre(timbre: PianoTimbreId): Promise<"samples" | "synth"> | null;
   getAudioContext(): AudioContext;
   prepare(): Promise<"samples" | "synth">;
   triggerNote(params: TriggerNoteParams): void;
@@ -26,12 +118,14 @@ export interface PianoAudioEngine {
 }
 
 export interface PianoAudioDeps {
+  timbre?: PianoTimbreId;
   getAudioContext?: () => AudioContext;
-  loadSmplrPiano?: (ctx: AudioContext) => Promise<SmplrPianoLike>;
+  loadSmplrPiano?: (ctx: AudioContext, timbre: PianoTimbreId) => Promise<SmplrPianoLike>;
   onStatusChange?: (status: AudioEngineStatus) => void;
 }
 
 const LIGHTWEIGHT_PIANO_NOTES = [24, 36, 48, 60, 72, 84, 96];
+export const SAMPLE_LOAD_TIMEOUT_MS = 20_000;
 
 function midiToFrequency(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);
@@ -145,25 +239,72 @@ function createSynthPiano(ctx: AudioContext) {
   };
 }
 
-async function defaultLoadSmplrPiano(ctx: AudioContext): Promise<SmplrPianoLike> {
+type SmplrStorage = import("smplr").Storage;
+
+let sharedSmplrStorage: SmplrStorage | null = null;
+
+async function getSmplrStorage(): Promise<SmplrStorage> {
+  if (sharedSmplrStorage) return sharedSmplrStorage;
+  const { CacheStorage, HttpStorage } = await import("smplr");
+  if (typeof window !== "undefined" && "caches" in window) {
+    try {
+      sharedSmplrStorage = new CacheStorage("auto-fingering-smplr");
+      return sharedSmplrStorage;
+    } catch {
+      sharedSmplrStorage = HttpStorage;
+      return sharedSmplrStorage;
+    }
+  }
+  sharedSmplrStorage = HttpStorage;
+  return sharedSmplrStorage;
+}
+
+export async function defaultLoadSmplrPiano(
+  ctx: AudioContext,
+  timbre: PianoTimbreId = DEFAULT_PIANO_TIMBRE
+): Promise<SmplrPianoLike> {
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
     throw new Error("Browser is offline.");
   }
-  const { SplendidGrandPiano } = await import("smplr");
-  const piano = new SplendidGrandPiano(ctx, {
-    notesToLoad: {
-      notes: LIGHTWEIGHT_PIANO_NOTES,
-      fallback: "nearest",
-    },
-    decayTime: 0.4,
-  });
+
+  const preset = getPianoTimbrePreset(timbre);
+  const storage = await getSmplrStorage();
+  let piano: SmplrPianoLike;
+
+  if (preset.source === "soundfont") {
+    const { Soundfont } = await import("smplr");
+    piano = new Soundfont(ctx, {
+      kit: preset.kit ?? "FluidR3_GM",
+      instrument: preset.instrument ?? "electric_piano_1",
+      storage,
+    });
+  } else if (preset.source === "electric-piano") {
+    const { ElectricPiano } = await import("smplr");
+    piano = new ElectricPiano(ctx, {
+      instrument: preset.instrument ?? "CP80",
+      storage,
+    });
+  } else {
+    const { SplendidGrandPiano } = await import("smplr");
+    piano = new SplendidGrandPiano(ctx, {
+      notesToLoad: {
+        notes: LIGHTWEIGHT_PIANO_NOTES,
+        fallback: "nearest",
+      },
+      decayTime: 0.4,
+      storage,
+    });
+  }
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      piano.ready,
+      piano.ready ?? piano.load ?? Promise.resolve(),
       new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error("Sample load timeout")), 8000);
+        timeoutId = setTimeout(
+          () => reject(new Error("Sample load timeout")),
+          SAMPLE_LOAD_TIMEOUT_MS
+        );
       }),
     ]);
   } finally {
@@ -189,10 +330,13 @@ function createBrowserAudioContext(): AudioContext {
  */
 export function createPianoAudioEngine(deps?: PianoAudioDeps): PianoAudioEngine {
   let status: AudioEngineStatus = "idle";
+  let currentTimbre: PianoTimbreId =
+    deps?.timbre && isValidPianoTimbreId(deps.timbre) ? deps.timbre : DEFAULT_PIANO_TIMBRE;
   let audioCtx: AudioContext | null = null;
   let smplrPiano: SmplrPianoLike | null = null;
   let synthPiano: ReturnType<typeof createSynthPiano> | null = null;
   let preparePromise: Promise<"samples" | "synth"> | null = null;
+  let loadToken = 0;
 
   interface TrackedSmplrStop {
     stop: () => void;
@@ -222,6 +366,16 @@ export function createPianoAudioEngine(deps?: PianoAudioDeps): PianoAudioEngine 
     smplrPiano?.stop();
   };
 
+  const disposeSmplrInstance = () => {
+    stopSmplrVoices();
+    try {
+      smplrPiano?.disconnect?.();
+    } catch {
+      // ignore disconnect failures on mocked or closed instances
+    }
+    smplrPiano = null;
+  };
+
   const setStatus = (next: AudioEngineStatus) => {
     if (status !== next) {
       status = next;
@@ -243,46 +397,86 @@ export function createPianoAudioEngine(deps?: PianoAudioDeps): PianoAudioEngine 
     return synthPiano;
   };
 
+  const prepare = async (): Promise<"samples" | "synth"> => {
+    if (status === "samples" && smplrPiano) return "samples";
+    if (status === "synth") return "synth";
+    if (preparePromise) return preparePromise;
+
+    const myToken = ++loadToken;
+    const targetTimbre = currentTimbre;
+
+    preparePromise = (async () => {
+      const ctx = ensureAudioContext();
+      if (ctx.state === "suspended" && typeof ctx.resume === "function") {
+        try {
+          await ctx.resume();
+        } catch {
+          // proceed to fallback even if resume is restricted in tests
+        }
+      }
+      if (myToken !== loadToken) {
+        return status === "samples" ? "samples" : "synth";
+      }
+      setStatus("loading");
+      try {
+        const loader = deps?.loadSmplrPiano ?? defaultLoadSmplrPiano;
+        const piano = await loader(ctx, targetTimbre);
+        if (myToken !== loadToken) {
+          piano.disconnect?.();
+          return status === "samples" ? "samples" : "synth";
+        }
+        if (piano.ready) {
+          await piano.ready;
+        } else if (piano.load) {
+          await piano.load;
+        }
+        if (myToken !== loadToken) {
+          piano.disconnect?.();
+          return status === "samples" ? "samples" : "synth";
+        }
+        smplrPiano = piano;
+        setStatus("samples");
+        return "samples" as const;
+      } catch {
+        if (myToken !== loadToken) {
+          return status === "samples" ? "samples" : "synth";
+        }
+        smplrPiano = null;
+        ensureSynth();
+        setStatus("synth");
+        return "synth" as const;
+      }
+    })();
+
+    return preparePromise;
+  };
+
   return {
     getStatus: () => status,
+    getTimbre: () => currentTimbre,
+
+    setTimbre(timbre: PianoTimbreId) {
+      const nextTimbre = isValidPianoTimbreId(timbre) ? timbre : DEFAULT_PIANO_TIMBRE;
+      if (currentTimbre === nextTimbre && status !== "synth") {
+        return status === "idle" ? null : prepare();
+      }
+      const shouldReload = status !== "idle";
+      currentTimbre = nextTimbre;
+      loadToken += 1;
+      preparePromise = null;
+      disposeSmplrInstance();
+      synthPiano?.stopAll();
+
+      if (!shouldReload) {
+        return null;
+      }
+      status = "idle";
+      return prepare();
+    },
+
     getAudioContext: () => ensureAudioContext(),
 
-    async prepare() {
-      if (status === "samples" && smplrPiano) return "samples";
-      if (status === "synth") return "synth";
-      if (preparePromise) return preparePromise;
-
-      preparePromise = (async () => {
-        const ctx = ensureAudioContext();
-        if (ctx.state === "suspended" && typeof ctx.resume === "function") {
-          try {
-            await ctx.resume();
-          } catch {
-            // proceed to fallback even if resume is restricted in tests
-          }
-        }
-        setStatus("loading");
-        try {
-          const loader = deps?.loadSmplrPiano ?? defaultLoadSmplrPiano;
-          const piano = await loader(ctx);
-          if (piano.ready) {
-            await piano.ready;
-          } else if (piano.load) {
-            await piano.load;
-          }
-          smplrPiano = piano;
-          setStatus("samples");
-          return "samples" as const;
-        } catch {
-          smplrPiano = null;
-          ensureSynth();
-          setStatus("synth");
-          return "synth" as const;
-        }
-      })();
-
-      return preparePromise;
-    },
+    prepare,
 
     triggerNote(params: TriggerNoteParams) {
       if (status === "samples" && smplrPiano) {
@@ -312,9 +506,9 @@ export function createPianoAudioEngine(deps?: PianoAudioDeps): PianoAudioEngine 
     },
 
     dispose() {
-      stopSmplrVoices();
-      smplrPiano?.disconnect?.();
-      smplrPiano = null;
+      loadToken += 1;
+      preparePromise = null;
+      disposeSmplrInstance();
       synthPiano?.stopAll();
       synthPiano = null;
     },

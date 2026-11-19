@@ -596,4 +596,59 @@ describe("musicxml pipeline seam: parseMusicXml", () => {
       },
     ]);
   });
+
+  it("extracts <pedal> intervals (start/change/stop with <offset> and <backup>) and sets heldNotes[].pedalSustained and onsetTick", () => {
+    const { DOMParser } = createJsdomDom();
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><clef><sign>F</sign><line>4</line></clef></attributes>
+      <note><pitch><step>B</step><alter>-1</alter><octave>2</octave></pitch><duration>16</duration><voice>2</voice></note>
+      <backup><duration>16</duration></backup>
+      <direction><direction-type><pedal type="start" line="yes"/></direction-type><offset>2</offset></direction>
+      <note><rest/><duration>4</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>4</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
+      <direction><direction-type><pedal type="change" line="yes"/></direction-type></direction>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
+      <direction><direction-type><pedal type="stop" line="yes"/></direction-type></direction>
+    </measure>
+    <measure number="2">
+      <direction><direction-type><pedal type="start" line="yes"/></direction-type></direction>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>16</duration><voice>2</voice></note>
+      <backup><duration>16</duration></backup>
+      <note><rest/><duration>8</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>8</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    expect(doc.pedalIntervals).toEqual([
+      { startTick: 2, endTick: 12, freshPress: true },
+      { startTick: 12, endTick: 16, freshPress: false },
+      { startTick: 16, endTick: 32, freshPress: true },
+    ]);
+
+    // Measure 1: F3 (tick 4) and C4 (tick 8) see Bb2 (onsetTick=0) sustained by freshPress pedal [2..12)
+    const f3Slice = doc.onsetSlices.find((s) => s.measureIndex === 0 && s.notes[0].midi === 53)!;
+    const c4Slice = doc.onsetSlices.find((s) => s.measureIndex === 0 && s.notes[0].midi === 60)!;
+    const d4SliceM1 = doc.onsetSlices.find((s) => s.measureIndex === 0 && s.notes[0].midi === 62)!;
+
+    expect(f3Slice.heldNotes[0].onsetTick).toBe(0);
+    expect(f3Slice.heldNotes[0].pedalSustained).toBe(true);
+    expect(c4Slice.heldNotes[0].onsetTick).toBe(0);
+    expect(c4Slice.heldNotes[0].pedalSustained).toBe(true);
+
+    // At tick 12 (<pedal type="change"/>, freshPress=false), Bb2 (onsetTick=0) is no longer pedal-sustained
+    expect(d4SliceM1.heldNotes[0].onsetTick).toBe(0);
+    expect(d4SliceM1.heldNotes[0].pedalSustained).toBe(false);
+
+    // Measure 2: unclosed <pedal type="start"/> extends to maxScoreEndTick=32
+    const d4SliceM2 = doc.onsetSlices.find((s) => s.measureIndex === 1 && s.notes[0].midi === 62)!;
+    expect(d4SliceM2.heldNotes[0].onsetTick).toBe(16);
+    expect(d4SliceM2.heldNotes[0].pedalSustained).toBe(true);
+  });
 });

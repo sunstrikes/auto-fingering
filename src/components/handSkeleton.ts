@@ -8,60 +8,125 @@ export const PIANO_BLACK_KEY_W = 14.5;
 export const PIANO_BLACK_KEY_H = 70;
 export const PIANO_KEYS_Y = 50;
 export const PIANO_KEYBED_BOTTOM_Y = PIANO_KEYS_Y + PIANO_WHITE_KEY_H; // 162
-export const PIANO_KNUCKLE_BASE_Y = PIANO_KEYBED_BOTTOM_Y + 13; // 175
+export const PIANO_KNUCKLE_BASE_Y = PIANO_KEYBED_BOTTOM_Y + 11; // 173
 export const PIANO_WRIST_Y = PIANO_KEYBED_BOTTOM_Y + 62; // 224
 export const PIANO_SVG_H = 244;
+
+/** Real-world grand piano white-key pitch & length (mm) for 1:1 physical hand scaling. */
+export const REAL_WHITE_KEY_WIDTH_MM = 23.5;
+export const REAL_WHITE_KEY_LENGTH_MM = 148;
+export const PIANO_MM_TO_PX = PIANO_WHITE_KEY_W / REAL_WHITE_KEY_WIDTH_MM;
+
+function mm(valMm: number): number {
+  return valMm * PIANO_MM_TO_PX;
+}
 
 const FINGERS: Finger[] = [1, 2, 3, 4, 5];
 
 /** Natural white-key contact Y by finger (3 deepest, 2/4 mid, 5 shorter, 1 frontmost). */
 export const WHITE_TIP_Y: Record<Finger, number> = {
-  1: 149,
-  2: 127,
-  3: 117,
-  4: 125,
-  5: 143,
+  1: 148,
+  2: 126,
+  3: 116,
+  4: 124,
+  5: 141,
 };
 
 /** Natural black-key contact Y by finger (black keys occupy y = 50..120). */
 export const BLACK_TIP_Y: Record<Finger, number> = {
   1: 108,
-  2: 98,
-  3: 93,
-  4: 97,
-  5: 106,
+  2: 96,
+  3: 90,
+  4: 95,
+  5: 105,
 };
 
 /**
- * Fixed anatomical MCP-to-tip finger lengths (px ≈ mm) for Medium ("M") hand size.
+ * Real-world anatomical MCP-to-tip finger lengths (mm) for Medium ("M") adult hand size.
+ */
+export const BASE_FINGER_LENGTH_MM: Record<Finger, number> = {
+  1: 59,
+  2: 75,
+  3: 83,
+  4: 78,
+  5: 64,
+};
+
+/**
+ * Calibrated MCP-to-tip finger lengths in SVG px tied to `PIANO_WHITE_KEY_W / REAL_WHITE_KEY_WIDTH_MM`.
  * Scaled by `SPAN_PRESET_SCALE` for S (0.82x) / M (1.00x) / L (1.18x) hand profiles.
  */
 export const BASE_FINGER_LENGTH_PX: Record<Finger, number> = {
-  1: 52,
-  2: 62,
-  3: 68,
-  4: 64,
-  5: 54,
+  1: mm(BASE_FINGER_LENGTH_MM[1]),
+  2: mm(BASE_FINGER_LENGTH_MM[2]),
+  3: mm(BASE_FINGER_LENGTH_MM[3]),
+  4: mm(BASE_FINGER_LENGTH_MM[4]),
+  5: mm(BASE_FINGER_LENGTH_MM[5]),
 };
 
-/** Idle fingers adopt a gently curved 2D projection at 86% of full extended length. */
-export const IDLE_CURVE_FACTOR = 0.86;
+/** First metacarpal (CMC1 -> MCP1) length in mm for Medium ("M") hand size. */
+export const METACARPAL_1_LENGTH_MM = 41;
+
+/** Idle fingers adopt a gently curved 2D top-down projection at 72% of full extended length. */
+export const IDLE_CURVE_FACTOR = 0.72;
 
 export function getFixedFingerLengthPx(finger: Finger, spanPreset: SpanPreset = "M"): number {
   return BASE_FINGER_LENGTH_PX[finger] * SPAN_PRESET_SCALE[spanPreset];
 }
 
-/** Outer sleeve half-width [base, tip] for each finger. */
-const SLEEVE_HALF_WIDTH: Record<Finger, [number, number]> = {
-  1: [5.4, 4.3],
-  2: [4.5, 3.3],
-  3: [4.7, 3.5],
-  4: [4.4, 3.2],
-  5: [3.9, 2.8],
+export function getThumbMetacarpalLengthPx(spanPreset: SpanPreset = "M"): number {
+  return mm(METACARPAL_1_LENGTH_MM) * SPAN_PRESET_SCALE[spanPreset];
+}
+
+export function getKnuckleBaseY(handScale: number, palmLiftY = 0): number {
+  const sizeKnuckleOffsetY = (1 - handScale) * 10;
+  return PIANO_KNUCKLE_BASE_Y - sizeKnuckleOffsetY + palmLiftY;
+}
+
+export function getAbductRatio(fingerSpanPx: number, handScale: number): number {
+  return clamp((fingerSpanPx - mm(92) * handScale) / (mm(95) * handScale), -0.1, 0.85);
+}
+
+/**
+ * Returns the palm-local anchor origin in SVG px (CMC1 for thumb, MCP for fingers 2..5)
+ * relative to `(palmCenterX, knuckleBaseY)` before palm rotation.
+ */
+export function getFingerOriginLocalPx(
+  finger: Finger,
+  abductRatio: number,
+  handScale: number,
+  dir: 1 | -1
+): Point2D {
+  switch (finger) {
+    case 1:
+      return { x: -mm(18) * dir * handScale, y: mm(49) * handScale };
+    case 2:
+      return { x: -mm(21 + abductRatio * 4.5) * dir * handScale, y: mm(3.5) * handScale };
+    case 3:
+      return { x: 0, y: 0 };
+    case 4:
+      return { x: mm(20 + abductRatio * 4.5) * dir * handScale, y: mm(4.5) * handScale };
+    case 5:
+      return { x: mm(38 + abductRatio * 11) * dir * handScale, y: mm(12.5) * handScale };
+  }
+}
+
+export function getFingerReachPx(finger: Finger, spanPreset: SpanPreset = "M"): number {
+  const fixedLen = getFixedFingerLengthPx(finger, spanPreset);
+  return finger === 1 ? getThumbMetacarpalLengthPx(spanPreset) + fixedLen : fixedLen;
+}
+
+/** 3-point tapered half-width [base, mid, tip] in mm for each finger (M size). */
+const SLEEVE_HALF_WIDTH_MM: Record<Finger, [number, number, number]> = {
+  1: [7.5, 6.2, 5.2],
+  2: [5.9, 4.9, 4.0],
+  3: [6.1, 5.1, 4.2],
+  4: [5.7, 4.7, 3.8],
+  5: [4.9, 4.0, 3.3],
 };
 
-/** Bone radii [headRadius, waistRadius] for phalanges. */
-const PHALANX_RADII: Record<Finger, [number, number]> = {
+/** Bone radii [headRadius, waistRadius] in mm for phalanges. */
+const PHALANX_RADII_MM: Record<Finger, [number, number]> = {
   1: [2.2, 1.35],
   2: [1.85, 1.1],
   3: [1.95, 1.15],
@@ -87,6 +152,7 @@ export interface JointNode {
   y: number;
   radius: number;
   kind: "cmc" | "mcp" | "ip" | "pip" | "dip";
+  creasePath: string;
 }
 
 export interface FingerSkeleton {
@@ -104,10 +170,14 @@ export interface FingerSkeleton {
 }
 
 export interface HandSkeleton {
+  handScale: number;
   palmCenter: Point2D;
   wristCenter: Point2D;
   palmPath: string;
+  unifiedHandPath: string;
   carpalArchPath: string;
+  thenarCreasePath: string;
+  dorsalTendonPaths: string[];
   labelPos: Point2D;
   fingers: Record<Finger, FingerSkeleton>;
 }
@@ -120,12 +190,30 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
+function lerpPt(a: Point2D, b: Point2D, t: number): Point2D {
+  return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) };
+}
+
 function dist(a: Point2D, b: Point2D): number {
   return Math.hypot(b.x - a.x, b.y - a.y);
 }
 
+function normalize(vx: number, vy: number): Point2D {
+  const len = Math.hypot(vx, vy);
+  if (len < 1e-5) return { x: 0, y: -1 };
+  return { x: vx / len, y: vy / len };
+}
+
 function fmt(n: number): string {
   return n.toFixed(1);
+}
+
+function evalThreePointWidth(widths: [number, number, number], t: number): number {
+  const clamped = clamp(t, 0, 1);
+  if (clamped <= 0.5) {
+    return lerp(widths[0], widths[1], clamped * 2);
+  }
+  return lerp(widths[1], widths[2], (clamped - 0.5) * 2);
 }
 
 /**
@@ -179,9 +267,29 @@ function makeBone(from: Point2D, to: Point2D, headRadius: number, waistRadius: n
 }
 
 /**
- * Builds a smooth tapered translucent finger sleeve following the articulated joint chain.
+ * Builds a subtle organic joint skin-crease or knuckle dome arc.
  */
-function buildFingerSleevePath(chain: Point2D[], halfWidthStart: number, halfWidthEnd: number): string {
+function buildJointCreasePath(
+  joint: Point2D,
+  tangent: Point2D,
+  halfSpan: number,
+  archOffset: number
+): string {
+  const nx = -tangent.y;
+  const ny = tangent.x;
+  const pL = { x: joint.x - nx * halfSpan, y: joint.y - ny * halfSpan };
+  const pR = { x: joint.x + nx * halfSpan, y: joint.y + ny * halfSpan };
+  const ctrl = { x: joint.x + tangent.x * archOffset, y: joint.y + tangent.y * archOffset };
+  return `M ${fmt(pL.x)} ${fmt(pL.y)} Q ${fmt(ctrl.x)} ${fmt(ctrl.y)} ${fmt(pR.x)} ${fmt(pR.y)}`;
+}
+
+/**
+ * Builds a smooth tapered organic finger sleeve following the articulated joint chain.
+ */
+function buildFingerSleevePath(
+  chain: Point2D[],
+  widths: [number, number, number]
+): string {
   const n = chain.length;
   const leftPts: Point2D[] = [];
   const rightPts: Point2D[] = [];
@@ -189,46 +297,54 @@ function buildFingerSleevePath(chain: Point2D[], halfWidthStart: number, halfWid
   for (let i = 0; i < n; i++) {
     const prev = chain[Math.max(0, i - 1)];
     const next = chain[Math.min(n - 1, i + 1)];
-    const dx = next.x - prev.x;
-    const dy = next.y - prev.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const nx = -dy / len;
-    const ny = dx / len;
+    const tVec = normalize(next.x - prev.x, next.y - prev.y);
+    const nx = -tVec.y;
+    const ny = tVec.x;
     const t = i / Math.max(1, n - 1);
-    const hw = lerp(halfWidthStart, halfWidthEnd, t);
+    const hw = evalThreePointWidth(widths, t);
 
     leftPts.push({ x: chain[i].x - nx * hw, y: chain[i].y - ny * hw });
     rightPts.push({ x: chain[i].x + nx * hw, y: chain[i].y + ny * hw });
   }
 
+  const tipTan = normalize(chain[n - 1].x - chain[n - 2].x, chain[n - 1].y - chain[n - 2].y);
+  const tipAngleDeg = (Math.atan2(tipTan.y, tipTan.x) * 180) / Math.PI + 90;
+  const hwEnd = widths[2];
+  const hwStart = widths[0];
+
   const cmds: string[] = [`M ${fmt(leftPts[0].x)} ${fmt(leftPts[0].y)}`];
-  for (let i = 1; i < n; i++) {
-    if (i < n - 1) {
+  for (let i = 1; i < n - 1; i++) {
+    if (i < n - 2) {
       const mx = (leftPts[i].x + leftPts[i + 1].x) / 2;
       const my = (leftPts[i].y + leftPts[i + 1].y) / 2;
       cmds.push(`Q ${fmt(leftPts[i].x)} ${fmt(leftPts[i].y)} ${fmt(mx)} ${fmt(my)}`);
     } else {
-      cmds.push(`L ${fmt(leftPts[i].x)} ${fmt(leftPts[i].y)}`);
+      cmds.push(`Q ${fmt(leftPts[i].x)} ${fmt(leftPts[i].y)} ${fmt(leftPts[n - 1].x)} ${fmt(leftPts[n - 1].y)}`);
     }
   }
+  if (n === 2) {
+    cmds.push(`L ${fmt(leftPts[1].x)} ${fmt(leftPts[1].y)}`);
+  }
 
-  // Semicircular fingertip cap (clockwise sweep = 1 matches left->right across +tangent)
   cmds.push(
-    `A ${fmt(halfWidthEnd)} ${fmt(halfWidthEnd)} 0 1 1 ${fmt(rightPts[n - 1].x)} ${fmt(rightPts[n - 1].y)}`
+    `A ${fmt(hwEnd)} ${fmt(hwEnd * 1.16)} ${fmt(tipAngleDeg)} 0 1 ${fmt(rightPts[n - 1].x)} ${fmt(rightPts[n - 1].y)}`
   );
 
-  for (let i = n - 2; i >= 0; i--) {
-    if (i > 0) {
+  for (let i = n - 2; i >= 1; i--) {
+    if (i > 1) {
       const mx = (rightPts[i].x + rightPts[i - 1].x) / 2;
       const my = (rightPts[i].y + rightPts[i - 1].y) / 2;
       cmds.push(`Q ${fmt(rightPts[i].x)} ${fmt(rightPts[i].y)} ${fmt(mx)} ${fmt(my)}`);
     } else {
-      cmds.push(`L ${fmt(rightPts[0].x)} ${fmt(rightPts[0].y)}`);
+      cmds.push(`Q ${fmt(rightPts[i].x)} ${fmt(rightPts[i].y)} ${fmt(rightPts[0].x)} ${fmt(rightPts[0].y)}`);
     }
+  }
+  if (n === 2) {
+    cmds.push(`L ${fmt(rightPts[0].x)} ${fmt(rightPts[0].y)}`);
   }
 
   cmds.push(
-    `A ${fmt(halfWidthStart)} ${fmt(halfWidthStart)} 0 1 1 ${fmt(leftPts[0].x)} ${fmt(leftPts[0].y)}`,
+    `A ${fmt(hwStart)} ${fmt(hwStart * 0.72)} ${fmt(tipAngleDeg)} 0 1 ${fmt(leftPts[0].x)} ${fmt(leftPts[0].y)}`,
     "Z"
   );
 
@@ -263,8 +379,31 @@ function projectToRadiusWithinY(
     return { x: mcp.x, y };
   }
   const maxDx = Math.sqrt(Math.max(0, radius * radius - finalDy * finalDy));
-  const finalDx = (ux === 0 ? 0 : Math.sign(ux)) * maxDx;
+  const dxSign = ux === 0 ? (exactRadius ? 1 : 0) : Math.sign(ux);
+  const finalDx = dxSign * maxDx;
   return { x: mcp.x + finalDx, y };
+}
+
+function computeFingerTargetXY(
+  fp: FingerPosture,
+  palmLiftY: number
+): { x: number; rawY: number; minY: number; maxY: number } {
+  const x = fp.xUnit * PIANO_WHITE_KEY_W;
+  const isPlayingBlack = fp.isBlack && (fp.pressDepth > 0 || fp.targetMidi !== null);
+  let rawY: number;
+
+  if (isPlayingBlack) {
+    rawY = BLACK_TIP_Y[fp.finger] + fp.pressDepth * 2;
+  } else if (fp.targetMidi !== null && fp.pressDepth > 0) {
+    rawY = WHITE_TIP_Y[fp.finger] + palmLiftY * 0.45 + fp.pressDepth * 2.5;
+  } else {
+    rawY = WHITE_TIP_Y[fp.finger] - 2 + palmLiftY * 0.78;
+  }
+
+  const minY = PIANO_KEYS_Y + 4;
+  const maxY = isPlayingBlack ? PIANO_KEYS_Y + PIANO_BLACK_KEY_H - 6 : PIANO_KEYBED_BOTTOM_Y - 8;
+
+  return { x, rawY, minY, maxY };
 }
 
 function computeFingerTipXY(
@@ -274,20 +413,7 @@ function computeFingerTipXY(
   handScale: number
 ): Point2D {
   const fixedLen = BASE_FINGER_LENGTH_PX[fp.finger] * handScale;
-  const x = fp.xUnit * PIANO_WHITE_KEY_W;
-  const isPlayingBlack = fp.isBlack && (fp.pressDepth > 0 || fp.targetMidi !== null);
-  let rawY: number;
-
-  if (isPlayingBlack) {
-    rawY = BLACK_TIP_Y[fp.finger] + fp.pressDepth * 2;
-  } else if (fp.targetMidi !== null && fp.pressDepth > 0) {
-    rawY = WHITE_TIP_Y[fp.finger] + palmLiftY * 0.72 + fp.pressDepth * 2.5;
-  } else {
-    rawY = WHITE_TIP_Y[fp.finger] - 2 + palmLiftY * 0.85;
-  }
-
-  const minY = PIANO_KEYS_Y + 14;
-  const maxY = isPlayingBlack ? PIANO_KEYS_Y + PIANO_BLACK_KEY_H - 6 : PIANO_KEYBED_BOTTOM_Y - 8;
+  const { x, rawY, minY, maxY } = computeFingerTargetXY(fp, palmLiftY);
 
   if (fp.targetMidi === null) {
     // Idle fingers maintain an exact fixed projected length scaled by S/M/L.
@@ -298,65 +424,377 @@ function computeFingerTipXY(
   return projectToRadiusWithinY(mcp, x, rawY, fixedLen, minY, maxY, false);
 }
 
+interface FingerPerimeterInfo {
+  finger: Finger;
+  layerOffset: -1 | 0 | 1;
+  chain: Point2D[];
+  widths: [number, number, number];
+  radPts: Point2D[];
+  ulnPts: Point2D[];
+  baseTangent: Point2D;
+  tipAngleDeg: number;
+}
+
+function buildFingerPerimeterInfo(
+  finger: Finger,
+  layerOffset: -1 | 0 | 1,
+  chain: Point2D[],
+  widths: [number, number, number],
+  dir: 1 | -1,
+  radStartFrac: number,
+  ulnEndFrac: number
+): FingerPerimeterInfo {
+  const n = chain.length;
+  const radPts: Point2D[] = [];
+  const ulnPts: Point2D[] = [];
+  const radN: Point2D[] = [];
+  const ulnN: Point2D[] = [];
+  const tangents: Point2D[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const prev = chain[Math.max(0, i - 1)];
+    const next = chain[Math.min(n - 1, i + 1)];
+    const tVec = normalize(next.x - prev.x, next.y - prev.y);
+    tangents.push(tVec);
+    const rn = { x: tVec.y * dir, y: -tVec.x * dir };
+    radN.push(rn);
+    ulnN.push({ x: -rn.x, y: -rn.y });
+  }
+
+  const baseSegLen = dist(chain[0], chain[1]);
+  const hw0Rad = evalThreePointWidth(widths, clamp((radStartFrac * baseSegLen) / Math.max(1, dist(chain[0], chain[n - 1])), 0, 0.35));
+  const hw0Uln = evalThreePointWidth(widths, clamp((ulnEndFrac * baseSegLen) / Math.max(1, dist(chain[0], chain[n - 1])), 0, 0.35));
+
+  const radAnchor = {
+    x: chain[0].x + tangents[0].x * (radStartFrac * baseSegLen),
+    y: chain[0].y + tangents[0].y * (radStartFrac * baseSegLen),
+  };
+  const ulnAnchor = {
+    x: chain[0].x + tangents[0].x * (ulnEndFrac * baseSegLen),
+    y: chain[0].y + tangents[0].y * (ulnEndFrac * baseSegLen),
+  };
+
+  radPts.push({ x: radAnchor.x + radN[0].x * hw0Rad, y: radAnchor.y + radN[0].y * hw0Rad });
+  ulnPts.push({ x: ulnAnchor.x + ulnN[0].x * hw0Uln, y: ulnAnchor.y + ulnN[0].y * hw0Uln });
+
+  for (let i = 1; i < n; i++) {
+    const t = i / Math.max(1, n - 1);
+    const hw = evalThreePointWidth(widths, t);
+    radPts.push({ x: chain[i].x + radN[i].x * hw, y: chain[i].y + radN[i].y * hw });
+    ulnPts.push({ x: chain[i].x + ulnN[i].x * hw, y: chain[i].y + ulnN[i].y * hw });
+  }
+
+  const tipTan = normalize(chain[n - 1].x - chain[n - 2].x, chain[n - 1].y - chain[n - 2].y);
+  const tipAngleDeg = (Math.atan2(tipTan.y, tipTan.x) * 180) / Math.PI + 90;
+
+  return {
+    finger,
+    layerOffset,
+    chain,
+    widths,
+    radPts,
+    ulnPts,
+    baseTangent: tangents[0],
+    tipAngleDeg,
+  };
+}
+
+function appendFingerUpCmds(cmds: string[], info: FingerPerimeterInfo): void {
+  const pts = info.radPts;
+  const n = pts.length;
+  for (let i = 1; i < n - 1; i++) {
+    if (i < n - 2) {
+      const mx = (pts[i].x + pts[i + 1].x) / 2;
+      const my = (pts[i].y + pts[i + 1].y) / 2;
+      cmds.push(`Q ${fmt(pts[i].x)} ${fmt(pts[i].y)} ${fmt(mx)} ${fmt(my)}`);
+    } else {
+      cmds.push(`Q ${fmt(pts[i].x)} ${fmt(pts[i].y)} ${fmt(pts[n - 1].x)} ${fmt(pts[n - 1].y)}`);
+    }
+  }
+  if (n === 2) {
+    cmds.push(`L ${fmt(pts[1].x)} ${fmt(pts[1].y)}`);
+  }
+}
+
+function appendFingerDownCmds(cmds: string[], info: FingerPerimeterInfo): void {
+  const pts = info.ulnPts;
+  const n = pts.length;
+  for (let i = n - 2; i >= 1; i--) {
+    if (i > 1) {
+      const mx = (pts[i].x + pts[i - 1].x) / 2;
+      const my = (pts[i].y + pts[i - 1].y) / 2;
+      cmds.push(`Q ${fmt(pts[i].x)} ${fmt(pts[i].y)} ${fmt(mx)} ${fmt(my)}`);
+    } else {
+      cmds.push(`Q ${fmt(pts[i].x)} ${fmt(pts[i].y)} ${fmt(pts[0].x)} ${fmt(pts[0].y)}`);
+    }
+  }
+  if (n === 2) {
+    cmds.push(`L ${fmt(pts[0].x)} ${fmt(pts[0].y)}`);
+  }
+}
+
+function buildUnifiedHandPath(
+  perimeters: Record<Finger, FingerPerimeterInfo>,
+  mcps: Record<Finger, Point2D>,
+  carpalRoots: Record<Finger, Point2D>,
+  landmarks: {
+    wristThumb: Point2D;
+    wristMid: Point2D;
+    wristPinky: Point2D;
+    thenarOuter: Point2D;
+    thumbSaddle: Point2D;
+    ulnarMcp5: Point2D;
+    hypothenarOuter: Point2D;
+  },
+  dir: 1 | -1,
+  handScale: number
+): string {
+  const normalFingers = FINGERS.filter((f) => perimeters[f].layerOffset === 0);
+  const tipArcSweep = dir === 1 ? 1 : 0;
+
+  // Prevent adjacent interdigital web bases from ever crossing if fingers pinch close
+  for (let i = 0; i < normalFingers.length - 1; i++) {
+    const fA = normalFingers[i];
+    const fB = normalFingers[i + 1];
+    if (fA === 1 || fB !== fA + 1) continue;
+    const pA = perimeters[fA].ulnPts[0];
+    const pB = perimeters[fB].radPts[0];
+    const gap = (pB.x - pA.x) * dir;
+    const minGap = 2.5 * handScale;
+    if (gap < minGap) {
+      const midX = (pA.x + pB.x) / 2;
+      pA.x = midX - (minGap / 2) * dir;
+      pB.x = midX + (minGap / 2) * dir;
+    }
+  }
+
+  const cmds: string[] = [`M ${fmt(landmarks.wristThumb.x)} ${fmt(landmarks.wristThumb.y)}`];
+
+  if (normalFingers.length === 0) {
+    cmds.push(
+      `Q ${fmt(landmarks.thenarOuter.x)} ${fmt(landmarks.thenarOuter.y)} ${fmt(landmarks.thumbSaddle.x)} ${fmt(landmarks.thumbSaddle.y)}`,
+      `Q ${fmt(mcps[3].x)} ${fmt(mcps[3].y)} ${fmt(landmarks.ulnarMcp5.x)} ${fmt(landmarks.ulnarMcp5.y)}`,
+      `Q ${fmt(landmarks.hypothenarOuter.x)} ${fmt(landmarks.hypothenarOuter.y)} ${fmt(landmarks.wristPinky.x)} ${fmt(landmarks.wristPinky.y)}`,
+      `Q ${fmt(landmarks.wristMid.x)} ${fmt(landmarks.wristMid.y)} ${fmt(landmarks.wristThumb.x)} ${fmt(landmarks.wristThumb.y)}`,
+      "Z"
+    );
+    return cmds.join(" ");
+  }
+
+  const firstF = normalFingers[0];
+  const firstRadStart = perimeters[firstF].radPts[0];
+  if (firstF === 1) {
+    const v = {
+      x: firstRadStart.x - landmarks.wristThumb.x,
+      y: firstRadStart.y - landmarks.wristThumb.y,
+    };
+    const outwardN = normalize(v.y * dir, -v.x * dir);
+    const midThenar = lerpPt(landmarks.wristThumb, firstRadStart, 0.52);
+    const dynamicThenar = {
+      x: midThenar.x + outwardN.x * mm(6.5) * handScale,
+      y: midThenar.y + outwardN.y * mm(6.5) * handScale,
+    };
+    cmds.push(
+      `Q ${fmt(dynamicThenar.x)} ${fmt(dynamicThenar.y)} ${fmt(firstRadStart.x)} ${fmt(firstRadStart.y)}`
+    );
+  } else {
+    const saddleEntry = lerpPt(landmarks.thenarOuter, landmarks.thumbSaddle, 0.55);
+    cmds.push(
+      `Q ${fmt(landmarks.thenarOuter.x)} ${fmt(landmarks.thenarOuter.y)} ${fmt(saddleEntry.x)} ${fmt(saddleEntry.y)}`,
+      `Q ${fmt(landmarks.thumbSaddle.x)} ${fmt(landmarks.thumbSaddle.y)} ${fmt(firstRadStart.x)} ${fmt(firstRadStart.y)}`
+    );
+  }
+
+  for (let idx = 0; idx < normalFingers.length; idx++) {
+    const f = normalFingers[idx];
+    const info = perimeters[f];
+    appendFingerUpCmds(cmds, info);
+
+    const hwEnd = info.widths[2];
+    const ulnTip = info.ulnPts[info.ulnPts.length - 1];
+    cmds.push(
+      `A ${fmt(hwEnd)} ${fmt(hwEnd * 1.16)} ${fmt(info.tipAngleDeg)} 0 ${tipArcSweep} ${fmt(ulnTip.x)} ${fmt(ulnTip.y)}`
+    );
+
+    appendFingerDownCmds(cmds, info);
+
+    if (idx < normalFingers.length - 1) {
+      const nextF = normalFingers[idx + 1];
+      const nextInfo = perimeters[nextF];
+      const uWeb = info.ulnPts[0];
+      const rWeb = nextInfo.radPts[0];
+
+      if (nextF === f + 1) {
+        if (f === 1 && nextF === 2) {
+          // Deep concave purlicue curve between thumb (1) and index (2)
+          const proxVec = normalize(carpalRoots[2].x - mcps[2].x, carpalRoots[2].y - mcps[2].y);
+          const mid12 = lerpPt(uWeb, rWeb, 0.45);
+          const purlicueDeep = {
+            x: mid12.x + proxVec.x * mm(10) * handScale,
+            y: mid12.y + proxVec.y * mm(10) * handScale,
+          };
+          const c1 = lerpPt(uWeb, purlicueDeep, 0.72);
+          const c2 = lerpPt(rWeb, purlicueDeep, 0.72);
+          cmds.push(
+            `C ${fmt(c1.x)} ${fmt(c1.y)} ${fmt(c2.x)} ${fmt(c2.y)} ${fmt(rWeb.x)} ${fmt(rWeb.y)}`
+          );
+        } else {
+          // Smooth U-shaped interdigital web (2-3, 3-4, 4-5) with C1 entry/exit tangents
+          const gap = Math.abs(rWeb.x - uWeb.x);
+          const webDepth = clamp(gap * 0.68, 4 * handScale, 9.5 * handScale);
+          const c1 = {
+            x: uWeb.x - info.baseTangent.x * webDepth,
+            y: uWeb.y - info.baseTangent.y * webDepth,
+          };
+          const c2 = {
+            x: rWeb.x - nextInfo.baseTangent.x * webDepth,
+            y: rWeb.y - nextInfo.baseTangent.y * webDepth,
+          };
+          cmds.push(
+            `C ${fmt(c1.x)} ${fmt(c1.y)} ${fmt(c2.x)} ${fmt(c2.y)} ${fmt(rWeb.x)} ${fmt(rWeb.y)}`
+          );
+        }
+      } else {
+        // Bridge cleanly across skipped crossing fingers (layerOffset !== 0) at natural web height
+        if (f === 1) {
+          const proxVec = normalize(carpalRoots[2].x - mcps[2].x, carpalRoots[2].y - mcps[2].y);
+          const midCrest = lerpPt(uWeb, rWeb, 0.45);
+          const archPeak = {
+            x: midCrest.x + proxVec.x * mm(5) * handScale,
+            y: midCrest.y + proxVec.y * mm(5) * handScale,
+          };
+          const c1 = lerpPt(uWeb, archPeak, 0.65);
+          const c2 = lerpPt(rWeb, archPeak, 0.65);
+          cmds.push(
+            `C ${fmt(c1.x)} ${fmt(c1.y)} ${fmt(c2.x)} ${fmt(c2.y)} ${fmt(rWeb.x)} ${fmt(rWeb.y)}`
+          );
+        } else {
+          const midMcp = lerpPt(uWeb, rWeb, 0.5);
+          cmds.push(
+            `Q ${fmt(midMcp.x)} ${fmt(midMcp.y + 3 * handScale)} ${fmt(rWeb.x)} ${fmt(rWeb.y)}`
+          );
+        }
+      }
+    }
+  }
+
+  const ulnMid = lerpPt(landmarks.ulnarMcp5, landmarks.hypothenarOuter, 0.5);
+  cmds.push(
+    `Q ${fmt(landmarks.ulnarMcp5.x)} ${fmt(landmarks.ulnarMcp5.y)} ${fmt(ulnMid.x)} ${fmt(ulnMid.y)}`,
+    `Q ${fmt(landmarks.hypothenarOuter.x)} ${fmt(landmarks.hypothenarOuter.y)} ${fmt(landmarks.wristPinky.x)} ${fmt(landmarks.wristPinky.y)}`
+  );
+
+  cmds.push(
+    `Q ${fmt(landmarks.wristMid.x)} ${fmt(landmarks.wristMid.y)} ${fmt(landmarks.wristThumb.x)} ${fmt(landmarks.wristThumb.y)}`,
+    "Z"
+  );
+
+  return cmds.join(" ");
+}
+
 /**
- * Computes an articulated anatomical hand skeleton (carpal arch, metacarpals, MCP/PIP/DIP/IP joints,
- * phalanx bones, and organic palm/finger silhouette) from a `HandPosture`.
+ * Computes an articulated anatomical hand skeleton with real-world physical scaling
+ * relative to `PIANO_WHITE_KEY_W` (`23.5 mm` key pitch) and a unified organic silhouette.
  */
 export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
   const handScale = SPAN_PRESET_SCALE[posture.spanPreset ?? "M"];
   const dir = posture.hand === "RH" ? 1 : -1;
   const palmCenterX = posture.palmCenterXUnit * PIANO_WHITE_KEY_W;
-  const sizeKnuckleOffsetY = (1 - handScale) * 14;
-  const knuckleBaseY = PIANO_KNUCKLE_BASE_Y - sizeKnuckleOffsetY + posture.palmLiftY;
+  const knuckleBaseY = getKnuckleBaseY(handScale, posture.palmLiftY);
 
   const fingerSpanPx = Math.abs(posture.fingers[5].xUnit - posture.fingers[1].xUnit) * PIANO_WHITE_KEY_W;
-  const abductRatio = clamp((fingerSpanPx - 90 * handScale) / (90 * handScale), -0.12, 0.52);
+  const abductRatio = getAbductRatio(fingerSpanPx, handScale);
 
   const angleRad = (posture.palmAngleDeg * Math.PI) / 180;
   const cosA = Math.cos(angleRad);
   const sinA = Math.sin(angleRad);
 
-  const toWorld = (dx: number, dy: number): Point2D => {
-    const sx = dx * handScale;
-    const sy = dy * handScale;
-    return {
-      x: palmCenterX + sx * cosA - sy * sinA,
-      y: knuckleBaseY + sx * sinA + sy * cosA,
-    };
-  };
+  const toWorldPx = (lx: number, ly: number): Point2D => ({
+    x: palmCenterX + lx * cosA - ly * sinA,
+    y: knuckleBaseY + lx * sinA + ly * cosA,
+  });
 
-  // Carpal roots at wrist arch (metacarpal proximal bases)
+  const toWorldMm = (dxMm: number, dyMm: number): Point2D =>
+    toWorldPx(mm(dxMm) * handScale, mm(dyMm) * handScale);
+
+  // Carpal roots at wrist arch (metacarpal proximal bases, mm scaled by handScale)
   const carpalRoots: Record<Finger, Point2D> = {
-    1: toWorld((-17 - abductRatio * 4) * dir, 39),
-    2: toWorld(-10 * dir, 42),
-    3: toWorld(0, 43),
-    4: toWorld(9 * dir, 42),
-    5: toWorld((17 + abductRatio * 3) * dir, 40),
+    1: toWorldMm(-18 * dir, 49),
+    2: toWorldMm(-12 * dir, 52),
+    3: toWorldMm(0, 54),
+    4: toWorldMm(11 * dir, 52),
+    5: toWorldMm(19 * dir, 52),
   };
 
-  // Anatomical MCP knuckle arch (3 highest, 2/4 slightly lower, 5 lower on ulnar slope, 1 lower on radial side)
+  // Fixed knuckle anchors for fingers 2..5 (MCP)
   const mcps: Record<Finger, Point2D> = {
-    1: toWorld((-28 - abductRatio * 12) * dir, 14),
-    2: toWorld((-17 - abductRatio * 4) * dir, 3),
-    3: toWorld(0, 0),
-    4: toWorld((16 + abductRatio * 4) * dir, 4),
-    5: toWorld((31 + abductRatio * 10) * dir, 12),
+    1: { x: 0, y: 0 }, // Solved below via biomechanical CMC1 abduction
+    2: toWorldPx(
+      getFingerOriginLocalPx(2, abductRatio, handScale, dir).x,
+      getFingerOriginLocalPx(2, abductRatio, handScale, dir).y
+    ),
+    3: toWorldPx(
+      getFingerOriginLocalPx(3, abductRatio, handScale, dir).x,
+      getFingerOriginLocalPx(3, abductRatio, handScale, dir).y
+    ),
+    4: toWorldPx(
+      getFingerOriginLocalPx(4, abductRatio, handScale, dir).x,
+      getFingerOriginLocalPx(4, abductRatio, handScale, dir).y
+    ),
+    5: toWorldPx(
+      getFingerOriginLocalPx(5, abductRatio, handScale, dir).x,
+      getFingerOriginLocalPx(5, abductRatio, handScale, dir).y
+    ),
   };
 
-  // Organic palm silhouette landmarks
-  const wristThumb = toWorld(-22 * dir, 51);
-  const wristMid = toWorld(0, 54);
-  const wristPinky = toWorld(21 * dir, 50);
-  const thenarOuter = toWorld((-33 - abductRatio * 10) * dir, 29);
-  const thumbSaddle = toWorld((-23 - abductRatio * 6) * dir, 11);
-  const radialMcp1 = toWorld((-32 - abductRatio * 12) * dir, 15);
-  const radialMcp2 = toWorld((-22 - abductRatio * 4) * dir, 2);
-  const ulnarMcp5 = toWorld((35 + abductRatio * 10) * dir, 13);
-  const hypothenarOuter = toWorld((32 + abductRatio * 8) * dir, 31);
+  // Biomechanical 2-link thumb abduction around CMC1 (carpalRoots[1] -> mcps[1] -> tip)
+  const thumbFp = posture.fingers[1];
+  const thumbTarget = computeFingerTargetXY(thumbFp, posture.palmLiftY);
+  const clampedThumbTargetY = clamp(thumbTarget.rawY, thumbTarget.minY, thumbTarget.maxY);
+  const targetRelX = thumbTarget.x - carpalRoots[1].x;
+  const targetRelY = clampedThumbTargetY - carpalRoots[1].y;
+  // Transform target displacement into palm-local coordinates
+  const localDx = targetRelX * cosA + targetRelY * sinA;
+  const localDy = -targetRelX * sinA + targetRelY * cosA;
+  const radialX = -localDx * dir;
+  const forwardY = -localDy;
+  const targetAngle = Math.atan2(radialX, Math.max(mm(12) * handScale, forwardY));
+  const mc1Len = mm(METACARPAL_1_LENGTH_MM) * handScale;
+  const fixedThumbLen = BASE_FINGER_LENGTH_PX[1] * handScale;
+  const distFromCmc = Math.hypot(localDx, localDy);
 
-  const knuckleCrest23 = toWorld((-8.5 - abductRatio * 2) * dir, -2);
-  const knuckleCrest34 = toWorld((8 + abductRatio * 2) * dir, -1.5);
-  const knuckleCrest45 = toWorld((24 + abductRatio * 7) * dir, 5);
+  let cmcAngle: number;
+  if (thumbFp.layerOffset === -1) {
+    cmcAngle = clamp(targetAngle, -0.38, 0.35);
+  } else {
+    const naturalCmcAngle = clamp(targetAngle * 0.92 + 0.16, 0.42, 1.32);
+    const stretchBlend = clamp((distFromCmc / (mc1Len + fixedThumbLen) - 0.78) / 0.2, 0, 1);
+    cmcAngle = lerp(naturalCmcAngle, clamp(targetAngle, 0.25, 1.35), stretchBlend);
+  }
+
+  const cmc1Local = getFingerOriginLocalPx(1, abductRatio, handScale, dir);
+  mcps[1] = toWorldPx(
+    cmc1Local.x - Math.sin(cmcAngle) * mc1Len * dir,
+    cmc1Local.y - Math.cos(cmcAngle) * mc1Len
+  );
+
+  // Organic palm silhouette landmarks (mm scaled by handScale)
+  const wristThumb = toWorldMm(-22 * dir, 53);
+  const wristMid = toWorldMm(0, 54.5);
+  const wristPinky = toWorldMm(22 * dir, 52);
+  const thenarOuter = toWorldMm((-33 - abductRatio * 8) * dir, 31);
+  const thumbSaddle = toWorldMm((-23 - abductRatio * 5) * dir, 12);
+  const radialMcp1 = toWorldPx(
+    cmc1Local.x - Math.sin(cmcAngle) * mc1Len * dir - 4 * handScale * dir,
+    cmc1Local.y - Math.cos(cmcAngle) * mc1Len + 1 * handScale
+  );
+  const radialMcp2 = toWorldMm((-24 - abductRatio * 4.5) * dir, 2.5);
+  const ulnarMcp5 = toWorldMm((42 + abductRatio * 11) * dir, 17);
+  const hypothenarOuter = toWorldMm((33 + abductRatio * 7) * dir, 35);
+
+  const knuckleCrest23 = toWorldMm((-10 - abductRatio * 2) * dir, -2);
+  const knuckleCrest34 = toWorldMm((10 + abductRatio * 2) * dir, -1.5);
+  const knuckleCrest45 = toWorldMm((28 + abductRatio * 7) * dir, 5);
 
   const palmPath = [
     `M ${fmt(wristThumb.x)} ${fmt(wristThumb.y)}`,
@@ -376,7 +814,19 @@ export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
     `Q ${fmt(carpalRoots[4].x)} ${fmt(carpalRoots[4].y + 2 * handScale)} ${fmt(carpalRoots[5].x)} ${fmt(carpalRoots[5].y)}`,
   ].join(" ");
 
+  const thenarStart = toWorldMm((-21 - abductRatio * 3) * dir, 15);
+  const thenarCtrl = toWorldMm((-14 - abductRatio * 2) * dir, 31);
+  const thenarEnd = toWorldMm(-8 * dir, 47);
+  const thenarCreasePath = `M ${fmt(thenarStart.x)} ${fmt(thenarStart.y)} Q ${fmt(thenarCtrl.x)} ${fmt(thenarCtrl.y)} ${fmt(thenarEnd.x)} ${fmt(thenarEnd.y)}`;
+
+  const dorsalTendonPaths = ([2, 3, 4, 5] as const).map((f) => {
+    const start = lerpPt(carpalRoots[f], mcps[f], 0.18);
+    const end = lerpPt(carpalRoots[f], mcps[f], 0.88);
+    return `M ${fmt(start.x)} ${fmt(start.y)} L ${fmt(end.x)} ${fmt(end.y)}`;
+  });
+
   const fingers = {} as Record<Finger, FingerSkeleton>;
+  const perimeters = {} as Record<Finger, FingerPerimeterInfo>;
 
   for (const f of FINGERS) {
     const fp = posture.fingers[f];
@@ -387,24 +837,42 @@ export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
     const dx = tip.x - mcp.x;
     const dy = tip.y - mcp.y;
     const spanLen = Math.hypot(dx, dy) || 1;
+    const tangent = { x: dx / spanLen, y: dy / spanLen };
     // Ulnar-oriented unit perpendicular (points toward pinky side for both RH and LH)
-    const ux = (-dy / spanLen) * dir;
-    const uy = (dx / spanLen) * dir;
+    const ux = -tangent.y * dir;
+    const uy = tangent.x * dir;
+
+    const fixedLen = BASE_FINGER_LENGTH_PX[f] * handScale;
+    const stretchRatio = clamp(spanLen / Math.max(1, fixedLen), 0.45, 1.0);
+    const relaxScale = 1 - stretchRatio * 0.75;
 
     let bendPx = 0;
     if (fp.layerOffset === -1) {
-      bendPx = 10;
+      bendPx = mm(10) * handScale;
     } else if (fp.layerOffset === 1) {
-      bendPx = -9;
+      bendPx = -mm(9) * handScale;
     } else if (f === 1) {
-      bendPx = 3.2;
+      bendPx = mm(3.4) * handScale * relaxScale;
+    } else if (f === 2) {
+      bendPx = mm(1.4) * handScale * relaxScale;
+    } else if (f === 4) {
+      bendPx = -mm(1.4) * handScale * relaxScale;
     } else if (f === 5) {
-      bendPx = -1.2;
+      bendPx = -mm(2.2) * handScale * relaxScale;
     }
 
-    const [headR, waistR] = PHALANX_RADII[f];
+    const [rawHeadR, rawWaistR] = PHALANX_RADII_MM[f];
+    const headR = mm(rawHeadR) * handScale;
+    const waistR = mm(rawWaistR) * handScale;
     const metacarpal = makeBone(carpalRoot, mcp, headR * 1.05, waistR * 1.05);
     const metacarpalLength = dist(carpalRoot, mcp);
+
+    const [w0, w1, w2] = SLEEVE_HALF_WIDTH_MM[f];
+    const widths: [number, number, number] = [
+      mm(w0) * handScale,
+      mm(w1) * handScale,
+      mm(w2) * handScale,
+    ];
 
     const joints: JointNode[] = [];
     const phalanges: BoneSegment[] = [];
@@ -415,10 +883,31 @@ export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
         x: lerp(mcp.x, tip.x, 0.52) + ux * bendPx,
         y: lerp(mcp.y, tip.y, 0.52) + uy * bendPx,
       };
+      const cmcTan = normalize(mcp.x - carpalRoot.x, mcp.y - carpalRoot.y);
+      const mcpTan = normalize(ip.x - carpalRoot.x, ip.y - carpalRoot.y);
+      const ipTan = normalize(tip.x - mcp.x, tip.y - mcp.y);
       joints.push(
-        { x: carpalRoot.x, y: carpalRoot.y, radius: 2.4, kind: "cmc" },
-        { x: mcp.x, y: mcp.y, radius: 3.1, kind: "mcp" },
-        { x: ip.x, y: ip.y, radius: 2.5, kind: "ip" }
+        {
+          x: carpalRoot.x,
+          y: carpalRoot.y,
+          radius: 2.4 * handScale,
+          kind: "cmc",
+          creasePath: buildJointCreasePath(carpalRoot, cmcTan, 3.6 * handScale, 1.2 * handScale),
+        },
+        {
+          x: mcp.x,
+          y: mcp.y,
+          radius: 3.1 * handScale,
+          kind: "mcp",
+          creasePath: buildJointCreasePath(mcp, mcpTan, widths[0] * 0.48, -1.3 * handScale),
+        },
+        {
+          x: ip.x,
+          y: ip.y,
+          radius: 2.5 * handScale,
+          kind: "ip",
+          creasePath: buildJointCreasePath(ip, ipTan, widths[1] * 0.56, 1.5 * handScale),
+        }
       );
       phalanges.push(
         makeBone(mcp, ip, headR, waistR),
@@ -434,11 +923,32 @@ export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
         x: lerp(mcp.x, tip.x, 0.76) + ux * (bendPx * 0.55),
         y: lerp(mcp.y, tip.y, 0.76) + uy * (bendPx * 0.55),
       };
-      const mcpR = f === 3 ? 3.1 : f === 5 ? 2.5 : 2.9;
+      const mcpTan = normalize(pip.x - carpalRoot.x, pip.y - carpalRoot.y);
+      const pipTan = normalize(dip.x - mcp.x, dip.y - mcp.y);
+      const dipTan = normalize(tip.x - pip.x, tip.y - pip.y);
+      const mcpR = (f === 3 ? 3.1 : f === 5 ? 2.5 : 2.9) * handScale;
       joints.push(
-        { x: mcp.x, y: mcp.y, radius: mcpR, kind: "mcp" },
-        { x: pip.x, y: pip.y, radius: mcpR * 0.78, kind: "pip" },
-        { x: dip.x, y: dip.y, radius: mcpR * 0.62, kind: "dip" }
+        {
+          x: mcp.x,
+          y: mcp.y,
+          radius: mcpR,
+          kind: "mcp",
+          creasePath: buildJointCreasePath(mcp, mcpTan, widths[0] * 0.48, -1.4 * handScale),
+        },
+        {
+          x: pip.x,
+          y: pip.y,
+          radius: mcpR * 0.78,
+          kind: "pip",
+          creasePath: buildJointCreasePath(pip, pipTan, widths[1] * 0.58, 1.5 * handScale),
+        },
+        {
+          x: dip.x,
+          y: dip.y,
+          radius: mcpR * 0.62,
+          kind: "dip",
+          creasePath: buildJointCreasePath(dip, dipTan, widths[2] * 0.58, 1.2 * handScale),
+        }
       );
       phalanges.push(
         makeBone(mcp, pip, headR, waistR),
@@ -449,8 +959,24 @@ export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
     }
 
     const totalPhalanxLength = phalanges.reduce((acc, b) => acc + dist(b.from, b.to), 0);
-    const [hwStart, hwEnd] = SLEEVE_HALF_WIDTH[f];
-    const sleevePath = buildFingerSleevePath(chain, hwStart, hwEnd);
+    const sleevePath = buildFingerSleevePath(chain, widths);
+
+    const radStartFrac =
+      f === 1
+        ? 0
+        : f === 2 && posture.fingers[1].layerOffset !== 0
+          ? 0.08
+          : 0.24;
+    const ulnEndFrac = f === 1 ? 0.14 : f === 5 ? 0.12 : 0.24;
+    perimeters[f] = buildFingerPerimeterInfo(
+      f,
+      fp.layerOffset,
+      chain,
+      widths,
+      dir,
+      radStartFrac,
+      ulnEndFrac
+    );
 
     fingers[f] = {
       finger: f,
@@ -467,12 +993,33 @@ export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
     };
   }
 
+  const unifiedHandPath = buildUnifiedHandPath(
+    perimeters,
+    mcps,
+    carpalRoots,
+    {
+      wristThumb,
+      wristMid,
+      wristPinky,
+      thenarOuter,
+      thumbSaddle,
+      ulnarMcp5,
+      hypothenarOuter,
+    },
+    dir,
+    handScale
+  );
+
   return {
-    palmCenter: toWorld(0, 22),
+    handScale,
+    palmCenter: toWorldMm(0, 23),
     wristCenter: wristMid,
     palmPath,
+    unifiedHandPath,
     carpalArchPath,
-    labelPos: toWorld(0, 28),
+    thenarCreasePath,
+    dorsalTendonPaths,
+    labelPos: toWorldMm(0, 29),
     fingers,
   };
 }

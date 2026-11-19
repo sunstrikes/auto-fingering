@@ -1,3 +1,9 @@
+import {
+  DEFAULT_PIANO_TIMBRE,
+  PIANO_TIMBRE_PRESETS,
+  type AudioEngineStatus,
+  type PianoTimbreId,
+} from "../audio/pianoAudio";
 import type { SpeedMultiplier } from "../audio/playbackEngine";
 import type { HandSpanProfile, SpanPreset } from "../domain/types";
 import type { MidiConnectionState } from "../midi/webMidi";
@@ -12,6 +18,8 @@ export interface PracticeSettingsModalProps {
   open: boolean;
   midiState: MidiConnectionState;
   midiLocalSound: boolean;
+  audioStatus?: AudioEngineStatus;
+  pianoTimbre?: PianoTimbreId;
   speedMultiplier: SpeedMultiplier;
   baseBpm: number;
   countInEnabled: boolean;
@@ -24,6 +32,8 @@ export interface PracticeSettingsModalProps {
   handSpanProfile?: HandSpanProfile;
   onSelectDevice: (deviceId: string | null) => void;
   onToggleLocalSound: (enabled: boolean) => void;
+  onChangePianoTimbre?: (timbre: PianoTimbreId) => void;
+  onPreviewTimbre?: () => void;
   onToggleCountIn: () => void;
   onToggleLoopGap?: () => void;
   onChangeMetronomeVolume: (volume: number) => void;
@@ -73,6 +83,8 @@ export function PracticeSettingsModal({
   open,
   midiState,
   midiLocalSound,
+  audioStatus = "idle",
+  pianoTimbre = DEFAULT_PIANO_TIMBRE,
   speedMultiplier,
   baseBpm,
   countInEnabled,
@@ -85,6 +97,8 @@ export function PracticeSettingsModal({
   handSpanProfile,
   onSelectDevice,
   onToggleLocalSound,
+  onChangePianoTimbre,
+  onPreviewTimbre,
   onToggleCountIn,
   onToggleLoopGap,
   onChangeMetronomeVolume,
@@ -167,11 +181,63 @@ export function PracticeSettingsModal({
               <div>
                 <div className="font-semibold text-slate-800">MIDI 本地发声</div>
                 <p className="mt-0.5 text-[11px] text-slate-500">
-                  将外接硬件 MIDI 键盘的 NoteOn/NoteOff 事件路由到浏览器钢琴合成器。若使用自带扬声器的电钢琴练习，建议保持关闭。
+                  将外接硬件 MIDI 键盘的 NoteOn/NoteOff 事件路由到浏览器电钢/钢琴音源。若使用自带扬声器的电钢琴练习，建议保持关闭。
                 </p>
               </div>
             </label>
           </div>
+
+          {/* Piano / Electric Piano Timbre Selector */}
+          {onChangePianoTimbre && (
+            <div className="space-y-1.5 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="piano-timbre-select" className="font-semibold text-slate-800">
+                  播放与本地 MIDI 音色
+                </label>
+                <span
+                  data-testid="settings-audio-status"
+                  className="text-[11px] font-medium text-slate-500"
+                >
+                  {audioStatus === "loading"
+                    ? "采样加载中..."
+                    : audioStatus === "samples"
+                      ? "采样已就绪"
+                      : audioStatus === "synth"
+                        ? "已回退合成器（可切换重试）"
+                        : "首次播放时懒加载"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  id="piano-timbre-select"
+                  data-testid="piano-timbre-select"
+                  aria-label="播放与本地 MIDI 音色"
+                  value={pianoTimbre}
+                  onChange={(e) => onChangePianoTimbre(e.target.value as PianoTimbreId)}
+                  className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+                >
+                  {PIANO_TIMBRE_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+                {onPreviewTimbre && (
+                  <button
+                    type="button"
+                    data-testid="piano-timbre-preview-btn"
+                    onClick={onPreviewTimbre}
+                    className="shrink-0 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    试听
+                  </button>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500">
+                默认使用在线 FluidR3_GM 电钢琴采样，首次加载后会在浏览器本地缓存；切换 SFZ 电钢或原声钢琴后可点击「试听」即时加载。
+              </p>
+            </div>
+          )}
 
           {/* Unsupported / Denied / USB Connection Guide */}
           <div

@@ -1,6 +1,11 @@
 import { useState } from "react";
 import type { MetronomeBeatEvent } from "../audio/metronome";
-import type { AudioEngineStatus } from "../audio/pianoAudio";
+import {
+  DEFAULT_PIANO_TIMBRE,
+  getPianoTimbrePreset,
+  type AudioEngineStatus,
+  type PianoTimbreId,
+} from "../audio/pianoAudio";
 import {
   clampSpeedMultiplier,
   MAX_SPEED_MULTIPLIER,
@@ -23,6 +28,7 @@ export interface TransportPracticeBarProps {
   speedMultiplier: SpeedMultiplier;
   baseBpm: number;
   audioStatus: AudioEngineStatus;
+  pianoTimbre?: PianoTimbreId;
   measureCount: number;
   measureTimelines: MeasureTimeline[];
   activeMeasureIndex: number | null;
@@ -84,6 +90,7 @@ export function TransportPracticeBar({
   speedMultiplier,
   baseBpm,
   audioStatus,
+  pianoTimbre = DEFAULT_PIANO_TIMBRE,
   measureCount,
   measureTimelines,
   activeMeasureIndex,
@@ -112,7 +119,10 @@ export function TransportPracticeBar({
 
   const safeBaseBpm = baseBpm > 0 ? baseBpm : 100;
   const effectiveBpm = Math.max(1, Math.round(safeBaseBpm * speedMultiplier));
+  const timbrePreset = getPianoTimbrePreset(pianoTimbre);
   const statusInfo = AUDIO_STATUS_LABELS[audioStatus];
+  const statusBadgeText =
+    audioStatus === "samples" ? `音频: ${timbrePreset.shortLabel}` : statusInfo.text;
   const totalMeasureCount =
     measureTimelines.length > 0 ? measureTimelines.length : measureCount;
   const normalizedLoop = normalizeAbLoopBounds(
@@ -348,9 +358,10 @@ export function TransportPracticeBar({
 
           <span
             data-testid="audio-engine-status"
+            title={`当前音色: ${timbrePreset.label}（可在练习设置中切换）`}
             className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusInfo.badgeClass}`}
           >
-            {statusInfo.text}
+            {statusBadgeText}
           </span>
 
           <div className="flex items-center gap-1">

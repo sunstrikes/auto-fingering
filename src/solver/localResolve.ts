@@ -7,6 +7,7 @@ import {
   type OnsetSlice,
   type SolveResult,
 } from "../domain/types";
+import { analyzeHandHeldNotes, applyEffectiveHeldNotes } from "./heldNotes";
 import { getMaxSpan, getSpanScale, toHandFramePos } from "./keyboard";
 import {
   advanceBeamLayer,
@@ -88,7 +89,8 @@ function resolvePinOnlyOverride(
   targetNoteUid: string,
   finger: Finger,
   fingerByNoteUid: Record<string, Finger>,
-  profile: HandSpanProfile
+  profile: HandSpanProfile,
+  effectiveHeldNotes: OnsetSlice["heldNotes"] = targetSlice.heldNotes
 ): { anchorConflictSliceIds: Set<string>; repairedAnchorUids: string[] } {
   fingerByNoteUid[targetNoteUid] = finger;
   const anchorConflictSliceIds = new Set<string>();
@@ -114,7 +116,7 @@ function resolvePinOnlyOverride(
       }
     }
     if (!hasConflict) {
-      for (const held of targetSlice.heldNotes) {
+      for (const held of effectiveHeldNotes) {
         const heldF = fingerByNoteUid[held.noteUid];
         if (heldF === finger && held.midi !== targetNote.midi) {
           hasConflict = true;
@@ -274,12 +276,19 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
   const repairedAnchorUids: string[] = [];
 
   if (input.override !== null && input.override.mode === "pinOnly") {
+    const handSlices = input.onsetSlices.filter((s) => s.hand === targetSlice.hand);
+    const { activeHeldBySlice } = analyzeHandHeldNotes(handSlices, profile);
+    const targetHandIdx = handSlices.findIndex((s) => s.sliceId === targetSlice.sliceId);
+    const effectiveHeldNotes =
+      targetHandIdx >= 0 ? activeHeldBySlice[targetHandIdx] : targetSlice.heldNotes;
+
     const pinRes = resolvePinOnlyOverride(
       targetSlice,
       input.targetNoteUid,
       input.override.finger,
       fingerByNoteUid,
-      profile
+      profile,
+      effectiveHeldNotes
     );
     anchorConflictSliceIds = pinRes.anchorConflictSliceIds;
   } else {
@@ -292,17 +301,24 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
       input.removedRawAnchorUids ?? [],
       ignoreExistingFingerings
     );
-    const targetSegIdx = segment.findIndex((s) => s.sliceId === targetSlice.sliceId);
+    const effectiveSegment = applyEffectiveHeldNotes(
+      segment,
+      analyzeHandHeldNotes(segment, profile)
+    );
+    const targetSegIdx = effectiveSegment.findIndex((s) => s.sliceId === targetSlice.sliceId);
     const targetMeasure = targetSlice.measureIndex;
 
     let minIdx = targetSegIdx;
-    while (minIdx > 0 && targetMeasure - segment[minIdx - 1].measureIndex <= LOCAL_MEASURE_RADIUS) {
+    while (
+      minIdx > 0 &&
+      targetMeasure - effectiveSegment[minIdx - 1].measureIndex <= LOCAL_MEASURE_RADIUS
+    ) {
       minIdx--;
     }
     let maxIdx = targetSegIdx;
     while (
-      maxIdx + 1 < segment.length &&
-      segment[maxIdx + 1].measureIndex - targetMeasure <= LOCAL_MEASURE_RADIUS
+      maxIdx + 1 < effectiveSegment.length &&
+      effectiveSegment[maxIdx + 1].measureIndex - targetMeasure <= LOCAL_MEASURE_RADIUS
     ) {
       maxIdx++;
     }
@@ -315,13 +331,13 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
 
     while (true) {
       let startIdx = Math.max(minIdx, targetSegIdx - lookback);
-      while (startIdx > minIdx && segment[startIdx].heldNotes.length > 0) {
+      while (startIdx > minIdx && effectiveSegment[startIdx].heldNotes.length > 0) {
         startIdx--;
       }
 
       const attemptConflicts = new Set<string>();
       const attempt = solveWindowWithConvergence(
-        segment,
+        effectiveSegment,
         startIdx,
         targetSegIdx,
         maxIdx,
@@ -343,7 +359,7 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
     anchorConflictSliceIds = finalConflicts;
 
     for (let offset = 0; offset < finalChosen.length; offset++) {
-      const slice = segment[finalStart + offset];
+      const slice = effectiveSegment[finalStart + offset];
       const fingers = finalChosen[offset];
       for (let i = 0; i < slice.notes.length; i++) {
         const note = slice.notes[i];

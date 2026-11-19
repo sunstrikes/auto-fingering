@@ -289,4 +289,55 @@ describe("Seam 1: localResolveFingering", () => {
     });
     expect(unknown.fingerByNoteUid).toEqual(initial.fingerByNoteUid);
   });
+
+  it("produces zero false anchor-conflict against released unreachable held bass notes in pinOnly and phrase localResolveFingering (m.19 pattern)", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="19">
+      <attributes>
+        <divisions>4</divisions>
+        <clef><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note><pitch><step>B</step><alter>-1</alter><octave>2</octave></pitch><duration>16</duration><voice>2</voice></note>
+      <backup><duration>16</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><alter>-1</alter><octave>3</octave></pitch><duration>6</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><alter>-1</alter><octave>3</octave></pitch><duration>4</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    const initial = solveFingering(doc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const c4 = doc.noteEvents.find((n) => n.midi === 60)!;
+
+    const pinResolved = localResolveFingering({
+      onsetSlices: doc.onsetSlices,
+      priorFingerByNoteUid: initial.fingerByNoteUid,
+      targetNoteUid: c4.noteUid,
+      override: { finger: 2, mode: "pinOnly" },
+      anchors: { [c4.noteUid]: { finger: 2, mode: "pinOnly" } },
+      profile: DEFAULT_HAND_SPAN_PROFILE,
+    });
+    expect(pinResolved.fingerByNoteUid[c4.noteUid]).toBe(2);
+    expect(pinResolved.warnings.some((w) => w.type === "anchor-conflict")).toBe(false);
+
+    const phraseResolved = localResolveFingering({
+      onsetSlices: doc.onsetSlices,
+      priorFingerByNoteUid: initial.fingerByNoteUid,
+      targetNoteUid: c4.noteUid,
+      override: { finger: 2, mode: "phrase" },
+      anchors: { [c4.noteUid]: { finger: 2, mode: "phrase" } },
+      profile: DEFAULT_HAND_SPAN_PROFILE,
+    });
+    expect(phraseResolved.fingerByNoteUid[c4.noteUid]).toBe(2);
+    expect(phraseResolved.warnings.some((w) => w.type === "anchor-conflict")).toBe(false);
+    expect(phraseResolved.repairedAnchorUids).toEqual([]);
+  });
 });

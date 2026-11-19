@@ -4,6 +4,7 @@ import type {
   MeasureTimeline,
   NoteEvent,
   OnsetSlice,
+  PedalInterval,
   ScoreDocument,
   TempoPoint,
   TimeSignaturePoint,
@@ -213,6 +214,77 @@ function getFirstMeasureClefSign(part: Element): string | null {
   return null;
 }
 
+interface RawPedalEvent {
+  tick: number;
+  type: "start" | "change" | "stop";
+  order: number;
+}
+
+function buildPedalIntervals(
+  rawEvents: RawPedalEvent[],
+  maxScoreEndTick: number
+): PedalInterval[] {
+  if (rawEvents.length === 0) return [];
+  const sorted = [...rawEvents].sort((a, b) => a.tick - b.tick || a.order - b.order);
+  const intervals: PedalInterval[] = [];
+  let openStart: { tick: number; freshPress: boolean } | null = null;
+
+  for (const ev of sorted) {
+    if (ev.type === "start") {
+      if (!openStart) {
+        openStart = { tick: ev.tick, freshPress: true };
+      }
+    } else if (ev.type === "change") {
+      if (openStart && ev.tick > openStart.tick) {
+        intervals.push({
+          startTick: openStart.tick,
+          endTick: ev.tick,
+          freshPress: openStart.freshPress,
+        });
+      }
+      openStart = { tick: ev.tick, freshPress: false };
+    } else if (ev.type === "stop") {
+      if (openStart && ev.tick > openStart.tick) {
+        intervals.push({
+          startTick: openStart.tick,
+          endTick: ev.tick,
+          freshPress: openStart.freshPress,
+        });
+      }
+      openStart = null;
+    }
+  }
+
+  if (openStart && maxScoreEndTick > openStart.tick) {
+    intervals.push({
+      startTick: openStart.tick,
+      endTick: maxScoreEndTick,
+      freshPress: openStart.freshPress,
+    });
+  }
+
+  return intervals;
+}
+
+function isHeldNotePedalSustained(
+  noteOnsetTick: number,
+  noteEndTick: number,
+  queryTick: number,
+  pedalIntervals: PedalInterval[]
+): boolean {
+  for (const p of pedalIntervals) {
+    if (p.startTick <= queryTick && queryTick < p.endTick) {
+      if (
+        p.startTick <= noteOnsetTick ||
+        (p.freshPress && noteOnsetTick < p.startTick && p.startTick < noteEndTick)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Parse a MusicXML string into a lossless ScoreDocument containing the DOM tree,
  * extracted NoteEvents, and grouped OnsetSlices.
@@ -300,8 +372,10 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
   const noteEvents: NoteEvent[] = [];
 
   let noteSeq = 0;
+  let pedalOrder = 0;
   const tempoPoints: TempoPoint[] = [];
   const timeSignaturePoints: TimeSignaturePoint[] = [];
+  const rawPedalEvents: RawPedalEvent[] = [];
   const rawMeasureTimelines: Array<{
     measureIndex: number;
     startTick: number;
@@ -414,6 +488,31 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
             const parsedTempo = tempoAttr ? Number.parseFloat(tempoAttr) : NaN;
             if (Number.isFinite(parsedTempo) && parsedTempo > 0) {
               tempoPoints.push({ tick: cursorTick, bpm: parsedTempo });
+            }
+          }
+          const offsetText = textOfChild(child, "offset");
+          const parsedOffset = offsetText ? Number.parseInt(offsetText, 10) : NaN;
+          const directionTick = Number.isFinite(parsedOffset)
+            ? Math.max(0, cursorTick + parsedOffset * (globalLcm / divisions))
+            : cursorTick;
+          for (const dtEl of directChildrenByTag(child, "direction-type")) {
+            for (const pedalEl of directChildrenByTag(dtEl, "pedal")) {
+              const rawType = pedalEl.getAttribute("type")?.toLowerCase();
+              let mappedType: RawPedalEvent["type"] | null = null;
+              if (rawType === "start" || rawType === "sustain" || rawType === "resume") {
+                mappedType = "start";
+              } else if (rawType === "change") {
+                mappedType = "change";
+              } else if (rawType === "stop" || rawType === "discontinue") {
+                mappedType = "stop";
+              }
+              if (mappedType !== null) {
+                rawPedalEvents.push({
+                  tick: directionTick,
+                  type: mappedType,
+                  order: pedalOrder++,
+                });
+              }
             }
           }
         } else if (tag === "sound") {
@@ -712,7 +811,23 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
     bucket.push(ev);
   }
 
-  const activeNotes: Array<{ noteUid: string; hand: Hand; midi: number; endTick: number; endSec: number }> = [];
+  let maxScoreEndTick = 0;
+  for (const m of rawMeasureTimelines) {
+    if (m.endTick > maxScoreEndTick) maxScoreEndTick = m.endTick;
+  }
+  for (const item of rawNotes) {
+    if (item.endTick > maxScoreEndTick) maxScoreEndTick = item.endTick;
+  }
+  const pedalIntervals = buildPedalIntervals(rawPedalEvents, maxScoreEndTick);
+
+  const activeNotes: Array<{
+    noteUid: string;
+    hand: Hand;
+    midi: number;
+    onsetTick: number;
+    endTick: number;
+    endSec: number;
+  }> = [];
 
   sliceOrder.forEach((key, idx) => {
     const notes = sliceBuckets.get(key)!;
@@ -726,10 +841,18 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
       if (activeNotes[i].endTick <= first.onsetTick) {
         activeNotes.splice(i, 1);
       } else if (activeNotes[i].hand === hand) {
+        const pedalSustained = isHeldNotePedalSustained(
+          activeNotes[i].onsetTick,
+          activeNotes[i].endTick,
+          first.onsetTick,
+          pedalIntervals
+        );
         heldNotes.push({
           noteUid: activeNotes[i].noteUid,
           midi: activeNotes[i].midi,
           endTick: activeNotes[i].endTick,
+          onsetTick: activeNotes[i].onsetTick,
+          pedalSustained,
         });
       }
     }
@@ -772,6 +895,7 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
           noteUid: n.noteUid,
           hand: n.hand,
           midi: n.midi,
+          onsetTick: n.onsetTick,
           endTick,
           endSec,
         });
@@ -806,5 +930,6 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
     tempoPoints: normalizedTempoPoints,
     timeSignaturePoints: normalizedTimeSigPoints,
     measureTimelines,
+    pedalIntervals,
   };
 }

@@ -18,7 +18,13 @@ import {
   projectDualHandPostureAtSlice,
 } from "../src/components/handPostureModel";
 import {
+  BASE_FINGER_LENGTH_MM,
+  BASE_FINGER_LENGTH_PX,
   IDLE_CURVE_FACTOR,
+  PIANO_MM_TO_PX,
+  PIANO_SVG_H,
+  PIANO_WHITE_KEY_W,
+  REAL_WHITE_KEY_WIDTH_MM,
   computeHandSkeleton,
   getFixedFingerLengthPx,
 } from "../src/components/handSkeleton";
@@ -111,6 +117,8 @@ describe("handPostureModel continuous 88-key kinematics", () => {
     const engine = createPlaybackEngine({
       audioEngine: {
         getStatus: () => "synth",
+        getTimbre: () => "ep-fluid-ep1",
+        setTimbre: () => null,
         getAudioContext: () => fakeCtx,
         prepare: async () => "synth",
         triggerNote: vi.fn(),
@@ -279,7 +287,9 @@ describe("handPostureModel continuous 88-key kinematics", () => {
     expect(frameBlack.rh.palmLiftY).toBeLessThan(-10);
 
     const blackSkeleton = computeHandSkeleton(frameBlack.rh);
-    expect(blackSkeleton.fingers[3].totalPhalanxLength).toBeLessThanOrEqual(69);
+    expect(blackSkeleton.fingers[3].totalPhalanxLength).toBeLessThanOrEqual(
+      getFixedFingerLengthPx(3, "M") + 2
+    );
 
     // Mounted SVG renders articulated joints inside hand overlays
     const svgHtml = renderToStaticMarkup(
@@ -388,8 +398,12 @@ describe("handPostureModel continuous 88-key kinematics", () => {
       expect(spanUnits).toBeLessThanOrEqual(5.5);
 
       const sk = computeHandSkeleton(frame.rh);
-      expect(sk.fingers[1].phalanxSpanLength).toBeLessThanOrEqual(53);
-      expect(sk.fingers[5].phalanxSpanLength).toBeLessThanOrEqual(55);
+      expect(sk.fingers[1].phalanxSpanLength).toBeLessThanOrEqual(
+        getFixedFingerLengthPx(1, "M") + 1
+      );
+      expect(sk.fingers[5].phalanxSpanLength).toBeLessThanOrEqual(
+        getFixedFingerLengthPx(5, "M") + 1
+      );
     }
   });
 
@@ -437,5 +451,243 @@ describe("handPostureModel continuous 88-key kinematics", () => {
       expect(lengthsByPreset.S[f]).toBeLessThan(lengthsByPreset.M[f]);
       expect(lengthsByPreset.M[f]).toBeLessThan(lengthsByPreset.L[f]);
     }
+  });
+
+  it("calibrates finger dimensions from real-world 23.5mm white-key pitch so M hands reach octaves accurately", () => {
+    expect(PIANO_MM_TO_PX).toBeCloseTo(PIANO_WHITE_KEY_W / REAL_WHITE_KEY_WIDTH_MM, 6);
+    for (const f of [1, 2, 3, 4, 5] as const) {
+      expect(BASE_FINGER_LENGTH_PX[f]).toBeCloseTo(BASE_FINGER_LENGTH_MM[f] * PIANO_MM_TO_PX, 6);
+    }
+
+    const octaveXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <backup><duration>1</duration></backup>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><staff>2</staff></note>
+      <note><chord/><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice><staff>2</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(octaveXml, { DOMParser });
+    const solveResult = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const frame = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveResult,
+      scoreDoc.onsetSlices[0].sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+
+    const rhSk = computeHandSkeleton(frame.rh);
+    const lhSk = computeHandSkeleton(frame.lh);
+
+    expect(Math.abs(rhSk.fingers[1].tip.x - midiToWhiteUnitX(60) * PIANO_WHITE_KEY_W)).toBeLessThan(1.5);
+    expect(Math.abs(rhSk.fingers[5].tip.x - midiToWhiteUnitX(72) * PIANO_WHITE_KEY_W)).toBeLessThan(1.5);
+    expect(Math.abs(lhSk.fingers[5].tip.x - midiToWhiteUnitX(48) * PIANO_WHITE_KEY_W)).toBeLessThan(1.5);
+    expect(Math.abs(lhSk.fingers[1].tip.x - midiToWhiteUnitX(60) * PIANO_WHITE_KEY_W)).toBeLessThan(1.5);
+  });
+
+  it("allows an M hand to reach the wuchang m.73 RH Eb4+Bb4+F5 wide chord with accurate key alignment", () => {
+    const xml05 = readFileSync(
+      resolve(__dirname, "../test-corpus/05-realworld-wuchang.musicxml"),
+      "utf-8"
+    );
+    const scoreDoc = parseMusicXml(xml05, { DOMParser });
+    const solveResult = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+
+    const m73RhSlice = scoreDoc.onsetSlices.find(
+      (s) => s.measureIndex === 72 && s.hand === "RH"
+    );
+    expect(m73RhSlice).toBeDefined();
+
+    const frame = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveResult,
+      m73RhSlice!.sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    const sk = computeHandSkeleton(frame.rh);
+
+    for (const note of m73RhSlice!.notes) {
+      const f = solveResult.fingerByNoteUid[note.noteUid];
+      expect(f).toBeDefined();
+      const targetX = midiToWhiteUnitX(note.midi) * PIANO_WHITE_KEY_W;
+      expect(Math.abs(sk.fingers[f].tip.x - targetX)).toBeLessThan(2.0);
+      if (note.midi === 63 || note.midi === 70) {
+        expect(sk.fingers[f].tip.y).toBeGreaterThanOrEqual(50);
+        expect(sk.fingers[f].tip.y).toBeLessThanOrEqual(116);
+      } else if (note.midi === 77) {
+        expect(sk.fingers[f].tip.y).toBeGreaterThanOrEqual(110);
+        expect(sk.fingers[f].tip.y).toBeLessThanOrEqual(158);
+      }
+    }
+  });
+
+  it("renders unified organic hand silhouettes with joint creases and keeps wrists within SVG bounds across S/M/L", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <backup><duration>1</duration></backup>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice><staff>2</staff></note>
+      <note><chord/><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice><staff>2</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml, { DOMParser });
+
+    for (const preset of ["S", "M", "L"] as const) {
+      const profile = { ...DEFAULT_HAND_SPAN_PROFILE, preset };
+      const solveResult = solveFingering(scoreDoc.onsetSlices, profile);
+      const frame = projectDualHandPostureAtSlice(
+        scoreDoc,
+        solveResult,
+        scoreDoc.onsetSlices[0].sliceId,
+        profile
+      );
+      const empty = computeDualHandPostureFrameAtTime(null, 0, preset);
+
+      for (const posture of [frame.rh, frame.lh, empty.rh, empty.lh]) {
+        const sk = computeHandSkeleton(posture);
+        expect(sk.unifiedHandPath).toContain("M ");
+        expect(sk.unifiedHandPath).toContain("Z");
+        expect(sk.unifiedHandPath).not.toContain("NaN");
+        expect(sk.wristCenter.y).toBeLessThanOrEqual(PIANO_SVG_H);
+      }
+    }
+
+    const solveResult = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const svgHtml = renderToStaticMarkup(
+      createElement(UnifiedPiano88, {
+        scoreDoc,
+        solveResult,
+        selectedSliceId: scoreDoc.onsetSlices[0].sliceId,
+        showFullPalm: true,
+      })
+    );
+    const dom = new JSDOM(svgHtml);
+    for (const hand of ["RH", "LH"] as const) {
+      const overlay = dom.window.document.querySelector(`[data-testid="hand-overlay-${hand}"]`)!;
+      expect(overlay.querySelector(`[data-testid="hand-silhouette-${hand}"]`)).not.toBeNull();
+      expect(overlay.querySelectorAll('[data-joint-kind="mcp"]')).toHaveLength(5);
+      expect(overlay.querySelectorAll('[data-joint-kind="pip"]')).toHaveLength(4);
+      expect(overlay.querySelectorAll('[data-joint-kind="dip"]')).toHaveLength(4);
+      expect(overlay.querySelectorAll('[data-joint-kind="ip"]')).toHaveLength(1);
+      expect(overlay.querySelectorAll('[data-joint-kind="cmc"]')).toHaveLength(1);
+    }
+  });
+
+  it("lifts pinky off unreachable held bass Bb2 at m.19 C4/D4 while keeping Bb2 pedal-highlighted, and renders data-pedal-sustained", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="19">
+      <attributes>
+        <divisions>4</divisions>
+        <clef><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note><pitch><step>B</step><alter>-1</alter><octave>2</octave></pitch><duration>16</duration><voice>2</voice></note>
+      <backup><duration>16</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><alter>-1</alter><octave>3</octave></pitch><duration>6</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><alter>-1</alter><octave>3</octave></pitch><duration>4</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml, { DOMParser });
+    const solveResult = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+
+    const c4Slice = scoreDoc.onsetSlices.find((s) => s.notes.some((n) => n.midi === 60))!;
+    const d4Slice = scoreDoc.onsetSlices.find((s) => s.notes.some((n) => n.midi === 62))!;
+
+    for (const slice of [c4Slice, d4Slice]) {
+      const frame = projectDualHandPostureAtSlice(
+        scoreDoc,
+        solveResult,
+        slice.sliceId,
+        DEFAULT_HAND_SPAN_PROFILE
+      );
+      expect(frame.lh.fingers[5].targetMidi).toBeNull();
+      expect(frame.lh.fingers[5].isHeld).toBe(false);
+      expect(frame.activeKeyHighlights.get(46)?.lh).toBe("held");
+      expect(frame.activeKeyHighlights.get(46)?.lhPedalSustained).toBe(true);
+      expect(Math.abs(frame.lh.fingers[5].xUnit - frame.lh.fingers[1].xUnit)).toBeLessThanOrEqual(6.0);
+    }
+
+    const svgHtml = renderToStaticMarkup(
+      createElement(UnifiedPiano88, {
+        scoreDoc,
+        solveResult,
+        selectedSliceId: c4Slice.sliceId,
+      })
+    );
+    const dom = new JSDOM(svgHtml);
+    const bb2Key = dom.window.document.querySelector('[data-midi="46"]');
+    expect(bb2Key?.getAttribute("data-key-lh")).toBe("held");
+    expect(bb2Key?.getAttribute("data-pedal-sustained")).toBe("true");
+  });
+
+  it("distributes idle fingers anatomically across playable held octaves instead of bunching near thumb", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>2</divisions>
+        <clef><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><voice>2</voice>
+        <notations><technical><fingering>5</fingering></technical></notations>
+      </note>
+      <backup><duration>4</duration></backup>
+      <note><rest/><duration>2</duration><voice>1</voice></note>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice>
+        <notations><technical><fingering>1</fingering></technical></notations>
+      </note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml, { DOMParser });
+    const solveResult = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const c4Slice = scoreDoc.onsetSlices.find((s) => s.notes.some((n) => n.midi === 60))!;
+    const frame = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveResult,
+      c4Slice.sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    const f = frame.lh.fingers;
+
+    expect(Math.abs(f[4].xUnit - f[5].xUnit)).toBeLessThanOrEqual(2.1);
+    expect(Math.abs(f[1].xUnit - f[2].xUnit)).toBeGreaterThan(Math.abs(f[3].xUnit - f[4].xUnit));
   });
 });

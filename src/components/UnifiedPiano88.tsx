@@ -83,13 +83,12 @@ function handPalette(hand: Hand) {
       activeFill: "#2dd4bf",
       heldFill: "#99f6e4",
       palmGradId: "palm-grad-RH",
-      palmFill: "rgba(20, 184, 166, 0.24)",
-      fingerFill: "rgba(20, 184, 166, 0.18)",
-      pressedFill: "rgba(13, 148, 136, 0.38)",
-      boneFill: "rgba(204, 251, 241, 0.88)",
-      bonePressedFill: "rgba(153, 246, 228, 0.96)",
-      metacarpalFill: "rgba(204, 251, 241, 0.72)",
-      jointFill: "#ffffff",
+      strokeGradId: "hand-stroke-RH",
+      fingerPressedGradId: "finger-pressed-RH",
+      shadowFill: "rgba(15, 118, 110, 0.12)",
+      palmFill: "rgba(20, 184, 166, 0.22)",
+      fingerFill: "rgba(20, 184, 166, 0.16)",
+      pressedFill: "rgba(13, 148, 136, 0.32)",
       stroke: "#0f766e",
       badgeBg: "#ccfbf1",
       posBg: "rgba(15, 118, 110, 0.16)",
@@ -101,13 +100,12 @@ function handPalette(hand: Hand) {
     activeFill: "#818cf8",
     heldFill: "#c7d2fe",
     palmGradId: "palm-grad-LH",
-    palmFill: "rgba(99, 102, 241, 0.22)",
-    fingerFill: "rgba(99, 102, 241, 0.16)",
-    pressedFill: "rgba(79, 70, 229, 0.36)",
-    boneFill: "rgba(224, 231, 255, 0.88)",
-    bonePressedFill: "rgba(199, 210, 254, 0.96)",
-    metacarpalFill: "rgba(224, 231, 255, 0.72)",
-    jointFill: "#ffffff",
+    strokeGradId: "hand-stroke-LH",
+    fingerPressedGradId: "finger-pressed-LH",
+    shadowFill: "rgba(67, 56, 202, 0.12)",
+    palmFill: "rgba(99, 102, 241, 0.20)",
+    fingerFill: "rgba(99, 102, 241, 0.15)",
+    pressedFill: "rgba(79, 70, 229, 0.30)",
     stroke: "#4338ca",
     badgeBg: "#e0e7ff",
     posBg: "rgba(67, 56, 202, 0.16)",
@@ -146,16 +144,123 @@ function HandVectorOverlay({
 }) {
   const pal = handPalette(posture.hand);
   const skeleton = computeHandSkeleton(posture);
-  const baseOpacity = posture.isResting ? 0.42 : 0.95;
+  const baseOpacity = posture.isResting ? 0.58 : 0.95;
   const opacity = dimmed ? 0.22 : baseOpacity;
+  const scale = skeleton.handScale;
 
-  // Sort fingers so lower layerOffset (-1 thumb-under) draws behind higher layerOffset (+1 cross-over)
-  const orderedFingers = [...FINGERS].sort((a, b) => {
-    const la = posture.fingers[a].layerOffset;
-    const lb = posture.fingers[b].layerOffset;
-    if (la !== lb) return la - lb;
-    return a - b;
-  });
+  // Partition fingers so thumb-under (-1) draws behind the unified hand silhouette,
+  // normal (0) integrates seamlessly into the silhouette, and cross-over (+1) floats above.
+  const underFingers = FINGERS.filter((f) => posture.fingers[f].layerOffset === -1);
+  const foregroundFingers = FINGERS.filter((f) => posture.fingers[f].layerOffset !== -1).sort(
+    (a, b) => {
+      const la = posture.fingers[a].layerOffset;
+      const lb = posture.fingers[b].layerOffset;
+      if (la !== lb) return la - lb;
+      return a - b;
+    }
+  );
+
+  const renderFingerNode = (f: Finger) => {
+    const fp = posture.fingers[f];
+    const sk = skeleton.fingers[f];
+    const pressed = fp.pressDepth > 0.15;
+    const isThumbUnder = fp.layerOffset === -1;
+    const isCrossOver = fp.layerOffset === 1;
+    const showStandaloneSleeve = isThumbUnder || isCrossOver;
+
+    const badgeR = (pressed ? 6.4 : 4.8) * clampBadgeScale(scale);
+    const haloR = 8.8 * clampBadgeScale(scale);
+
+    return (
+      <g
+        key={f}
+        data-testid={`hand-${posture.hand}-finger-${f}`}
+        data-press-depth={fp.pressDepth.toFixed(2)}
+        data-held={fp.isHeld ? "true" : "false"}
+        data-layer-offset={String(fp.layerOffset)}
+      >
+        {isCrossOver && (
+          <path
+            d={sk.sleevePath}
+            transform="translate(0, 2)"
+            fill={pal.shadowFill}
+            stroke="none"
+          />
+        )}
+
+        {showStandaloneSleeve ? (
+          <path
+            d={sk.sleevePath}
+            fill={pressed ? `url(#${pal.fingerPressedGradId})` : pal.fingerFill}
+            stroke={fp.isRepairedAnchor ? "#dc2626" : pal.stroke}
+            strokeWidth={pressed ? 1.15 : 0.85}
+            strokeOpacity={isThumbUnder ? 0.52 : pressed ? 0.72 : 0.5}
+            strokeDasharray={isThumbUnder ? "3,2" : undefined}
+          />
+        ) : (
+          (pressed || fp.isRepairedAnchor) && (
+            <path
+              d={sk.sleevePath}
+              fill={pressed ? `url(#${pal.fingerPressedGradId})` : "none"}
+              stroke={fp.isRepairedAnchor ? "#dc2626" : "none"}
+              strokeWidth={fp.isRepairedAnchor ? 1.1 : 0}
+              strokeOpacity={fp.isRepairedAnchor ? 0.78 : 0}
+            />
+          )
+        )}
+
+        {/* Delicate anatomical skin creases & knuckle shading */}
+        {sk.joints.map((joint, idx) => (
+          <path
+            key={idx}
+            d={joint.creasePath}
+            fill="none"
+            stroke={fp.isRepairedAnchor ? "#dc2626" : pal.stroke}
+            strokeWidth={joint.kind === "mcp" ? 1.0 : 0.8}
+            strokeOpacity={joint.kind === "mcp" ? 0.2 : 0.25}
+            strokeLinecap="round"
+            data-joint-kind={joint.kind}
+          />
+        ))}
+
+        {/* Pressed contact halo */}
+        {pressed && (
+          <circle
+            cx={sk.tip.x}
+            cy={sk.tip.y}
+            r={haloR}
+            fill="none"
+            stroke={fp.isHeld ? pal.primary : "#ffffff"}
+            strokeWidth={1.4}
+            opacity={0.78}
+          />
+        )}
+
+        {/* Fingertip digit badge */}
+        <circle
+          cx={sk.tip.x}
+          cy={sk.tip.y}
+          r={badgeR}
+          fill={pressed ? pal.primary : "#ffffff"}
+          fillOpacity={pressed ? 0.94 : 0.82}
+          stroke={fp.isRepairedAnchor ? "#dc2626" : pal.stroke}
+          strokeWidth={pressed ? 1.05 : 0.8}
+          strokeOpacity={pressed ? 0.95 : 0.55}
+        />
+        <text
+          x={sk.tip.x}
+          y={sk.tip.y + (pressed ? 3.0 : 2.5) * clampBadgeScale(scale)}
+          textAnchor="middle"
+          fontSize={(pressed ? 8.6 : 7.0) * clampBadgeScale(scale)}
+          fontWeight={700}
+          fill={pressed ? "#ffffff" : pal.stroke}
+          opacity={pressed ? 1 : 0.82}
+        >
+          {f}
+        </text>
+      </g>
+    );
+  };
 
   return (
     <g
@@ -166,150 +271,75 @@ function HandVectorOverlay({
       opacity={opacity}
       className="pointer-events-none"
     >
-      {/* Translucent anatomical palm & wrist silhouette */}
+      {/* Thumb-under finger layer renders beneath the palm */}
+      {underFingers.map(renderFingerNode)}
+
+      {/* Subtle hover shadow beneath unified hand silhouette */}
       <path
-        d={skeleton.palmPath}
+        d={skeleton.unifiedHandPath}
+        transform="translate(0, 2.5)"
+        fill={pal.shadowFill}
+        stroke="none"
+      />
+
+      {/* Unified organic translucent hand silhouette with interdigital webbing */}
+      <path
+        data-testid={`hand-silhouette-${posture.hand}`}
+        d={skeleton.unifiedHandPath}
         fill={`url(#${pal.palmGradId})`}
-        stroke={pal.stroke}
-        strokeWidth={1.1}
-        strokeOpacity={0.62}
+        stroke={`url(#${pal.strokeGradId})`}
+        strokeWidth={1.15}
         strokeLinejoin="round"
       />
 
-      {/* Carpal wrist arch + 5 radial metacarpal bones */}
+      {/* Subtle dorsal palm & tendon surface accents */}
       <path
-        d={skeleton.carpalArchPath}
+        d={skeleton.thenarCreasePath}
         fill="none"
         stroke={pal.stroke}
-        strokeWidth={1.4}
-        strokeOpacity={0.45}
+        strokeWidth={0.95}
+        strokeOpacity={0.18}
         strokeLinecap="round"
       />
-      {FINGERS.map((f) => {
-        const sk = skeleton.fingers[f];
-        const fp = posture.fingers[f];
-        const pressed = fp.pressDepth > 0.15;
-        return (
-          <path
-            key={`mc-${f}`}
-            d={sk.metacarpal.path}
-            fill={pal.metacarpalFill}
-            stroke={pal.stroke}
-            strokeWidth={pressed ? 0.95 : 0.7}
-            strokeOpacity={pressed ? 0.72 : 0.45}
-          />
-        );
-      })}
+      {skeleton.dorsalTendonPaths.map((d, idx) => (
+        <path
+          key={`tendon-${idx}`}
+          d={d}
+          fill="none"
+          stroke={pal.stroke}
+          strokeWidth={0.85}
+          strokeOpacity={0.14}
+          strokeLinecap="round"
+        />
+      ))}
 
-      {/* Centered hand tag (LH / RH) */}
+      {/* Understated hand tag (LH / RH) */}
       <text
         x={skeleton.labelPos.x}
         y={skeleton.labelPos.y}
         textAnchor="middle"
-        fontSize={8.5}
+        fontSize={8.2 * clampBadgeScale(scale)}
         fontWeight={700}
         letterSpacing={0.6}
         fill={pal.stroke}
+        fillOpacity={0.72}
         paintOrder="stroke"
         stroke="#ffffff"
-        strokeOpacity={0.8}
-        strokeWidth={2.4}
+        strokeOpacity={0.68}
+        strokeWidth={2.2}
         strokeLinejoin="round"
       >
         {posture.hand}
       </text>
 
-      {/* 5 Articulated Skeletal Fingers (sleeve + phalanx bones + MCP/PIP/DIP/IP joints + tip badge) */}
-      {orderedFingers.map((f) => {
-        const fp = posture.fingers[f];
-        const sk = skeleton.fingers[f];
-        const pressed = fp.pressDepth > 0.15;
-        const isThumbUnder = fp.layerOffset === -1;
-
-        return (
-          <g
-            key={f}
-            data-testid={`hand-${posture.hand}-finger-${f}`}
-            data-press-depth={fp.pressDepth.toFixed(2)}
-            data-held={fp.isHeld ? "true" : "false"}
-            data-layer-offset={String(fp.layerOffset)}
-          >
-            {/* Soft translucent finger volume sleeve */}
-            <path
-              d={sk.sleevePath}
-              fill={pressed ? pal.pressedFill : pal.fingerFill}
-              stroke={fp.isRepairedAnchor ? "#dc2626" : pal.stroke}
-              strokeWidth={pressed ? 1.15 : 0.75}
-              strokeOpacity={pressed ? 0.85 : 0.45}
-              strokeDasharray={isThumbUnder ? "3,2" : undefined}
-            />
-
-            {/* Phalanx bone segments */}
-            {sk.phalanges.map((bone, idx) => (
-              <path
-                key={idx}
-                d={bone.path}
-                fill={pressed ? pal.bonePressedFill : pal.boneFill}
-                stroke={fp.isRepairedAnchor ? "#dc2626" : pal.stroke}
-                strokeWidth={pressed ? 0.95 : 0.75}
-                strokeOpacity={isThumbUnder ? 0.7 : 0.88}
-                strokeDasharray={isThumbUnder ? "2.5,1.5" : undefined}
-              />
-            ))}
-
-            {/* Anatomical joints (CMC / MCP / IP / PIP / DIP) */}
-            {sk.joints.map((joint, idx) => (
-              <circle
-                key={idx}
-                cx={joint.x}
-                cy={joint.y}
-                r={joint.radius}
-                fill={pressed && joint.kind !== "cmc" ? pal.activeFill : pal.jointFill}
-                fillOpacity={0.95}
-                stroke={fp.isRepairedAnchor ? "#dc2626" : pal.stroke}
-                strokeWidth={joint.kind === "mcp" ? 1.1 : 0.85}
-                data-joint-kind={joint.kind}
-              />
-            ))}
-
-            {/* Pressed contact halo */}
-            {pressed && (
-              <circle
-                cx={sk.tip.x}
-                cy={sk.tip.y}
-                r={9}
-                fill="none"
-                stroke={fp.isHeld ? pal.primary : "#ffffff"}
-                strokeWidth={1.4}
-                opacity={0.78}
-              />
-            )}
-
-            {/* Fingertip digit badge */}
-            <circle
-              cx={sk.tip.x}
-              cy={sk.tip.y}
-              r={pressed ? 6.8 : 5.4}
-              fill={pressed ? pal.primary : "#ffffff"}
-              fillOpacity={pressed ? 0.96 : 0.9}
-              stroke={fp.isRepairedAnchor ? "#dc2626" : pal.stroke}
-              strokeWidth={1}
-            />
-            <text
-              x={sk.tip.x}
-              y={sk.tip.y + (pressed ? 3.1 : 2.7)}
-              textAnchor="middle"
-              fontSize={pressed ? 9 : 7.8}
-              fontWeight={700}
-              fill={pressed ? "#ffffff" : pal.stroke}
-            >
-              {f}
-            </text>
-          </g>
-        );
-      })}
+      {/* Normal & cross-over fingers */}
+      {foregroundFingers.map(renderFingerNode)}
     </g>
   );
+}
+
+function clampBadgeScale(handScale: number): number {
+  return Math.max(0.86, Math.min(1.14, handScale));
 }
 
 function OverheadHandLane({
@@ -641,6 +671,7 @@ export function UnifiedPiano88({
           width={SVG_W}
           height={viewBoxHeight}
           viewBox={`0 ${viewBoxTop} ${SVG_W} ${viewBoxHeight}`}
+          preserveAspectRatio="xMidYMid meet"
           className="block h-auto w-full min-w-[960px] select-none lg:min-w-0"
         >
           <defs>
@@ -651,14 +682,36 @@ export function UnifiedPiano88({
               <stop offset="100%" stopColor="#2dd4bf" />
             </linearGradient>
             <linearGradient id="palm-grad-RH" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#14b8a6" stopOpacity={0.28} />
-              <stop offset="68%" stopColor="#14b8a6" stopOpacity={0.18} />
-              <stop offset="100%" stopColor="#14b8a6" stopOpacity={0.05} />
+              <stop offset="0%" stopColor="#14b8a6" stopOpacity={0.26} />
+              <stop offset="62%" stopColor="#14b8a6" stopOpacity={0.18} />
+              <stop offset="86%" stopColor="#14b8a6" stopOpacity={0.09} />
+              <stop offset="100%" stopColor="#14b8a6" stopOpacity={0.03} />
             </linearGradient>
             <linearGradient id="palm-grad-LH" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#6366f1" stopOpacity={0.26} />
-              <stop offset="68%" stopColor="#6366f1" stopOpacity={0.16} />
-              <stop offset="100%" stopColor="#6366f1" stopOpacity={0.05} />
+              <stop offset="0%" stopColor="#6366f1" stopOpacity={0.24} />
+              <stop offset="62%" stopColor="#6366f1" stopOpacity={0.16} />
+              <stop offset="86%" stopColor="#6366f1" stopOpacity={0.08} />
+              <stop offset="100%" stopColor="#6366f1" stopOpacity={0.03} />
+            </linearGradient>
+            <linearGradient id="hand-stroke-RH" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#0f766e" stopOpacity={0.62} />
+              <stop offset="72%" stopColor="#0f766e" stopOpacity={0.5} />
+              <stop offset="100%" stopColor="#0f766e" stopOpacity={0.08} />
+            </linearGradient>
+            <linearGradient id="hand-stroke-LH" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#4338ca" stopOpacity={0.62} />
+              <stop offset="72%" stopColor="#4338ca" stopOpacity={0.5} />
+              <stop offset="100%" stopColor="#4338ca" stopOpacity={0.08} />
+            </linearGradient>
+            <linearGradient id="finger-pressed-RH" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#0d9488" stopOpacity={0.36} />
+              <stop offset="65%" stopColor="#14b8a6" stopOpacity={0.22} />
+              <stop offset="100%" stopColor="#14b8a6" stopOpacity={0.02} />
+            </linearGradient>
+            <linearGradient id="finger-pressed-LH" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#4f46e5" stopOpacity={0.34} />
+              <stop offset="65%" stopColor="#6366f1" stopOpacity={0.2} />
+              <stop offset="100%" stopColor="#6366f1" stopOpacity={0.02} />
             </linearGradient>
           </defs>
 
@@ -692,6 +745,12 @@ export function UnifiedPiano88({
                 (dimLh && info?.lh && !info?.rh) || (dimRh && info?.rh && !info?.lh)
               );
               const isBoth = Boolean(info?.rh && info?.lh);
+              const isPedalSustained = Boolean(info?.lhPedalSustained || info?.rhPedalSustained);
+              const isPedalOnly = Boolean(
+                !isBoth &&
+                  ((info?.rh === "held" && info?.rhPedalSustained) ||
+                    (info?.lh === "held" && info?.lhPedalSustained))
+              );
               let fill = "#ffffff";
               if (isWrong) {
                 fill = "#ef4444";
@@ -704,11 +763,11 @@ export function UnifiedPiano88({
               } else if (info?.rh === "active") {
                 fill = dimRh ? "#ccfbf1" : "#5eead4";
               } else if (info?.rh === "held") {
-                fill = dimRh ? "#f0fdfa" : "#ccfbf1";
+                fill = info?.rhPedalSustained || dimRh ? "#f0fdfa" : "#ccfbf1";
               } else if (info?.lh === "active") {
                 fill = dimLh ? "#e0e7ff" : "#a5b4fc";
               } else if (info?.lh === "held") {
-                fill = dimLh ? "#eef2ff" : "#e0e7ff";
+                fill = info?.lhPedalSustained || dimLh ? "#eef2ff" : "#e0e7ff";
               } else if (isAudition) {
                 fill = "#fde68a";
               }
@@ -723,6 +782,7 @@ export function UnifiedPiano88({
                   data-midi={midi}
                   data-key-rh={info?.rh}
                   data-key-lh={info?.lh}
+                  data-pedal-sustained={isPedalSustained ? "true" : undefined}
                   data-wrong-note={isWrong ? "true" : undefined}
                   data-hit-note={isHit ? "true" : undefined}
                   data-accompaniment-dimmed={isAccompanimentOnly ? "true" : undefined}
@@ -738,6 +798,9 @@ export function UnifiedPiano88({
                     fill={fill}
                     stroke={isWrong ? "#991b1b" : info?.isRepairedAnchor ? "#dc2626" : "#94a3b8"}
                     strokeWidth={isWrong || info?.isRepairedAnchor ? 1.8 : 0.9}
+                    strokeDasharray={
+                      isPedalOnly && !isWrong && !info?.isRepairedAnchor ? "3,2" : undefined
+                    }
                     rx={2}
                   />
                   {hasPressed && (
@@ -757,7 +820,7 @@ export function UnifiedPiano88({
                                 ? "#4338ca"
                                 : "#d97706"
                       }
-                      opacity={isAccompanimentOnly ? 0.3 : 0.75}
+                      opacity={isAccompanimentOnly ? 0.3 : isPedalOnly ? 0.45 : 0.75}
                     />
                   )}
                   {label && (
@@ -788,6 +851,12 @@ export function UnifiedPiano88({
                 (dimLh && info?.lh && !info?.rh) || (dimRh && info?.rh && !info?.lh)
               );
               const isBoth = Boolean(info?.rh && info?.lh);
+              const isPedalSustained = Boolean(info?.lhPedalSustained || info?.rhPedalSustained);
+              const isPedalOnly = Boolean(
+                !isBoth &&
+                  ((info?.rh === "held" && info?.rhPedalSustained) ||
+                    (info?.lh === "held" && info?.lhPedalSustained))
+              );
               let fill = "#0f172a";
               if (isWrong) {
                 fill = "#dc2626";
@@ -804,7 +873,7 @@ export function UnifiedPiano88({
               } else if (info?.lh === "active") {
                 fill = dimLh ? "#a5b4fc" : "#4f46e5";
               } else if (info?.lh === "held") {
-                fill = dimLh ? "#c7d2fe" : "#3730a3";
+                fill = dimLh ? "#c7d2fe" : info?.lhPedalSustained ? "#4338ca" : "#3730a3";
               } else if (isAudition) {
                 fill = "#d97706";
               }
@@ -816,6 +885,7 @@ export function UnifiedPiano88({
                   data-midi={midi}
                   data-key-rh={info?.rh}
                   data-key-lh={info?.lh}
+                  data-pedal-sustained={isPedalSustained ? "true" : undefined}
                   data-wrong-note={isWrong ? "true" : undefined}
                   data-hit-note={isHit ? "true" : undefined}
                   data-accompaniment-dimmed={isAccompanimentOnly ? "true" : undefined}
@@ -832,6 +902,9 @@ export function UnifiedPiano88({
                     fill={fill}
                     stroke={isWrong ? "#991b1b" : info?.isRepairedAnchor ? "#f87171" : "#334155"}
                     strokeWidth={isWrong || info?.isRepairedAnchor ? 1.5 : 0.8}
+                    strokeDasharray={
+                      isPedalOnly && !isWrong && !info?.isRepairedAnchor ? "2,1.5" : undefined
+                    }
                   />
                 </g>
               );

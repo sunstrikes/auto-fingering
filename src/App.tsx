@@ -55,9 +55,12 @@ import {
 } from "./midi/webMidi";
 import {
   createPianoAudioEngine,
+  DEFAULT_PIANO_TIMBRE,
+  isValidPianoTimbreId,
   type AudioEngineStatus,
   type PianoAudioDeps,
   type PianoAudioEngine,
+  type PianoTimbreId,
 } from "./audio/pianoAudio";
 import {
   buildMetronomeBeats,
@@ -72,6 +75,26 @@ import {
   type PlaybackState,
   type SpeedMultiplier,
 } from "./audio/playbackEngine";
+
+const PIANO_TIMBRE_STORAGE_KEY = "auto-fingering:piano-timbre";
+
+function readStoredPianoTimbre(): PianoTimbreId {
+  try {
+    const raw = globalThis.localStorage?.getItem(PIANO_TIMBRE_STORAGE_KEY);
+    if (isValidPianoTimbreId(raw)) return raw;
+  } catch {
+    // ignore storage access errors
+  }
+  return DEFAULT_PIANO_TIMBRE;
+}
+
+function writeStoredPianoTimbre(timbre: PianoTimbreId): void {
+  try {
+    globalThis.localStorage?.setItem(PIANO_TIMBRE_STORAGE_KEY, timbre);
+  } catch {
+    // ignore storage access errors
+  }
+}
 
 export interface AppAudioDeps extends PianoAudioDeps {
   requestAnimationFrame?: (cb: FrameRequestCallback) => number;
@@ -113,6 +136,13 @@ export default function App({
   const [abLoop, setAbLoop] = useState<AbLoopBounds>(() => createDefaultAbLoopBounds(0));
   const waitingLoopGapActiveRef = useRef<boolean>(false);
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
+  const [pianoTimbre, setPianoTimbre] = useState<PianoTimbreId>(() =>
+    audioDeps?.timbre && isValidPianoTimbreId(audioDeps.timbre)
+      ? audioDeps.timbre
+      : readStoredPianoTimbre()
+  );
+  const pianoTimbreRef = useRef<PianoTimbreId>(pianoTimbre);
+  pianoTimbreRef.current = pianoTimbre;
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
   const [playbackFrame, setPlaybackFrame] = useState<PlaybackFrame | null>(null);
   const [layoutMode, setLayoutMode] = useState<ScoreLayoutMode>("page");
@@ -176,6 +206,7 @@ export default function App({
 
   useEffect(() => {
     const audioEngine = createPianoAudioEngine({
+      timbre: audioDeps?.timbre ?? pianoTimbreRef.current,
       getAudioContext: audioDeps?.getAudioContext,
       loadSmplrPiano: audioDeps?.loadSmplrPiano,
       onStatusChange: (nextStatus) => {
@@ -1434,6 +1465,7 @@ export default function App({
         speedMultiplier={playbackSpeed}
         baseBpm={scoreDoc?.tempoPoints[0]?.bpm ?? 100}
         audioStatus={audioStatus}
+        pianoTimbre={pianoTimbre}
         measureCount={measureCount}
         measureTimelines={scoreDoc?.measureTimelines ?? []}
         activeMeasureIndex={cursorTarget?.measureIndex ?? selectedMeasureIndex}
@@ -1501,6 +1533,8 @@ export default function App({
         open={settingsOpen}
         midiState={midiState}
         midiLocalSound={midiLocalSound}
+        audioStatus={audioStatus}
+        pianoTimbre={pianoTimbre}
         speedMultiplier={playbackSpeed}
         baseBpm={scoreDoc?.tempoPoints[0]?.bpm ?? 100}
         countInEnabled={countInEnabled}
@@ -1513,6 +1547,33 @@ export default function App({
         handSpanProfile={handSpanProfile}
         onSelectDevice={(deviceId) => midiControllerRef.current?.setSelectedDeviceId(deviceId)}
         onToggleLocalSound={setMidiLocalSound}
+        onChangePianoTimbre={(nextTimbre) => {
+          setPianoTimbre(nextTimbre);
+          writeStoredPianoTimbre(nextTimbre);
+          if (playbackEngineRef.current?.getState() === "playing") {
+            playbackEngineRef.current.stop();
+          }
+          const reload = audioEngineRef.current?.setTimbre(nextTimbre);
+          if (!reload) {
+            setAudioStatus(audioEngineRef.current?.getStatus() ?? "idle");
+          }
+        }}
+        onPreviewTimbre={() => {
+          const audio = audioEngineRef.current;
+          if (!audio) return;
+          void audio.prepare().then(() => {
+            const ctx = audio.getAudioContext();
+            const t = ctx.currentTime;
+            [60, 64, 67, 71].forEach((midi, idx) => {
+              audio.triggerNote({
+                midi,
+                time: t + idx * 0.08,
+                duration: 0.9,
+                velocity: 84,
+              });
+            });
+          });
+        }}
         onToggleCountIn={handleToggleCountIn}
         onToggleLoopGap={handleToggleLoopGap}
         onChangeMetronomeVolume={handleChangeMetronomeVolume}

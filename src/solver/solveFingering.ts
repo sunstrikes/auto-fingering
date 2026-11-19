@@ -16,6 +16,7 @@ import {
   generateSliceCandidates,
   resolveDepartureFingers,
 } from "./costModel";
+import { analyzeHandHeldNotes, applyEffectiveHeldNotes } from "./heldNotes";
 import { getMaxSpan, getSpanScale, toHandFramePos, whiteKeyIndex } from "./keyboard";
 import { DEFAULT_COST_WEIGHTS } from "./weights";
 
@@ -862,32 +863,35 @@ function solvePhraseSegment(
 ): void {
   if (slices.length === 0) return;
 
+  const heldAnalysis = analyzeHandHeldNotes(slices, profile);
+  const effectiveSlices = applyEffectiveHeldNotes(slices, heldAnalysis);
+
   const { candidatesBySlice, lookahead } = prepareSegmentBeamContext(
-    slices,
+    effectiveSlices,
     profile,
     anchorConflictSliceIds,
     ignoreExistingFingerings
   );
 
-  const hasHeldNotes = slices.some((s) => s.heldNotes.length > 0);
+  const hasHeldNotes = effectiveSlices.some((s) => s.heldNotes.length > 0);
   let chosen: Finger[][] | null = null;
 
   if (!hasHeldNotes && lookahead) {
     // Strictly 1st-order Markov segment: backward DP already gives the exact global optimum
-    chosen = new Array<Finger[]>(slices.length);
+    chosen = new Array<Finger[]>(effectiveSlices.length);
     const firstBack = lookahead.backward[0];
     let c = 0;
     for (let i = 1; i < firstBack.length; i++) {
       if (firstBack[i] < firstBack[c]) c = i;
     }
-    for (let t = 0; t < slices.length; t++) {
+    for (let t = 0; t < effectiveSlices.length; t++) {
       chosen[t] = candidatesBySlice[t][c];
       c = lookahead.bestNextChoice[t][c];
     }
   } else if (lookahead) {
     // Polyphonic / held-note segment: admissible A* with anytime Beam fallback
     chosen = solvePhraseSegmentAStar(
-      slices,
+      effectiveSlices,
       candidatesBySlice,
       lookahead,
       profile,
@@ -897,7 +901,7 @@ function solvePhraseSegment(
 
   if (!chosen) {
     chosen = solvePhraseSegmentBeamFallback(
-      slices,
+      effectiveSlices,
       candidatesBySlice,
       lookahead,
       profile,
@@ -971,6 +975,7 @@ export function derivePositionsAndCues(
   for (const hand of ["RH", "LH"] as Hand[]) {
     const handSlices = slices.filter((s) => s.hand === hand);
     if (handSlices.length === 0) continue;
+    const { activeHeldBySlice, releasedHeldBySlice } = analyzeHandHeldNotes(handSlices, profile);
 
     let currentPos: HandPosition | null = null;
     let anchorThumbKey = 0;
@@ -1042,7 +1047,7 @@ export function derivePositionsAndCues(
           }
         }
 
-        for (const held of slice.heldNotes) {
+        for (const held of activeHeldBySlice[idx]) {
           const heldFinger = fingerByNoteUid[held.noteUid];
           if (!heldFinger || heldFinger === fingers[i]) continue;
           const dist = Math.abs(posI - toHandFramePos(held.midi, hand));
@@ -1068,6 +1073,20 @@ export function derivePositionsAndCues(
               label: "Wide stretch (held)",
             });
           }
+        }
+      }
+
+      for (const rel of releasedHeldBySlice[idx]) {
+        if (rel.reason === "unreachable") {
+          transitionCues.push({
+            sliceId: slice.sliceId,
+            hand,
+            measureIndex: slice.measureIndex,
+            type: "unreachable-span",
+            severity: "danger",
+            cost: rel.minOverSpan,
+            label: "Unreachable span (held — use pedal)",
+          });
         }
       }
 
