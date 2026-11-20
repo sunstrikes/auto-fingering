@@ -1,62 +1,23 @@
 import type { Finger } from "../domain/types";
 import { SPAN_PRESET_SCALE } from "../solver/keyboard";
 import {
-  BASE_FINGER_LENGTH_MM,
   BASE_FINGER_LENGTH_PX,
   BLACK_TIP_Y,
   IDLE_CURVE_FACTOR,
   METACARPAL_1_LENGTH_MM,
   PIANO_BLACK_KEY_H,
-  PIANO_BLACK_KEY_W,
   PIANO_KEYBED_BOTTOM_Y,
   PIANO_KEYS_Y,
-  PIANO_KNUCKLE_BASE_Y,
   PIANO_MM_TO_PX,
-  PIANO_SVG_H,
-  PIANO_WHITE_KEY_H,
   PIANO_WHITE_KEY_W,
-  PIANO_WRIST_Y,
-  REAL_WHITE_KEY_LENGTH_MM,
-  REAL_WHITE_KEY_WIDTH_MM,
   SLEEVE_HALF_WIDTH_MM,
   WHITE_TIP_Y,
   getAbductRatio,
   getFingerOriginLocalPx,
-  getFingerReachPx,
-  getFixedFingerLengthPx,
   getKnuckleBaseY,
-  getThumbMetacarpalLengthPx,
   type Point2D,
 } from "../solver/handKinematics";
 import type { FingerPosture, HandPosture } from "./handPostureModel";
-
-export {
-  BASE_FINGER_LENGTH_MM,
-  BASE_FINGER_LENGTH_PX,
-  BLACK_TIP_Y,
-  IDLE_CURVE_FACTOR,
-  METACARPAL_1_LENGTH_MM,
-  PIANO_BLACK_KEY_H,
-  PIANO_BLACK_KEY_W,
-  PIANO_KEYBED_BOTTOM_Y,
-  PIANO_KEYS_Y,
-  PIANO_KNUCKLE_BASE_Y,
-  PIANO_MM_TO_PX,
-  PIANO_SVG_H,
-  PIANO_WHITE_KEY_H,
-  PIANO_WHITE_KEY_W,
-  PIANO_WRIST_Y,
-  REAL_WHITE_KEY_LENGTH_MM,
-  REAL_WHITE_KEY_WIDTH_MM,
-  WHITE_TIP_Y,
-  getAbductRatio,
-  getFingerOriginLocalPx,
-  getFingerReachPx,
-  getFixedFingerLengthPx,
-  getKnuckleBaseY,
-  getThumbMetacarpalLengthPx,
-  type Point2D,
-};
 
 function mm(valMm: number): number {
   return valMm * PIANO_MM_TO_PX;

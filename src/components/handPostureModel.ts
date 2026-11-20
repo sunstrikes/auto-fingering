@@ -30,18 +30,18 @@ import {
 } from "./dualTrackModel";
 import {
   BLACK_TIP_Y,
+  PIANO_KNUCKLE_BASE_Y,
   PIANO_MM_TO_PX,
+  PIANO_SVG_H,
   PIANO_WHITE_KEY_W,
   REAL_WHITE_KEY_WIDTH_MM,
+  SLEEVE_HALF_WIDTH_MM,
   WHITE_TIP_Y,
+  evaluateHandKinematics2D,
   getAbductRatio,
   getFingerOriginLocalPx,
   getFingerReachPx,
   getKnuckleBaseY,
-} from "./handSkeleton";
-import {
-  SLEEVE_HALF_WIDTH_MM,
-  evaluateHandKinematics2D,
   type KinematicContact,
 } from "../solver/handKinematics";
 
@@ -50,6 +50,13 @@ export const PIANO_MAX_MIDI = 108; // C8
 export const PIANO_WHITE_KEY_COUNT = 52;
 const A0_WHITE_INDEX = whiteKeyIndex(PIANO_MIN_MIDI); // 5
 const D4_KEY_POS = keyPos(62);
+
+function getMaxRestLiftY(handScale: number): number {
+  return Math.max(
+    0,
+    PIANO_SVG_H - PIANO_KNUCKLE_BASE_Y - 55 * PIANO_MM_TO_PX * handScale + (1 - handScale) * 10
+  );
+}
 
 const FINGERS: Finger[] = [1, 2, 3, 4, 5];
 const GRACE_VISUAL_SEC = 0.09;
@@ -1137,11 +1144,7 @@ function projectSingleHandPosture(
         }
       }
     }
-    const maxLiftYForSvgRest = Math.max(
-      0,
-      244 - 173 - 55 * PIANO_MM_TO_PX * handScale + (1 - handScale) * 10
-    );
-    const restLiftY = Math.min(10 * handScale, maxLiftYForSvgRest);
+    const restLiftY = Math.min(10 * handScale, getMaxRestLiftY(handScale));
     palmLiftY = lerp(restLiftY, nextBlackShift, shiftBlend);
     if (crossingStyle === "thumb-under") {
       palmAngleDeg = dir * 10;
@@ -1154,11 +1157,7 @@ function projectSingleHandPosture(
     }
   }
 
-  const maxLiftYForSvg = Math.max(
-    0,
-    244 - 173 - 55 * PIANO_MM_TO_PX * handScale + (1 - handScale) * 10
-  );
-  palmLiftY = clamp(palmLiftY, -56, maxLiftYForSvg);
+  palmLiftY = clamp(palmLiftY, -56, getMaxRestLiftY(handScale));
 
   const pedalSustainedKeys = Array.from(pedalSustainedMap.values());
 
@@ -1298,17 +1297,13 @@ function buildEmptyHandPosture(hand: Hand, spanPreset: SpanPreset = "M"): HandPo
       layerOffset: 0,
     };
   }
-  const maxLiftYForSvg = Math.max(
-    0,
-    244 - 173 - 55 * PIANO_MM_TO_PX * handScale + (1 - handScale) * 10
-  );
   return {
     hand,
     spanPreset,
     isResting: true,
     activeSliceId: null,
     palmCenterXUnit: slots[3],
-    palmLiftY: Math.min(10 * handScale, maxLiftYForSvg),
+    palmLiftY: Math.min(10 * handScale, getMaxRestLiftY(handScale)),
     palmAngleDeg: 0,
     crossingStyle: "none",
     fingers,

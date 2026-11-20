@@ -100,7 +100,7 @@ export function getKnuckleBaseY(handScale: number, palmLiftY = 0): number {
 }
 
 export function getAbductRatio(fingerSpanPx: number, handScale: number): number {
-  return clamp((fingerSpanPx - mmToPx(92) * handScale) / (mmToPx(95) * handScale), -0.1, 0.85);
+  return getAbductRatioMm(fingerSpanPx * PIANO_PX_TO_MM, handScale);
 }
 
 /**
@@ -113,23 +113,12 @@ export function getFingerOriginLocalPx(
   handScale: number,
   dir: 1 | -1
 ): Point2D {
-  switch (finger) {
-    case 1:
-      return { x: -mmToPx(18) * dir * handScale, y: mmToPx(49) * handScale };
-    case 2:
-      return { x: -mmToPx(21 + abductRatio * 4.5) * dir * handScale, y: mmToPx(3.5) * handScale };
-    case 3:
-      return { x: 0, y: 0 };
-    case 4:
-      return { x: mmToPx(20 + abductRatio * 4.5) * dir * handScale, y: mmToPx(4.5) * handScale };
-    case 5:
-      return { x: mmToPx(38 + abductRatio * 11) * dir * handScale, y: mmToPx(12.5) * handScale };
-  }
+  const mm = getFingerOriginLocalMm(finger, abductRatio, handScale, dir);
+  return { x: mmToPx(mm.x), y: mmToPx(mm.y) };
 }
 
 export function getFingerReachPx(finger: Finger, spanPreset: SpanPreset = "M"): number {
-  const fixedLen = getFixedFingerLengthPx(finger, spanPreset);
-  return finger === 1 ? getThumbMetacarpalLengthPx(spanPreset) + fixedLen : fixedLen;
+  return mmToPx(getFingerReachMm(finger, SPAN_PRESET_SCALE[spanPreset]));
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +251,31 @@ interface PreparedContact {
   reachMm: number;
 }
 
+interface FingerKinematicsSample {
+  ratio: number;
+  forward: number;
+  rayAngle: number;
+}
+
+function computeFingerKinematics(
+  c: PreparedContact,
+  palmXMm: number,
+  palmYMm: number,
+  cosA: number,
+  sinA: number
+): FingerKinematicsSample {
+  const wx = palmXMm + c.ox * cosA - c.oy * sinA;
+  const wy = palmYMm + c.ox * sinA + c.oy * cosA;
+  const dx = c.xMm - wx;
+  const dy = c.yMm - wy;
+  const ratio = Math.hypot(dx, dy) / c.reachMm;
+  const dxLocal = dx * cosA + dy * sinA;
+  const dyLocal = -dx * sinA + dy * cosA;
+  const forward = -dyLocal;
+  const rayAngle = Math.atan2(dxLocal, Math.max(1e-3, forward));
+  return { ratio, forward, rayAngle };
+}
+
 function evaluatePoseObjective(
   prepared: PreparedContact[],
   palmXMm: number,
@@ -277,25 +291,16 @@ function evaluatePoseObjective(
 
   for (let i = 0; i < prepared.length; i++) {
     const c = prepared[i];
-    const wx = palmXMm + c.ox * cosA - c.oy * sinA;
-    const wy = palmYMm + c.ox * sinA + c.oy * cosA;
-    const dx = c.xMm - wx;
-    const dy = c.yMm - wy;
-    const d = Math.hypot(dx, dy);
-    const ratio = d / c.reachMm;
+    const { ratio, forward, rayAngle } = computeFingerKinematics(c, palmXMm, palmYMm, cosA, sinA);
 
     if (ratio > 1.0) {
       obj += 1000 * (ratio - 1.0) ** 2;
     }
     obj += (ratio - 0.78) ** 2;
 
-    const dxLocal = dx * cosA + dy * sinA;
-    const dyLocal = -dx * sinA + dy * cosA;
-    const forward = -dyLocal;
     if (forward < 4 * handScale) {
       obj += 200 * ((4 * handScale - forward) / (10 * handScale)) ** 2;
     }
-    const rayAngle = Math.atan2(dxLocal, Math.max(1e-3, forward));
     const [minAng, maxAng] = FINGER_RAY_ANGLE_BOUNDS[c.finger];
     if (rayAngle < minAng) {
       obj += 400 * (minAng - rayAngle) ** 2;
@@ -473,12 +478,7 @@ function solveAndCachePose2D(
 
   for (let i = 0; i < prepared.length; i++) {
     const c = prepared[i];
-    const wx = palmX + c.ox * cosA - c.oy * sinA;
-    const wy = palmY + c.ox * sinA + c.oy * cosA;
-    const dx = c.xMm - wx;
-    const dy = c.yMm - wy;
-    const d = Math.hypot(dx, dy);
-    const ratio = d / c.reachMm;
+    const { ratio, forward, rayAngle } = computeFingerKinematics(c, palmX, palmY, cosA, sinA);
     if (ratio > maxReachRatio) maxReachRatio = ratio;
 
     if (ratio > REACH_TOLERANCE_RATIO) {
@@ -486,14 +486,10 @@ function solveAndCachePose2D(
       infeasibilityExcess += (ratio - REACH_TOLERANCE_RATIO) * 100;
     }
 
-    const dxLocal = dx * cosA + dy * sinA;
-    const dyLocal = -dx * sinA + dy * cosA;
-    const forward = -dyLocal;
     if (forward < 4 * handScale) {
       feasible = false;
       infeasibilityExcess += (4 * handScale - forward) * 2;
     }
-    const rayAngle = Math.atan2(dxLocal, Math.max(1e-3, forward));
     const [minAng, maxAng] = FINGER_RAY_ANGLE_BOUNDS[c.finger];
     if (rayAngle < minAng) {
       feasible = false;

@@ -9,17 +9,6 @@ import { JSDOM } from "jsdom";
 import { DEFAULT_HAND_SPAN_PROFILE } from "../src/domain/types";
 import { parseMusicXml } from "../src/musicxml/parser";
 import { MAX_OCTAVE_SPAN, SPAN_PRESET_SCALE, isBlackKey, keyPos, toHandFramePos } from "../src/solver/keyboard";
-import { evaluateHandKinematics2D, SLEEVE_HALF_WIDTH_MM } from "../src/solver/handKinematics";
-import { localResolveFingering } from "../src/solver/localResolve";
-import { solveFingering } from "../src/solver/solveFingering";
-import {
-  PIANO_MAX_MIDI,
-  PIANO_MIN_MIDI,
-  buildHandPostureIndex,
-  computeDualHandPostureFrameAtTime,
-  midiToWhiteUnitX,
-  projectDualHandPostureAtSlice,
-} from "../src/components/handPostureModel";
 import {
   BASE_FINGER_LENGTH_MM,
   BASE_FINGER_LENGTH_PX,
@@ -30,10 +19,22 @@ import {
   PIANO_SVG_H,
   PIANO_WHITE_KEY_W,
   REAL_WHITE_KEY_WIDTH_MM,
-  computeHandSkeleton,
+  SLEEVE_HALF_WIDTH_MM,
+  evaluateHandKinematics2D,
   getFingerReachPx,
   getFixedFingerLengthPx,
-} from "../src/components/handSkeleton";
+} from "../src/solver/handKinematics";
+import { localResolveFingering } from "../src/solver/localResolve";
+import { solveFingering } from "../src/solver/solveFingering";
+import {
+  PIANO_MAX_MIDI,
+  PIANO_MIN_MIDI,
+  buildHandPostureIndex,
+  computeDualHandPostureFrameAtTime,
+  midiToWhiteUnitX,
+  projectDualHandPostureAtSlice,
+} from "../src/components/handPostureModel";
+import { computeHandSkeleton } from "../src/components/handSkeleton";
 import { UnifiedPiano88 } from "../src/components/UnifiedPiano88";
 import { createPlaybackEngine, type PlaybackFrame } from "../src/audio/playbackEngine";
 import { ScoreViewer, type ScoreRendererHandle } from "../src/components/ScoreViewer";

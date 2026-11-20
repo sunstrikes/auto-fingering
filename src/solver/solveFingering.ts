@@ -23,7 +23,6 @@ import {
   getComfortSpan,
   getMaxSpan,
   getSpanScale,
-  keyPos,
   toHandFramePos,
   whiteKeyIndex,
 } from "./keyboard";
@@ -73,14 +72,7 @@ export function buildHeldReleaseOptions(
     finger: Finger;
     onsetTick: number;
     isRoll: boolean;
-    distToCentroid: number;
   }> = [];
-
-  let centroid = 0;
-  if (slice.notes.length > 0) {
-    for (const n of slice.notes) centroid += keyPos(n.midi);
-    centroid /= slice.notes.length;
-  }
 
   for (const h of slice.heldNotes) {
     const f = heldFingerByUid.get(h.noteUid);
@@ -91,7 +83,6 @@ export function buildHeldReleaseOptions(
       finger: f,
       onsetTick: h.onsetTick ?? 0,
       isRoll: rollReleasableUids.has(h.noteUid),
-      distToCentroid: Math.abs(keyPos(h.midi) - centroid),
     });
   }
 
@@ -1049,6 +1040,21 @@ export function recordEarlyRelease(
   }
 }
 
+export function recordSliceEarlyReleases(
+  earlyReleasesByNoteUid: Record<string, HeldNoteRelease>,
+  slice: OnsetSlice,
+  relUids: readonly string[] | undefined,
+  rollReleasableUids: ReadonlySet<string>
+): void {
+  if (!relUids || relUids.length === 0) return;
+  for (const uid of relUids) {
+    const reason: EarlyReleaseReason = rollReleasableUids.has(uid)
+      ? "roll"
+      : "kinematic-release";
+    recordEarlyRelease(earlyReleasesByNoteUid, uid, slice.onsetSec, slice.onsetTick, reason);
+  }
+}
+
 export function recordStaticHeldReleases(
   slices: OnsetSlice[],
   releasedHeldBySlice: ReturnType<typeof analyzeHandHeldNotes>["releasedHeldBySlice"],
@@ -1132,15 +1138,12 @@ function solvePhraseSegment(
   }
 
   for (let t = 0; t < slices.length; t++) {
-    const relUids = output.releasesBySlice[t];
-    if (!relUids) continue;
-    const slice = slices[t];
-    for (const uid of relUids) {
-      const reason: EarlyReleaseReason = heldAnalysis.rollReleasableUids.has(uid)
-        ? "roll"
-        : "kinematic-release";
-      recordEarlyRelease(earlyReleasesByNoteUid, uid, slice.onsetSec, slice.onsetTick, reason);
-    }
+    recordSliceEarlyReleases(
+      earlyReleasesByNoteUid,
+      slices[t],
+      output.releasesBySlice[t],
+      heldAnalysis.rollReleasableUids
+    );
   }
 
   recordSolvedPath(

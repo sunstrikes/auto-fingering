@@ -1,7 +1,6 @@
 import {
   DEFAULT_HAND_SPAN_PROFILE,
   type AnchorOverride,
-  type EarlyReleaseReason,
   type Finger,
   type HandSpanProfile,
   type HeldNoteRelease,
@@ -16,7 +15,7 @@ import {
   advanceBeamLayer,
   derivePositionsAndCues,
   prepareSegmentBeamContext,
-  recordEarlyRelease,
+  recordSliceEarlyReleases,
   recordStaticHeldReleases,
   type BeamNode,
 } from "./solveFingering";
@@ -389,15 +388,12 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
           repairedAnchorUids.push(note.noteUid);
         }
       }
-      const relUids = finalReleasesBySlice[offset];
-      if (relUids) {
-        for (const uid of relUids) {
-          const reason: EarlyReleaseReason = heldAnalysis.rollReleasableUids.has(uid)
-            ? "roll"
-            : "kinematic-release";
-          recordEarlyRelease(earlyReleasesByNoteUid, uid, slice.onsetSec, slice.onsetTick, reason);
-        }
-      }
+      recordSliceEarlyReleases(
+        earlyReleasesByNoteUid,
+        slice,
+        finalReleasesBySlice[offset],
+        heldAnalysis.rollReleasableUids
+      );
     }
   }
 

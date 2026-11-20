@@ -14,21 +14,7 @@ import {
 } from "../src/solver/costModel";
 import { analyzeHandHeldNotes } from "../src/solver/heldNotes";
 import { getSpanScale, toHandFramePos } from "../src/solver/keyboard";
-import {
-  BASE_FINGER_LENGTH_MM as KINEMATICS_FINGER_LENGTH_MM,
-  BLACK_TIP_Y as KINEMATICS_BLACK_TIP_Y,
-  METACARPAL_1_LENGTH_MM as KINEMATICS_MC1_MM,
-  REAL_WHITE_KEY_WIDTH_MM as KINEMATICS_WHITE_KEY_MM,
-  WHITE_TIP_Y as KINEMATICS_WHITE_TIP_Y,
-  evaluateHandKinematics2D,
-} from "../src/solver/handKinematics";
-import {
-  BASE_FINGER_LENGTH_MM as SKELETON_FINGER_LENGTH_MM,
-  BLACK_TIP_Y as SKELETON_BLACK_TIP_Y,
-  METACARPAL_1_LENGTH_MM as SKELETON_MC1_MM,
-  REAL_WHITE_KEY_WIDTH_MM as SKELETON_WHITE_KEY_MM,
-  WHITE_TIP_Y as SKELETON_WHITE_TIP_Y,
-} from "../src/components/handSkeleton";
+import { evaluateHandKinematics2D } from "../src/solver/handKinematics";
 import { DEFAULT_COST_WEIGHTS } from "../src/solver/weights";
 import { DEFAULT_HAND_SPAN_PROFILE, type Finger } from "../src/domain/types";
 import { perfBudget } from "./perfBudget";
@@ -1380,15 +1366,8 @@ describe("solver seam: solveFingering", () => {
     }
   });
 
-  it("shares pure-TS millimeter kinematics with handSkeleton and rejects static multi-finger crossed chords across S/M/L", () => {
-    // 1. Single source of truth for millimeter & keybed constants
-    expect(KINEMATICS_WHITE_KEY_MM).toBe(SKELETON_WHITE_KEY_MM);
-    expect(KINEMATICS_MC1_MM).toBe(SKELETON_MC1_MM);
-    expect(KINEMATICS_FINGER_LENGTH_MM).toEqual(SKELETON_FINGER_LENGTH_MM);
-    expect(KINEMATICS_WHITE_TIP_Y).toEqual(SKELETON_WHITE_TIP_Y);
-    expect(KINEMATICS_BLACK_TIP_Y).toEqual(SKELETON_BLACK_TIP_Y);
-
-    // 2. Static multi-finger crossed chord: G4=2 held while B4=1 and D5=5 are struck (m.83 pattern)
+  it("rejects static multi-finger crossed chords across S/M/L", () => {
+    // Static multi-finger crossed chord: G4=2 held while B4=1 and D5=5 are struck (m.83 pattern)
     const { DOMParser } = new JSDOM("").window;
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="4.0">

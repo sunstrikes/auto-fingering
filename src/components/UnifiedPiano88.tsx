@@ -33,8 +33,8 @@ import {
   PIANO_SVG_H,
   PIANO_WHITE_KEY_H,
   PIANO_WHITE_KEY_W,
-  computeHandSkeleton,
-} from "./handSkeleton";
+} from "../solver/handKinematics";
+import { computeHandSkeleton } from "./handSkeleton";
 
 export interface UnifiedPiano88Props {
   scoreDoc: ScoreDocument | null;
