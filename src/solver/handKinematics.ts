@@ -208,6 +208,7 @@ export interface KinematicEvaluation2D {
   pose: PalmPose2D;
   maxReachRatio: number;
   infeasibilityExcess: number;
+  crowdingEnergy: number;
   comfortEnergy: number;
 }
 
@@ -235,6 +236,9 @@ const PALM_ANGLE_MAX_DEG = 30;
 const REACH_TOLERANCE_RATIO = 1.02;
 const MAX_KINEMATIC_CACHE_SIZE = 4096;
 
+/** Ergonomic lateral corridor clearance margin (mm, M scale) per adjacent finger gap. */
+const CORRIDOR_CLEARANCE_MARGIN_MM = 5.8;
+
 interface CachedPoseResult {
   feasible: boolean;
   relPalmXMm: number;
@@ -243,6 +247,7 @@ interface CachedPoseResult {
   abductRatio: number;
   maxReachRatio: number;
   infeasibilityExcess: number;
+  crowdingEnergy: number;
   comfortEnergy: number;
 }
 
@@ -305,6 +310,59 @@ function evaluatePoseObjective(
   return obj;
 }
 
+function computeFingerWidthCrowdingEnergy(
+  prepared: PreparedContact[],
+  cosA: number,
+  sinA: number,
+  handScale: number
+): number {
+  if (prepared.length < 2) return 0;
+  const byFinger = prepared.slice().sort((a, b) => a.finger - b.finger);
+  let crowding = 0;
+
+  for (let i = 0; i < byFinger.length - 1; i++) {
+    const a = byFinger[i];
+    const b = byFinger[i + 1];
+    const gapCount = b.finger - a.finger;
+    if (gapCount <= 0) continue;
+
+    if (gapCount === 1) {
+      // Adjacent fingers (no trapped idle fingers): check 2D tip clearance so Y-staggered
+      // white+black minor seconds (e.g. C-C#) remain collision-free.
+      const dist2d = Math.hypot(b.xMm - a.xMm, b.yMm - a.yMm);
+      const minTipClearance =
+        (SLEEVE_HALF_WIDTH_MM[a.finger][2] + SLEEVE_HALF_WIDTH_MM[b.finger][2]) * handScale;
+      if (dist2d < minTipClearance) {
+        const norm = (minTipClearance - dist2d) / (6 * handScale);
+        crowding += 4.0 * norm + 12.0 * norm * norm;
+      }
+      continue;
+    }
+
+    // Trapped idle fingers (a.finger + 1 .. b.finger - 1) along the palm-to-tip corridor:
+    // require scaled mid-phalanx widths + ergonomic corridor clearance for every spanned gap.
+    let minCorridorClearance = 0;
+    for (let f = a.finger; f < b.finger; f++) {
+      const fCurr = f as Finger;
+      const fNext = (f + 1) as Finger;
+      minCorridorClearance +=
+        (SLEEVE_HALF_WIDTH_MM[fCurr][1] +
+          SLEEVE_HALF_WIDTH_MM[fNext][1] +
+          CORRIDOR_CLEARANCE_MARGIN_MM) *
+        handScale;
+    }
+
+    const lateralDist = (b.xMm - a.xMm) * cosA + (b.yMm - a.yMm) * sinA;
+    const deficit = minCorridorClearance - Math.max(0, lateralDist);
+    if (deficit > 0) {
+      const norm = deficit / (8 * handScale);
+      crowding += 4.5 * norm + 14.0 * norm * norm;
+    }
+  }
+
+  return crowding;
+}
+
 function solveAndCachePose2D(
   contacts: KinematicContact[],
   handScale: number
@@ -336,6 +394,7 @@ function solveAndCachePose2D(
       },
       maxReachRatio: cached.maxReachRatio,
       infeasibilityExcess: cached.infeasibilityExcess,
+      crowdingEnergy: cached.crowdingEnergy,
       comfortEnergy: cached.comfortEnergy,
     };
   }
@@ -445,6 +504,26 @@ function solveAndCachePose2D(
     }
   }
 
+  const crowdingEnergy = computeFingerWidthCrowdingEnergy(prepared, cosA, sinA, handScale);
+  // Ulnar (3-4-5) tendon-coupling splay effort when stretched beyond 1.1 white keys per gap
+  let ulnarSplayEffort = 0;
+  for (let i = 0; i < prepared.length; i++) {
+    const a = prepared[i];
+    if (a.finger < 3) continue;
+    for (let j = i + 1; j < prepared.length; j++) {
+      const b = prepared[j];
+      if (b.finger < 3 || b.finger <= a.finger) continue;
+      const gaps = b.finger - a.finger;
+      const lateralPerGap = Math.abs((b.xMm - a.xMm) * cosA + (b.yMm - a.yMm) * sinA) / gaps;
+      const freeUlnarGapMm = 26 * handScale;
+      if (lateralPerGap > freeUlnarGapMm) {
+        const excess = (lateralPerGap - freeUlnarGapMm) / (12 * handScale);
+        ulnarSplayEffort += 0.35 * excess * excess;
+      }
+    }
+  }
+  const comfortEnergy = bestObj + crowdingEnergy + ulnarSplayEffort;
+
   if (kinematicPoseCache.size >= MAX_KINEMATIC_CACHE_SIZE) {
     kinematicPoseCache.clear();
   }
@@ -456,7 +535,8 @@ function solveAndCachePose2D(
     abductRatio,
     maxReachRatio,
     infeasibilityExcess,
-    comfortEnergy: bestObj,
+    crowdingEnergy,
+    comfortEnergy,
   });
 
   return {
@@ -469,7 +549,8 @@ function solveAndCachePose2D(
     },
     maxReachRatio,
     infeasibilityExcess,
-    comfortEnergy: bestObj,
+    crowdingEnergy,
+    comfortEnergy,
   };
 }
 
@@ -488,6 +569,7 @@ export function evaluateHandKinematics2D(
       pose: { palmXMm: 0, palmYMm: 0, palmAngleDeg: 0, abductRatio: 0 },
       maxReachRatio: 0,
       infeasibilityExcess: 0,
+      crowdingEnergy: 0,
       comfortEnergy: 0,
     };
   }

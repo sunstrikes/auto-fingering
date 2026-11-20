@@ -1449,4 +1449,66 @@ describe("solver seam: solveFingering", () => {
     );
     expect(over2DReachS.feasible).toBe(false);
   });
+
+  it("rejects extreme finger-packing cramps on narrow intervals (m.30 G3+B3 third) across S/M/L", () => {
+    const { DOMParser } = new JSDOM("").window;
+    // Measure 30 LH pattern: G3+B3 major third (2 white keys) between higher-root chords (B3+E4 / C4+G4)
+    // Previously, linear chordCramp (0.4) was outweighed by root-shift preference, collapsing G3+B3 to 5-1.
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="30">
+      <attributes><divisions>4</divisions><clef><sign>F</sign><line>4</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice></note>
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice></note>
+      <note><chord/><pitch><step>B</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const doc = parseMusicXml(xml, { DOMParser });
+    const g3 = doc.noteEvents.find((n) => n.midi === 55)!;
+    const b3 = doc.noteEvents.find((n) => n.midi === 59)!;
+
+    for (const preset of ["S", "M", "L"] as const) {
+      const profile = { preset, avoidThumbOnBlack: true, preferStablePosition: false };
+      const scale = preset === "S" ? 0.82 : preset === "L" ? 1.18 : 1.0;
+
+      // 2D crowding repulsion must steeply penalize 5-1 on G3+B3 compared to 3-1 / 4-2
+      const kin51 = evaluateHandKinematics2D(
+        [
+          { finger: 5, handFramePos: toHandFramePos(55, "LH"), isBlack: false, isHeld: false },
+          { finger: 1, handFramePos: toHandFramePos(59, "LH"), isBlack: false, isHeld: false },
+        ],
+        scale
+      );
+      const kin31 = evaluateHandKinematics2D(
+        [
+          { finger: 3, handFramePos: toHandFramePos(55, "LH"), isBlack: false, isHeld: false },
+          { finger: 1, handFramePos: toHandFramePos(59, "LH"), isBlack: false, isHeld: false },
+        ],
+        scale
+      );
+      expect(kin51.comfortEnergy - kin31.comfortEnergy).toBeGreaterThan(5.0);
+
+      // Vertical cost must penalize cramped 5-1 enough to outweigh horizontal root-shift pulls
+      const g3b3Slice = doc.onsetSlices[1];
+      const vc51 = computeVerticalCost(g3b3Slice, [5, 1], new Map(), profile);
+      const vc31 = computeVerticalCost(g3b3Slice, [3, 1], new Map(), profile);
+      const vc42 = computeVerticalCost(g3b3Slice, [4, 2], new Map(), profile);
+      expect(vc51.cost - vc31.cost).toBeGreaterThan(5.0);
+      expect(vc51.cost - vc42.cost).toBeGreaterThan(4.0);
+
+      const res = solveFingering(doc.onsetSlices, profile);
+      const fG3 = res.fingerByNoteUid[g3.noteUid];
+      const fB3 = res.fingerByNoteUid[b3.noteUid];
+      // Must NOT collapse into cramped 5-1; should select natural third fingering (e.g. 3-1 or 4-2)
+      expect([fG3, fB3]).not.toEqual([5, 1]);
+      expect(fG3 - fB3).toBeLessThanOrEqual(3);
+      expect(fG3).toBeGreaterThan(fB3);
+    }
+  });
 });

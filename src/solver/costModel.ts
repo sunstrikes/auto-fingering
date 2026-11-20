@@ -388,7 +388,8 @@ export function computeVerticalCost(
   fingers: Finger[],
   heldFingers: Map<Finger, number>,
   profile: HandSpanProfile,
-  weights: CostWeights = DEFAULT_COST_WEIGHTS
+  weights: CostWeights = DEFAULT_COST_WEIGHTS,
+  softPriorBias = 0
 ): { cost: number; hasUnreachableSpan: boolean; hasWideStretch: boolean } {
   const vw = weights.vertical;
   const scale = getSpanScale(profile);
@@ -522,7 +523,12 @@ export function computeVerticalCost(
   if (!kin2d.feasible) {
     cost += IMPOSSIBLE_COST + kin2d.infeasibilityExcess;
     hasUnreachableSpan = true;
+  } else {
+    const poseComfort = Math.max(0, kin2d.comfortEnergy - kin2d.crowdingEnergy);
+    cost += kin2d.crowdingEnergy + poseComfort * 0.15;
   }
+
+  cost += softPriorBias;
 
   return { cost, hasUnreachableSpan, hasWideStretch };
 }
@@ -668,7 +674,8 @@ export function computeHorizontalCost(
   currFingers: Finger[],
   profile: HandSpanProfile,
   ignoreAnchors = false,
-  weights: CostWeights = DEFAULT_COST_WEIGHTS
+  weights: CostWeights = DEFAULT_COST_WEIGHTS,
+  softPriorBias = 0
 ): { cost: number; hasWideStretch: boolean; hasUnreachableSpan: boolean } {
   const hw = weights.horizontal;
   const scale = getSpanScale(profile);
@@ -676,7 +683,7 @@ export function computeHorizontalCost(
   const hand = currSlice.hand;
   const effectivePrevFingers = resolveDepartureFingers(prevSlice, prevFingers, ignoreAnchors);
 
-  let cost = 0;
+  let cost = softPriorBias;
   let hasWideStretch = false;
   let hasUnreachableSpan = false;
   let hasCrossing = false;

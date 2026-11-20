@@ -386,4 +386,44 @@ describe("Seam 1: localResolveFingering", () => {
       }
     }
   });
+
+  it("avoids cramped 5-1 on m.30 G3+B3 third during local phrase re-solving across S/M/L", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="30">
+      <attributes><divisions>4</divisions><clef><sign>F</sign><line>4</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice></note>
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice></note>
+      <note><chord/><pitch><step>B</step><octave>3</octave></pitch><duration>1</duration><voice>2</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    const c4First = doc.noteEvents[0];
+    const g3 = doc.noteEvents.find((n) => n.midi === 55)!;
+    const b3 = doc.noteEvents.find((n) => n.midi === 59)!;
+
+    for (const preset of ["S", "M", "L"] as const) {
+      const profile = { preset, avoidThumbOnBlack: true, preferStablePosition: false };
+      const initial = solveFingering(doc.onsetSlices, profile);
+      const localRes = localResolveFingering({
+        onsetSlices: doc.onsetSlices,
+        priorFingerByNoteUid: initial.fingerByNoteUid,
+        targetNoteUid: c4First.noteUid,
+        override: { finger: 1, mode: "phrase" },
+        anchors: { [c4First.noteUid]: { finger: 1, mode: "phrase" } },
+        profile,
+      });
+      const fG3 = localRes.fingerByNoteUid[g3.noteUid];
+      const fB3 = localRes.fingerByNoteUid[b3.noteUid];
+      expect([fG3, fB3]).not.toEqual([5, 1]);
+      expect(fG3 - fB3).toBeLessThanOrEqual(3);
+      expect(fG3).toBeGreaterThan(fB3);
+    }
+  });
 });
