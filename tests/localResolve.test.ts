@@ -340,4 +340,50 @@ describe("Seam 1: localResolveFingering", () => {
     expect(phraseResolved.warnings.some((w) => w.type === "anchor-conflict")).toBe(false);
     expect(phraseResolved.repairedAnchorUids).toEqual([]);
   });
+
+  it("enforces 2D kinematic non-thumb held-inversion & static crossed-chord rejection during local phrase re-solving across S/M/L", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="32">
+      <attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><tie type="start"/><voice>1</voice><notations><tied type="start"/></notations></note>
+      <note><chord/><pitch><step>B</step><octave>5</octave></pitch><duration>1</duration><tie type="start"/><voice>1</voice><notations><tied type="start"/></notations></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><tie type="stop"/><tie type="start"/><voice>1</voice><notations><tied type="stop"/><tied type="start"/></notations></note>
+      <note><chord/><pitch><step>B</step><octave>5</octave></pitch><duration>1</duration><tie type="stop"/><tie type="start"/><voice>1</voice><notations><tied type="stop"/><tied type="start"/></notations></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>2</duration><tie type="stop"/><voice>1</voice><notations><tied type="stop"/></notations></note>
+      <note><chord/><pitch><step>B</step><octave>5</octave></pitch><duration>2</duration><tie type="stop"/><voice>1</voice><notations><tied type="stop"/></notations></note>
+      <backup><duration>4</duration></backup>
+      <note><pitch><step>A</step><alter>-1</alter><octave>4</octave></pitch><duration>4</duration><voice>2</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    const e5 = doc.noteEvents.find((n) => n.midi === 76 && !n.isTieStop)!;
+    const a4 = doc.noteEvents.find((n) => n.midi === 69)!;
+
+    for (const preset of ["S", "M", "L"] as const) {
+      const profile = { preset, avoidThumbOnBlack: true, preferStablePosition: false };
+      const initial = solveFingering(doc.onsetSlices, profile);
+      const localRes = localResolveFingering({
+        onsetSlices: doc.onsetSlices,
+        priorFingerByNoteUid: initial.fingerByNoteUid,
+        targetNoteUid: e5.noteUid,
+        override: { finger: 3, mode: "phrase" },
+        anchors: { [e5.noteUid]: { finger: 3, mode: "phrase" } },
+        profile,
+      });
+      const fE5 = localRes.fingerByNoteUid[e5.noteUid];
+      const fA4 = localRes.fingerByNoteUid[a4.noteUid];
+      if (fA4 > 1 && fE5 > 1) {
+        expect(fA4).toBeLessThan(fE5);
+      }
+    }
+  });
 });

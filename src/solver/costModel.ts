@@ -7,6 +7,10 @@ import {
   type OnsetSlice,
 } from "../domain/types";
 import {
+  evaluateHandKinematics2D,
+  type KinematicContact,
+} from "./handKinematics";
+import {
   MAX_OCTAVE_SPAN,
   getComfortSpan,
   getMaxSpan,
@@ -397,10 +401,20 @@ export function computeVerticalCost(
   let hasWideStretch = false;
 
   const notes = slice.notes;
+  const contacts: KinematicContact[] = [];
+  const activeNoteMidisByFinger = new Map<Finger, number>();
   for (let i = 0; i < notes.length; i++) {
     const n = notes[i];
     const f = fingers[i];
+    if (!f) continue;
     const posS = toHandFramePos(n.midi, slice.hand);
+    contacts.push({
+      finger: f,
+      handFramePos: posS,
+      isBlack: isBlackKey(n.midi),
+      isHeld: false,
+    });
+    activeNoteMidisByFinger.set(f, n.midi);
 
     // Held finger reuse ("steal") penalty & combined held+struck ergonomics
     const heldMidiSame = heldFingers.get(f);
@@ -490,6 +504,24 @@ export function computeVerticalCost(
         if (inv.hasUnreachableSpan) hasUnreachableSpan = true;
       }
     }
+  }
+
+  if (heldFingers.size > 0) {
+    for (const [fH, midiH] of heldFingers.entries()) {
+      if (activeNoteMidisByFinger.get(fH) === midiH) continue;
+      contacts.push({
+        finger: fH,
+        handFramePos: toHandFramePos(midiH, slice.hand),
+        isBlack: isBlackKey(midiH),
+        isHeld: true,
+      });
+    }
+  }
+
+  const kin2d = evaluateHandKinematics2D(contacts, scale, weights.horizontal.crossMax);
+  if (!kin2d.feasible) {
+    cost += IMPOSSIBLE_COST + kin2d.infeasibilityExcess;
+    hasUnreachableSpan = true;
   }
 
   return { cost, hasUnreachableSpan, hasWideStretch };

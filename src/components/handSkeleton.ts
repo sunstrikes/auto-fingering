@@ -1,129 +1,68 @@
-import type { Finger, SpanPreset } from "../domain/types";
+import type { Finger } from "../domain/types";
 import { SPAN_PRESET_SCALE } from "../solver/keyboard";
+import {
+  BASE_FINGER_LENGTH_MM,
+  BASE_FINGER_LENGTH_PX,
+  BLACK_TIP_Y,
+  IDLE_CURVE_FACTOR,
+  METACARPAL_1_LENGTH_MM,
+  PIANO_BLACK_KEY_H,
+  PIANO_BLACK_KEY_W,
+  PIANO_KEYBED_BOTTOM_Y,
+  PIANO_KEYS_Y,
+  PIANO_KNUCKLE_BASE_Y,
+  PIANO_MM_TO_PX,
+  PIANO_SVG_H,
+  PIANO_WHITE_KEY_H,
+  PIANO_WHITE_KEY_W,
+  PIANO_WRIST_Y,
+  REAL_WHITE_KEY_LENGTH_MM,
+  REAL_WHITE_KEY_WIDTH_MM,
+  SLEEVE_HALF_WIDTH_MM,
+  WHITE_TIP_Y,
+  getAbductRatio,
+  getFingerOriginLocalPx,
+  getFingerReachPx,
+  getFixedFingerLengthPx,
+  getKnuckleBaseY,
+  getThumbMetacarpalLengthPx,
+  type Point2D,
+} from "../solver/handKinematics";
 import type { FingerPosture, HandPosture } from "./handPostureModel";
 
-export const PIANO_WHITE_KEY_W = 24;
-export const PIANO_WHITE_KEY_H = 112;
-export const PIANO_BLACK_KEY_W = 14.5;
-export const PIANO_BLACK_KEY_H = 70;
-export const PIANO_KEYS_Y = 50;
-export const PIANO_KEYBED_BOTTOM_Y = PIANO_KEYS_Y + PIANO_WHITE_KEY_H; // 162
-export const PIANO_KNUCKLE_BASE_Y = PIANO_KEYBED_BOTTOM_Y + 11; // 173
-export const PIANO_WRIST_Y = PIANO_KEYBED_BOTTOM_Y + 62; // 224
-export const PIANO_SVG_H = 244;
-
-/** Real-world grand piano white-key pitch & length (mm) for 1:1 physical hand scaling. */
-export const REAL_WHITE_KEY_WIDTH_MM = 23.5;
-export const REAL_WHITE_KEY_LENGTH_MM = 148;
-export const PIANO_MM_TO_PX = PIANO_WHITE_KEY_W / REAL_WHITE_KEY_WIDTH_MM;
+export {
+  BASE_FINGER_LENGTH_MM,
+  BASE_FINGER_LENGTH_PX,
+  BLACK_TIP_Y,
+  IDLE_CURVE_FACTOR,
+  METACARPAL_1_LENGTH_MM,
+  PIANO_BLACK_KEY_H,
+  PIANO_BLACK_KEY_W,
+  PIANO_KEYBED_BOTTOM_Y,
+  PIANO_KEYS_Y,
+  PIANO_KNUCKLE_BASE_Y,
+  PIANO_MM_TO_PX,
+  PIANO_SVG_H,
+  PIANO_WHITE_KEY_H,
+  PIANO_WHITE_KEY_W,
+  PIANO_WRIST_Y,
+  REAL_WHITE_KEY_LENGTH_MM,
+  REAL_WHITE_KEY_WIDTH_MM,
+  WHITE_TIP_Y,
+  getAbductRatio,
+  getFingerOriginLocalPx,
+  getFingerReachPx,
+  getFixedFingerLengthPx,
+  getKnuckleBaseY,
+  getThumbMetacarpalLengthPx,
+  type Point2D,
+};
 
 function mm(valMm: number): number {
   return valMm * PIANO_MM_TO_PX;
 }
 
 const FINGERS: Finger[] = [1, 2, 3, 4, 5];
-
-/** Natural white-key contact Y by finger (3 deepest, 2/4 mid, 5 shorter, 1 frontmost). */
-export const WHITE_TIP_Y: Record<Finger, number> = {
-  1: 148,
-  2: 126,
-  3: 116,
-  4: 124,
-  5: 141,
-};
-
-/** Natural black-key contact Y by finger (black keys occupy y = 50..120). */
-export const BLACK_TIP_Y: Record<Finger, number> = {
-  1: 108,
-  2: 96,
-  3: 90,
-  4: 95,
-  5: 105,
-};
-
-/**
- * Real-world anatomical MCP-to-tip finger lengths (mm) for Medium ("M") adult hand size.
- */
-export const BASE_FINGER_LENGTH_MM: Record<Finger, number> = {
-  1: 59,
-  2: 75,
-  3: 83,
-  4: 78,
-  5: 64,
-};
-
-/**
- * Calibrated MCP-to-tip finger lengths in SVG px tied to `PIANO_WHITE_KEY_W / REAL_WHITE_KEY_WIDTH_MM`.
- * Scaled by `SPAN_PRESET_SCALE` for S (0.82x) / M (1.00x) / L (1.18x) hand profiles.
- */
-export const BASE_FINGER_LENGTH_PX: Record<Finger, number> = {
-  1: mm(BASE_FINGER_LENGTH_MM[1]),
-  2: mm(BASE_FINGER_LENGTH_MM[2]),
-  3: mm(BASE_FINGER_LENGTH_MM[3]),
-  4: mm(BASE_FINGER_LENGTH_MM[4]),
-  5: mm(BASE_FINGER_LENGTH_MM[5]),
-};
-
-/** First metacarpal (CMC1 -> MCP1) length in mm for Medium ("M") hand size. */
-export const METACARPAL_1_LENGTH_MM = 41;
-
-/** Idle fingers adopt a gently curved 2D top-down projection at 72% of full extended length. */
-export const IDLE_CURVE_FACTOR = 0.72;
-
-export function getFixedFingerLengthPx(finger: Finger, spanPreset: SpanPreset = "M"): number {
-  return BASE_FINGER_LENGTH_PX[finger] * SPAN_PRESET_SCALE[spanPreset];
-}
-
-export function getThumbMetacarpalLengthPx(spanPreset: SpanPreset = "M"): number {
-  return mm(METACARPAL_1_LENGTH_MM) * SPAN_PRESET_SCALE[spanPreset];
-}
-
-export function getKnuckleBaseY(handScale: number, palmLiftY = 0): number {
-  const sizeKnuckleOffsetY = (1 - handScale) * 10;
-  return PIANO_KNUCKLE_BASE_Y - sizeKnuckleOffsetY + palmLiftY;
-}
-
-export function getAbductRatio(fingerSpanPx: number, handScale: number): number {
-  return clamp((fingerSpanPx - mm(92) * handScale) / (mm(95) * handScale), -0.1, 0.85);
-}
-
-/**
- * Returns the palm-local anchor origin in SVG px (CMC1 for thumb, MCP for fingers 2..5)
- * relative to `(palmCenterX, knuckleBaseY)` before palm rotation.
- */
-export function getFingerOriginLocalPx(
-  finger: Finger,
-  abductRatio: number,
-  handScale: number,
-  dir: 1 | -1
-): Point2D {
-  switch (finger) {
-    case 1:
-      return { x: -mm(18) * dir * handScale, y: mm(49) * handScale };
-    case 2:
-      return { x: -mm(21 + abductRatio * 4.5) * dir * handScale, y: mm(3.5) * handScale };
-    case 3:
-      return { x: 0, y: 0 };
-    case 4:
-      return { x: mm(20 + abductRatio * 4.5) * dir * handScale, y: mm(4.5) * handScale };
-    case 5:
-      return { x: mm(38 + abductRatio * 11) * dir * handScale, y: mm(12.5) * handScale };
-  }
-}
-
-export function getFingerReachPx(finger: Finger, spanPreset: SpanPreset = "M"): number {
-  const fixedLen = getFixedFingerLengthPx(finger, spanPreset);
-  return finger === 1 ? getThumbMetacarpalLengthPx(spanPreset) + fixedLen : fixedLen;
-}
-
-/** 3-point tapered half-width [base, mid, tip] in mm for each finger (M size). */
-const SLEEVE_HALF_WIDTH_MM: Record<Finger, [number, number, number]> = {
-  1: [7.5, 6.2, 5.2],
-  2: [5.9, 4.9, 4.0],
-  3: [6.1, 5.1, 4.2],
-  4: [5.7, 4.7, 3.8],
-  5: [4.9, 4.0, 3.3],
-};
 
 /** Bone radii [headRadius, waistRadius] in mm for phalanges. */
 const PHALANX_RADII_MM: Record<Finger, [number, number]> = {
@@ -133,11 +72,6 @@ const PHALANX_RADII_MM: Record<Finger, [number, number]> = {
   4: [1.8, 1.08],
   5: [1.55, 0.92],
 };
-
-export interface Point2D {
-  x: number;
-  y: number;
-}
 
 export interface BoneSegment {
   from: Point2D;

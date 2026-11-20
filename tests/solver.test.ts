@@ -14,6 +14,21 @@ import {
 } from "../src/solver/costModel";
 import { analyzeHandHeldNotes } from "../src/solver/heldNotes";
 import { getSpanScale, toHandFramePos } from "../src/solver/keyboard";
+import {
+  BASE_FINGER_LENGTH_MM as KINEMATICS_FINGER_LENGTH_MM,
+  BLACK_TIP_Y as KINEMATICS_BLACK_TIP_Y,
+  METACARPAL_1_LENGTH_MM as KINEMATICS_MC1_MM,
+  REAL_WHITE_KEY_WIDTH_MM as KINEMATICS_WHITE_KEY_MM,
+  WHITE_TIP_Y as KINEMATICS_WHITE_TIP_Y,
+  evaluateHandKinematics2D,
+} from "../src/solver/handKinematics";
+import {
+  BASE_FINGER_LENGTH_MM as SKELETON_FINGER_LENGTH_MM,
+  BLACK_TIP_Y as SKELETON_BLACK_TIP_Y,
+  METACARPAL_1_LENGTH_MM as SKELETON_MC1_MM,
+  REAL_WHITE_KEY_WIDTH_MM as SKELETON_WHITE_KEY_MM,
+  WHITE_TIP_Y as SKELETON_WHITE_TIP_Y,
+} from "../src/components/handSkeleton";
 import { DEFAULT_COST_WEIGHTS } from "../src/solver/weights";
 import { DEFAULT_HAND_SPAN_PROFILE, type Finger } from "../src/domain/types";
 import { perfBudget } from "./perfBudget";
@@ -1361,5 +1376,77 @@ describe("solver seam: solveFingering", () => {
         }
       }
     }
+  });
+
+  it("shares pure-TS millimeter kinematics with handSkeleton and rejects static multi-finger crossed chords across S/M/L", () => {
+    // 1. Single source of truth for millimeter & keybed constants
+    expect(KINEMATICS_WHITE_KEY_MM).toBe(SKELETON_WHITE_KEY_MM);
+    expect(KINEMATICS_MC1_MM).toBe(SKELETON_MC1_MM);
+    expect(KINEMATICS_FINGER_LENGTH_MM).toEqual(SKELETON_FINGER_LENGTH_MM);
+    expect(KINEMATICS_WHITE_TIP_Y).toEqual(SKELETON_WHITE_TIP_Y);
+    expect(KINEMATICS_BLACK_TIP_Y).toEqual(SKELETON_BLACK_TIP_Y);
+
+    // 2. Static multi-finger crossed chord: G4=2 held while B4=1 and D5=5 are struck (m.83 pattern)
+    const { DOMParser } = new JSDOM("").window;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="83">
+      <attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><voice>2</voice></note>
+      <backup><duration>2</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const doc = parseMusicXml(xml, { DOMParser });
+    const slice2 = doc.onsetSlices[1]; // B4 + D5 with G4 held
+
+    for (const preset of ["S", "M", "L"] as const) {
+      const profile = { preset, avoidThumbOnBlack: true, preferStablePosition: false };
+
+      // Static 3-finger crossed posture: G4=2 held, B4=1, D5=5 -> IMPOSSIBLE_COST
+      const crossed3 = computeVerticalCost(
+        slice2,
+        [1, 5],
+        new Map<Finger, number>([[2, 67]]),
+        profile
+      );
+      expect(crossed3.cost).toBeGreaterThanOrEqual(IMPOSSIBLE_COST);
+      expect(crossed3.hasUnreachableSpan).toBe(true);
+
+      // Legitimate 2-finger transitional thumb crossing: G4=2 held, B4=1 alone -> feasible
+      const singleThumbUnder = computeVerticalCost(
+        { ...slice2, notes: [slice2.notes[0]] },
+        [1],
+        new Map<Finger, number>([[2, 67]]),
+        profile
+      );
+      expect(singleThumbUnder.cost).toBeLessThan(IMPOSSIBLE_COST);
+      expect(singleThumbUnder.hasUnreachableSpan).toBe(false);
+    }
+
+    // 3. 2D reach ceiling & hard 7.0 pure-octave cap via evaluateHandKinematics2D
+    const overOctave = evaluateHandKinematics2D(
+      [
+        { finger: 1, handFramePos: toHandFramePos(60, "RH"), isBlack: false, isHeld: false },
+        { finger: 5, handFramePos: toHandFramePos(74, "RH"), isBlack: false, isHeld: false }, // 9th = 8.0 white keys > 7.0
+      ],
+      1.18 // even L profile is hard-capped at 7.0
+    );
+    expect(overOctave.feasible).toBe(false);
+
+    // Adjacent 3-4 stretched beyond S-scale 2D Euclidean reach ceiling (while <= 7.0 white keys)
+    const over2DReachS = evaluateHandKinematics2D(
+      [
+        { finger: 3, handFramePos: toHandFramePos(60, "RH"), isBlack: false, isHeld: false },
+        { finger: 4, handFramePos: toHandFramePos(71, "RH"), isBlack: false, isHeld: false }, // 6.0 white keys on 3-4 under S
+      ],
+      0.82
+    );
+    expect(over2DReachS.feasible).toBe(false);
   });
 });
