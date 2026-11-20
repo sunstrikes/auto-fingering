@@ -8,7 +8,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { DEFAULT_HAND_SPAN_PROFILE } from "../src/domain/types";
 import { parseMusicXml } from "../src/musicxml/parser";
-import { MAX_OCTAVE_SPAN, keyPos } from "../src/solver/keyboard";
+import { MAX_OCTAVE_SPAN, SPAN_PRESET_SCALE, isBlackKey, keyPos, toHandFramePos } from "../src/solver/keyboard";
+import { evaluateHandKinematics2D, SLEEVE_HALF_WIDTH_MM } from "../src/solver/handKinematics";
+import { localResolveFingering } from "../src/solver/localResolve";
 import { solveFingering } from "../src/solver/solveFingering";
 import {
   PIANO_MAX_MIDI,
@@ -22,11 +24,14 @@ import {
   BASE_FINGER_LENGTH_MM,
   BASE_FINGER_LENGTH_PX,
   IDLE_CURVE_FACTOR,
+  PIANO_BLACK_KEY_H,
+  PIANO_KEYS_Y,
   PIANO_MM_TO_PX,
   PIANO_SVG_H,
   PIANO_WHITE_KEY_W,
   REAL_WHITE_KEY_WIDTH_MM,
   computeHandSkeleton,
+  getFingerReachPx,
   getFixedFingerLengthPx,
 } from "../src/components/handSkeleton";
 import { UnifiedPiano88 } from "../src/components/UnifiedPiano88";
@@ -439,7 +444,10 @@ describe("handPostureModel continuous 88-key kinematics", () => {
           const fixedLen = getFixedFingerLengthPx(f, preset);
           const fp = frame.rh.fingers[f];
           if (fp.targetMidi === null) {
-            expect(sk.fingers[f].phalanxSpanLength).toBeCloseTo(fixedLen * IDLE_CURVE_FACTOR, 1);
+            expect(sk.fingers[f].phalanxSpanLength).toBeLessThanOrEqual(
+              fixedLen * IDLE_CURVE_FACTOR + 1e-4
+            );
+            expect(sk.fingers[f].phalanxSpanLength).toBeGreaterThan(0);
           } else {
             expect(sk.fingers[f].phalanxSpanLength).toBeLessThanOrEqual(fixedLen + 1e-4);
           }
@@ -841,5 +849,310 @@ describe("handPostureModel continuous 88-key kinematics", () => {
     expect(thumbFrame.rh.fingers[2].targetMidi).toBe(64);
     expect(thumbFrame.rh.fingers[1].targetMidi).toBe(65);
     expect(thumbFrame.activeKeyHighlights.get(64)?.rhPedalSustained).toBeUndefined();
+  });
+
+  it("drives palm pose from shared 2D kinematics across discrete slices and 0.25x continuous frames", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>2</divisions>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <direction><sound tempo="120"/></direction>
+      <!-- RH: C4 + F#4 + B4 mixed black/white chord, then D4 + A4 -->
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>
+      <note><chord/><pitch><step>F</step><alter>1</alter><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>
+      <note><chord/><pitch><step>B</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>
+      <note><chord/><pitch><step>A</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>
+      <backup><duration>4</duration></backup>
+      <!-- LH: C3 + G3 -->
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><voice>2</voice><staff>2</staff></note>
+      <note><chord/><pitch><step>G</step><octave>3</octave></pitch><duration>4</duration><voice>2</voice><staff>2</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml, { DOMParser });
+    const solveResult = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const index = buildHandPostureIndex(scoreDoc, solveResult, DEFAULT_HAND_SPAN_PROFILE);
+    const d4KeyPos = keyPos(62);
+    const a0WhiteIdx = 5;
+
+    // 1. Discrete slice preview matches shared 2D kinematic palm pose
+    const rhSlice0 = scoreDoc.onsetSlices.find((s) => s.hand === "RH")!;
+    const discreteFrame = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveResult,
+      rhSlice0.sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    const contacts = rhSlice0.notes.map((n) => ({
+      finger: solveResult.fingerByNoteUid[n.noteUid],
+      handFramePos: toHandFramePos(n.midi, "RH"),
+      isBlack: isBlackKey(n.midi),
+      isHeld: false,
+    }));
+    const kinEval = evaluateHandKinematics2D(contacts, SPAN_PRESET_SCALE.M);
+    const expectedPalmXUnit = kinEval.pose.palmXMm / REAL_WHITE_KEY_WIDTH_MM - a0WhiteIdx;
+    expect(discreteFrame.rh.palmCenterXUnit).toBeCloseTo(expectedPalmXUnit, 2);
+    expect(discreteFrame.rh.palmAngleDeg).toBeCloseTo(kinEval.pose.palmAngleDeg, 2);
+
+    // 2. Continuous 0.25x slow playback frames (15ms steps) keep active fingertips within reach
+    //    and match LH mirrored 2D kinematic pose on sustained LH chord
+    const lhSlice0 = scoreDoc.onsetSlices.find((s) => s.hand === "LH")!;
+    const lhContacts = lhSlice0.notes.map((n) => ({
+      finger: solveResult.fingerByNoteUid[n.noteUid],
+      handFramePos: toHandFramePos(n.midi, "LH"),
+      isBlack: isBlackKey(n.midi),
+      isHeld: false,
+    }));
+    const lhKinEval = evaluateHandKinematics2D(lhContacts, SPAN_PRESET_SCALE.M);
+    const expectedLhPalmXUnit =
+      2 * d4KeyPos - lhKinEval.pose.palmXMm / REAL_WHITE_KEY_WIDTH_MM - a0WhiteIdx;
+
+    for (let t = 0.04; t <= 0.8; t += 0.06) {
+      const frame = computeDualHandPostureFrameAtTime(index, t);
+      for (const posture of [frame.rh, frame.lh]) {
+        const sk = computeHandSkeleton(posture);
+        for (const f of [1, 2, 3, 4, 5] as const) {
+          const fp = posture.fingers[f];
+          if (fp.targetMidi !== null && fp.pressDepth > 0) {
+            const reachPx = getFingerReachPx(f, "M");
+            const origin = f === 1 ? sk.fingers[1].carpalRoot : sk.fingers[f].mcp;
+            const distPx = Math.hypot(
+              sk.fingers[f].tip.x - origin.x,
+              sk.fingers[f].tip.y - origin.y
+            );
+            expect(distPx).toBeLessThanOrEqual(reachPx * 1.02 + 1e-3);
+          }
+        }
+      }
+      if (t <= 0.35) {
+        expect(frame.lh.palmCenterXUnit).toBeCloseTo(expectedLhPalmXUnit, 1);
+        expect(frame.lh.palmAngleDeg).toBeCloseTo(-lhKinEval.pose.palmAngleDeg, 1);
+      }
+    }
+  });
+
+  it("maintains idle-finger physical-width clearance and keeps idle long fingers clear of black-key zone on white-key postures", () => {
+    const blackKeyBottomY = PIANO_KEYS_Y + PIANO_BLACK_KEY_H;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <direction><sound tempo="60"/></direction>
+      <!-- Slice 1: RH G4 single white key -->
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <!-- Slice 2: RH C4+C5 octave white keys -->
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>
+      <backup><duration>2</duration></backup>
+      <!-- LH: G3+B3 white-key major third -->
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>2</duration><voice>2</voice><staff>2</staff></note>
+      <note><chord/><pitch><step>B</step><octave>3</octave></pitch><duration>2</duration><voice>2</voice><staff>2</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml, { DOMParser });
+    for (const preset of ["S", "M", "L"] as const) {
+      const profile = { ...DEFAULT_HAND_SPAN_PROFILE, preset };
+      const solveResult = solveFingering(scoreDoc.onsetSlices, profile);
+      const handScale = SPAN_PRESET_SCALE[preset];
+
+      // Resting frame
+      const emptyFrame = computeDualHandPostureFrameAtTime(null, 0, preset);
+      for (const posture of [emptyFrame.rh, emptyFrame.lh]) {
+        const sk = computeHandSkeleton(posture);
+        for (const f of [2, 3, 4] as const) {
+          expect(sk.fingers[f].tip.y).toBeGreaterThanOrEqual(blackKeyBottomY);
+        }
+      }
+
+      // Active white-key slices
+      for (const slice of scoreDoc.onsetSlices) {
+        const frame = projectDualHandPostureAtSlice(scoreDoc, solveResult, slice.sliceId, profile);
+        for (const posture of [frame.rh, frame.lh]) {
+          const sk = computeHandSkeleton(posture);
+          const dir = posture.hand === "RH" ? 1 : -1;
+
+          // Idle long fingers 2, 3, 4 clear of black-key visual zone
+          for (const f of [2, 3, 4] as const) {
+            if (posture.fingers[f].targetMidi === null) {
+              expect(sk.fingers[f].tip.y).toBeGreaterThanOrEqual(blackKeyBottomY);
+            }
+          }
+
+          // Adjacent fingers involving at least one idle finger maintain physical width clearance
+          for (const f of [1, 2, 3, 4] as const) {
+            const nextF = (f + 1) as 2 | 3 | 4 | 5;
+            if (
+              posture.fingers[f].targetMidi === null ||
+              posture.fingers[nextF].targetMidi === null
+            ) {
+              const minClearancePx =
+                (SLEEVE_HALF_WIDTH_MM[f][2] + SLEEVE_HALF_WIDTH_MM[nextF][2]) *
+                PIANO_MM_TO_PX *
+                handScale;
+              const actualGapPx = (sk.fingers[nextF].tip.x - sk.fingers[f].tip.x) * dir;
+              expect(actualGapPx).toBeGreaterThanOrEqual(minClearancePx - 0.5);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it("uses shared 2D kinematic feasibility in runtime safety guard to preserve pinOnly chord notes while releasing conflicting 3-finger crossed held notes", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>4</divisions>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <direction><sound tempo="60"/></direction>
+      <!-- Held G4 (67) across whole measure -->
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
+      <backup><duration>4</duration></backup>
+      <note><rest/><duration>2</duration><voice>2</voice></note>
+      <!-- Chord B4 (71) + D5 (74) at t=0.5s -->
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>2</duration><voice>2</voice></note>
+      <note><chord/><pitch><step>D</step><octave>5</octave></pitch><duration>2</duration><voice>2</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml, { DOMParser });
+    const baseSolve = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const g4Note = scoreDoc.noteEvents.find((n) => n.midi === 67)!;
+    const b4Note = scoreDoc.noteEvents.find((n) => n.midi === 71)!;
+    const d5Note = scoreDoc.noteEvents.find((n) => n.midi === 74)!;
+
+    // Pin G4=2, B4=1, D5=5 via pinOnly overrides (pairwise 1D checks pass, 2D 3-finger crossing fails)
+    let resolved = localResolveFingering({
+      onsetSlices: scoreDoc.onsetSlices,
+      priorFingerByNoteUid: baseSolve.fingerByNoteUid,
+      profile: DEFAULT_HAND_SPAN_PROFILE,
+      targetNoteUid: g4Note.noteUid,
+      override: { finger: 2, mode: "pinOnly" },
+      anchors: { [g4Note.noteUid]: { finger: 2, mode: "pinOnly" } },
+    });
+    resolved = localResolveFingering({
+      onsetSlices: scoreDoc.onsetSlices,
+      priorFingerByNoteUid: resolved.fingerByNoteUid,
+      profile: DEFAULT_HAND_SPAN_PROFILE,
+      targetNoteUid: b4Note.noteUid,
+      override: { finger: 1, mode: "pinOnly" },
+      anchors: {
+        [g4Note.noteUid]: { finger: 2, mode: "pinOnly" },
+        [b4Note.noteUid]: { finger: 1, mode: "pinOnly" },
+      },
+    });
+    resolved = localResolveFingering({
+      onsetSlices: scoreDoc.onsetSlices,
+      priorFingerByNoteUid: resolved.fingerByNoteUid,
+      profile: DEFAULT_HAND_SPAN_PROFILE,
+      targetNoteUid: d5Note.noteUid,
+      override: { finger: 5, mode: "pinOnly" },
+      anchors: {
+        [g4Note.noteUid]: { finger: 2, mode: "pinOnly" },
+        [b4Note.noteUid]: { finger: 1, mode: "pinOnly" },
+        [d5Note.noteUid]: { finger: 5, mode: "pinOnly" },
+      },
+    });
+
+    const chordSlice = scoreDoc.onsetSlices[1];
+    const frame = projectDualHandPostureAtSlice(
+      scoreDoc,
+      resolved,
+      chordSlice.sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+
+    // Same-slice pinOnly chord notes B4(1) and D5(5) must be preserved
+    expect(frame.rh.fingers[1].targetMidi).toBe(71);
+    expect(frame.rh.fingers[5].targetMidi).toBe(74);
+    // Conflicting prior-slice held G4(2) must be lifted to pedal sustain
+    expect(frame.rh.fingers[2].targetMidi).toBeNull();
+    expect(frame.activeKeyHighlights.get(67)?.rh).toBe("held");
+    expect(frame.activeKeyHighlights.get(67)?.rhPedalSustained).toBe(true);
+  });
+
+  it("scales rendered knuckle spacing, finger lengths, and idle clearances coherently with solver feasibility across S/M/L", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <direction><sound tempo="60"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml, { DOMParser });
+    const knuckleSpanByPreset: Record<"S" | "M" | "L", number> = { S: 0, M: 0, L: 0 };
+    const idleGapByPreset: Record<"S" | "M" | "L", number> = { S: 0, M: 0, L: 0 };
+
+    for (const preset of ["S", "M", "L"] as const) {
+      const profile = { ...DEFAULT_HAND_SPAN_PROFILE, preset };
+      const solveResult = solveFingering(scoreDoc.onsetSlices, profile);
+      const emptyFrame = computeDualHandPostureFrameAtTime(null, 0, preset);
+      const emptySk = computeHandSkeleton(emptyFrame.rh);
+      knuckleSpanByPreset[preset] = Math.hypot(
+        emptySk.fingers[5].mcp.x - emptySk.fingers[2].mcp.x,
+        emptySk.fingers[5].mcp.y - emptySk.fingers[2].mcp.y
+      );
+      idleGapByPreset[preset] = emptySk.fingers[4].tip.x - emptySk.fingers[3].tip.x;
+
+      const sliceFrame = projectDualHandPostureAtSlice(
+        scoreDoc,
+        solveResult,
+        scoreDoc.onsetSlices[0].sliceId,
+        profile
+      );
+      const sliceSk = computeHandSkeleton(sliceFrame.rh);
+      const contacts = scoreDoc.onsetSlices[0].notes.map((n) => ({
+        finger: solveResult.fingerByNoteUid[n.noteUid],
+        handFramePos: toHandFramePos(n.midi, "RH"),
+        isBlack: isBlackKey(n.midi),
+        isHeld: false,
+      }));
+      const kinEval = evaluateHandKinematics2D(contacts, SPAN_PRESET_SCALE[preset]);
+      expect(kinEval.feasible).toBe(true);
+      for (const n of scoreDoc.onsetSlices[0].notes) {
+        const f = solveResult.fingerByNoteUid[n.noteUid];
+        const origin = f === 1 ? sliceSk.fingers[1].carpalRoot : sliceSk.fingers[f].mcp;
+        const reachPx = getFingerReachPx(f, preset);
+        const distPx = Math.hypot(
+          sliceSk.fingers[f].tip.x - origin.x,
+          sliceSk.fingers[f].tip.y - origin.y
+        );
+        expect(distPx).toBeLessThanOrEqual(reachPx * 1.02 + 1e-3);
+      }
+    }
+
+    expect(knuckleSpanByPreset.S / knuckleSpanByPreset.M).toBeCloseTo(SPAN_PRESET_SCALE.S, 2);
+    expect(knuckleSpanByPreset.L / knuckleSpanByPreset.M).toBeCloseTo(SPAN_PRESET_SCALE.L, 2);
+    expect(idleGapByPreset.S).toBeLessThan(idleGapByPreset.M);
+    expect(idleGapByPreset.M).toBeLessThan(idleGapByPreset.L);
   });
 });

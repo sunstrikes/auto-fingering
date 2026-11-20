@@ -318,9 +318,18 @@ function projectToRadiusWithinY(
   return { x: mcp.x + finalDx, y };
 }
 
+const IDLE_WHITE_MIN_Y: Record<Finger, number> = {
+  1: 140,
+  2: 124,
+  3: 121,
+  4: 123,
+  5: 132,
+};
+
 function computeFingerTargetXY(
   fp: FingerPosture,
-  palmLiftY: number
+  palmLiftY: number,
+  hasActiveBlackKey: boolean
 ): { x: number; rawY: number; minY: number; maxY: number } {
   const x = fp.xUnit * PIANO_WHITE_KEY_W;
   const isPlayingBlack = fp.isBlack && (fp.pressDepth > 0 || fp.targetMidi !== null);
@@ -334,7 +343,10 @@ function computeFingerTargetXY(
     rawY = WHITE_TIP_Y[fp.finger] - 2 + palmLiftY * 0.78;
   }
 
-  const minY = PIANO_KEYS_Y + 4;
+  const minY =
+    fp.targetMidi === null && !hasActiveBlackKey
+      ? IDLE_WHITE_MIN_Y[fp.finger]
+      : PIANO_KEYS_Y + 4;
   const maxY = isPlayingBlack ? PIANO_KEYS_Y + PIANO_BLACK_KEY_H - 6 : PIANO_KEYBED_BOTTOM_Y - 8;
 
   return { x, rawY, minY, maxY };
@@ -344,14 +356,17 @@ function computeFingerTipXY(
   fp: FingerPosture,
   mcp: Point2D,
   palmLiftY: number,
-  handScale: number
+  handScale: number,
+  hasActiveBlackKey: boolean
 ): Point2D {
   const fixedLen = BASE_FINGER_LENGTH_PX[fp.finger] * handScale;
-  const { x, rawY, minY, maxY } = computeFingerTargetXY(fp, palmLiftY);
+  const { x, rawY, minY, maxY } = computeFingerTargetXY(fp, palmLiftY, hasActiveBlackKey);
 
   if (fp.targetMidi === null) {
-    // Idle fingers maintain an exact fixed projected length scaled by S/M/L.
-    return projectToRadiusWithinY(mcp, x, rawY, fixedLen * IDLE_CURVE_FACTOR, minY, maxY, true);
+    // Idle fingers curve at IDLE_CURVE_FACTOR, or curl deeper if needed to stay clear of black keys.
+    const idleRadius = fixedLen * IDLE_CURVE_FACTOR;
+    const exactRadius = mcp.y - minY >= idleRadius - 0.5;
+    return projectToRadiusWithinY(mcp, x, rawY, idleRadius, minY, maxY, exactRadius);
   }
 
   // Active fingers never stretch past their fixed anatomical length `fixedLen`.
@@ -633,6 +648,9 @@ function buildUnifiedHandPath(
 export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
   const handScale = SPAN_PRESET_SCALE[posture.spanPreset ?? "M"];
   const dir = posture.hand === "RH" ? 1 : -1;
+  const hasActiveBlackKey = FINGERS.some(
+    (f) => posture.fingers[f].targetMidi !== null && posture.fingers[f].isBlack
+  );
   const palmCenterX = posture.palmCenterXUnit * PIANO_WHITE_KEY_W;
   const knuckleBaseY = getKnuckleBaseY(handScale, posture.palmLiftY);
 
@@ -683,7 +701,7 @@ export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
 
   // Biomechanical 2-link thumb abduction around CMC1 (carpalRoots[1] -> mcps[1] -> tip)
   const thumbFp = posture.fingers[1];
-  const thumbTarget = computeFingerTargetXY(thumbFp, posture.palmLiftY);
+  const thumbTarget = computeFingerTargetXY(thumbFp, posture.palmLiftY, hasActiveBlackKey);
   const clampedThumbTargetY = clamp(thumbTarget.rawY, thumbTarget.minY, thumbTarget.maxY);
   const targetRelX = thumbTarget.x - carpalRoots[1].x;
   const targetRelY = clampedThumbTargetY - carpalRoots[1].y;
@@ -703,7 +721,7 @@ export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
   } else {
     const naturalCmcAngle = clamp(targetAngle * 0.92 + 0.16, 0.42, 1.32);
     const stretchBlend = clamp((distFromCmc / (mc1Len + fixedThumbLen) - 0.78) / 0.2, 0, 1);
-    cmcAngle = lerp(naturalCmcAngle, clamp(targetAngle, 0.25, 1.35), stretchBlend);
+    cmcAngle = lerp(naturalCmcAngle, clamp(targetAngle, 0.25, 1.52), stretchBlend);
   }
 
   const cmc1Local = getFingerOriginLocalPx(1, abductRatio, handScale, dir);
@@ -766,7 +784,7 @@ export function computeHandSkeleton(posture: HandPosture): HandSkeleton {
     const fp = posture.fingers[f];
     const carpalRoot = carpalRoots[f];
     const mcp = mcps[f];
-    const tip = computeFingerTipXY(fp, mcp, posture.palmLiftY, handScale);
+    const tip = computeFingerTipXY(fp, mcp, posture.palmLiftY, handScale, hasActiveBlackKey);
 
     const dx = tip.x - mcp.x;
     const dy = tip.y - mcp.y;
