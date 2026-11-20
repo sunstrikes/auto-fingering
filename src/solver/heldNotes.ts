@@ -2,6 +2,8 @@ import type { HandSpanProfile, OnsetSlice } from "../domain/types";
 import { MAX_OCTAVE_SPAN, getMaxSpan, getSpanScale, keyPos } from "./keyboard";
 import { DEFAULT_COST_WEIGHTS } from "./weights";
 
+export const SHORT_ROLL_MAX_IOI_SEC = 0.08;
+
 export type HeldReleaseReason = "pedal" | "unreachable" | "pre-release";
 
 export interface ReleasedHeldNote {
@@ -16,6 +18,78 @@ export interface ReleasedHeldNote {
 export interface HandHeldAnalysis {
   activeHeldBySlice: OnsetSlice["heldNotes"][];
   releasedHeldBySlice: ReleasedHeldNote[][];
+  rollReleasableUids: Set<string>;
+}
+
+function sliceMidiBounds(slice: OnsetSlice): { minMidi: number; maxMidi: number } | null {
+  if (slice.notes.length === 0) return null;
+  let minMidi = Infinity;
+  let maxMidi = -Infinity;
+  for (const n of slice.notes) {
+    if (n.midi < minMidi) minMidi = n.midi;
+    if (n.midi > maxMidi) maxMidi = n.midi;
+  }
+  return { minMidi, maxMidi };
+}
+
+/**
+ * Detects tightly spaced directional roll / arpeggio groups (`dt < 80 ms` within
+ * the same measure and phrase, expanding monotonically in pitch) and returns the
+ * set of earlier noteUids that may be released to sustain pedal if needed.
+ */
+export function detectShortRollReleasableUids(handSlices: OnsetSlice[]): Set<string> {
+  const rollReleasableUids = new Set<string>();
+  if (handSlices.length < 2) return rollReleasableUids;
+
+  const midiBounds = handSlices.map(sliceMidiBounds);
+  let activeDir: 1 | -1 | 0 = 0;
+
+  for (let t = 0; t < handSlices.length - 1; t++) {
+    const prev = handSlices[t];
+    const next = handSlices[t + 1];
+    const prevB = midiBounds[t];
+    const nextB = midiBounds[t + 1];
+    const dt = next.onsetSec - prev.onsetSec;
+
+    if (
+      !prevB ||
+      !nextB ||
+      prev.measureIndex !== next.measureIndex ||
+      prev.phraseId !== next.phraseId ||
+      dt <= 0 ||
+      dt >= SHORT_ROLL_MAX_IOI_SEC
+    ) {
+      activeDir = 0;
+      continue;
+    }
+
+    const isAsc =
+      (nextB.minMidi >= prevB.minMidi && nextB.maxMidi > prevB.maxMidi) ||
+      (nextB.minMidi > prevB.minMidi && nextB.maxMidi >= prevB.maxMidi);
+    const isDesc =
+      (nextB.maxMidi <= prevB.maxMidi && nextB.minMidi < prevB.minMidi) ||
+      (nextB.maxMidi < prevB.maxMidi && nextB.minMidi <= prevB.minMidi);
+
+    const stepDir: 1 | -1 | 0 = isAsc && !isDesc ? 1 : isDesc && !isAsc ? -1 : 0;
+    if (stepDir === 0) {
+      activeDir = 0;
+      continue;
+    }
+
+    if (activeDir === 0 || activeDir === stepDir) {
+      activeDir = stepDir;
+      const nextHeldSet = new Set(next.heldNotes.map((h) => h.noteUid));
+      for (const n of prev.notes) {
+        if (nextHeldSet.has(n.noteUid)) {
+          rollReleasableUids.add(n.noteUid);
+        }
+      }
+    } else {
+      activeDir = stepDir;
+    }
+  }
+
+  return rollReleasableUids;
 }
 
 function sliceNotePosBounds(slice: OnsetSlice): { minPos: number; maxPos: number } {
@@ -168,7 +242,9 @@ export function analyzeHandHeldNotes(
     releasedHeldBySlice.push(releasedHeld);
   }
 
-  return { activeHeldBySlice, releasedHeldBySlice };
+  const rollReleasableUids = detectShortRollReleasableUids(handSlices);
+
+  return { activeHeldBySlice, releasedHeldBySlice, rollReleasableUids };
 }
 
 /**

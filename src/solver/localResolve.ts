@@ -1,8 +1,10 @@
 import {
   DEFAULT_HAND_SPAN_PROFILE,
   type AnchorOverride,
+  type EarlyReleaseReason,
   type Finger,
   type HandSpanProfile,
+  type HeldNoteRelease,
   type NoteEvent,
   type OnsetSlice,
   type SolveResult,
@@ -14,6 +16,8 @@ import {
   advanceBeamLayer,
   derivePositionsAndCues,
   prepareSegmentBeamContext,
+  recordEarlyRelease,
+  recordStaticHeldReleases,
   type BeamNode,
 } from "./solveFingering";
 
@@ -150,8 +154,14 @@ function solveWindowWithConvergence(
   maxIdx: number,
   priorFingerByNoteUid: Record<string, Finger>,
   profile: HandSpanProfile,
-  anchorConflictSliceIds: Set<string>
-): { endIdx: number; chosen: Finger[][]; convergedBackward: boolean } {
+  anchorConflictSliceIds: Set<string>,
+  rollReleasableUids: Set<string>
+): {
+  endIdx: number;
+  chosen: Finger[][];
+  releasesBySlice: Array<string[] | undefined>;
+  convergedBackward: boolean;
+} {
   const windowSlices = segment.slice(startIdx, maxIdx + 1);
   const localTargetIdx = targetSegIdx - startIdx;
   const { candidatesBySlice, lookahead } = prepareSegmentBeamContext(
@@ -186,6 +196,7 @@ function solveWindowWithConvergence(
       priorFingerByNoteUid,
       prevPrefixSlice,
       prevPrefixFingers,
+      rollReleasableUids,
     });
     layers.push(deduped);
 
@@ -217,10 +228,12 @@ function solveWindowWithConvergence(
   }
 
   const chosen: Finger[][] = new Array(convergedEndLocal + 1);
+  const releasesBySlice: Array<string[] | undefined> = new Array(convergedEndLocal + 1);
   let cursor = bestIdx;
   for (let localT = convergedEndLocal; localT >= 0; localT--) {
     const node = layers[localT][cursor];
     chosen[localT] = node.fingers;
+    releasesBySlice[localT] = node.releasedUids;
     cursor = node.prevIdx;
   }
 
@@ -235,6 +248,7 @@ function solveWindowWithConvergence(
   return {
     endIdx: startIdx + convergedEndLocal,
     chosen,
+    releasesBySlice,
     convergedBackward,
   };
 }
@@ -277,13 +291,15 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
 
   let anchorConflictSliceIds = new Set<string>();
   const repairedAnchorUids: string[] = [];
+  const earlyReleasesByNoteUid: Record<string, HeldNoteRelease> = {};
 
   if (input.override !== null && input.override.mode === "pinOnly") {
     const handSlices = input.onsetSlices.filter((s) => s.hand === targetSlice.hand);
-    const { activeHeldBySlice } = analyzeHandHeldNotes(handSlices, profile);
+    const heldAnalysis = analyzeHandHeldNotes(handSlices, profile);
+    recordStaticHeldReleases(handSlices, heldAnalysis.releasedHeldBySlice, earlyReleasesByNoteUid);
     const targetHandIdx = handSlices.findIndex((s) => s.sliceId === targetSlice.sliceId);
     const effectiveHeldNotes =
-      targetHandIdx >= 0 ? activeHeldBySlice[targetHandIdx] : targetSlice.heldNotes;
+      targetHandIdx >= 0 ? heldAnalysis.activeHeldBySlice[targetHandIdx] : targetSlice.heldNotes;
 
     const pinRes = resolvePinOnlyOverride(
       targetSlice,
@@ -304,10 +320,9 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
       input.removedRawAnchorUids ?? [],
       ignoreExistingFingerings
     );
-    const effectiveSegment = applyEffectiveHeldNotes(
-      segment,
-      analyzeHandHeldNotes(segment, profile)
-    );
+    const heldAnalysis = analyzeHandHeldNotes(segment, profile);
+    recordStaticHeldReleases(segment, heldAnalysis.releasedHeldBySlice, earlyReleasesByNoteUid);
+    const effectiveSegment = applyEffectiveHeldNotes(segment, heldAnalysis);
     const targetSegIdx = effectiveSegment.findIndex((s) => s.sliceId === targetSlice.sliceId);
     const targetMeasure = targetSlice.measureIndex;
 
@@ -330,6 +345,7 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
     let lookback = 8;
     let finalStart = minIdx;
     let finalChosen: Finger[][] = [];
+    let finalReleasesBySlice: Array<string[] | undefined> = [];
     let finalConflicts = new Set<string>();
 
     while (true) {
@@ -346,11 +362,13 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
         maxIdx,
         input.priorFingerByNoteUid,
         profile,
-        attemptConflicts
+        attemptConflicts,
+        heldAnalysis.rollReleasableUids
       );
 
       finalStart = startIdx;
       finalChosen = attempt.chosen;
+      finalReleasesBySlice = attempt.releasesBySlice;
       finalConflicts = attemptConflicts;
 
       if (attempt.convergedBackward || startIdx === minIdx) {
@@ -369,6 +387,15 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
         fingerByNoteUid[note.noteUid] = fingers[i];
         if (note.anchorFinger !== undefined && fingers[i] !== note.anchorFinger) {
           repairedAnchorUids.push(note.noteUid);
+        }
+      }
+      const relUids = finalReleasesBySlice[offset];
+      if (relUids) {
+        for (const uid of relUids) {
+          const reason: EarlyReleaseReason = heldAnalysis.rollReleasableUids.has(uid)
+            ? "roll"
+            : "kinematic-release";
+          recordEarlyRelease(earlyReleasesByNoteUid, uid, slice.onsetSec, slice.onsetTick, reason);
         }
       }
     }
@@ -399,5 +426,6 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
     repairedAnchorUids,
     solveTimeMs: end - start,
     repairSuggestions,
+    earlyReleasesByNoteUid,
   };
 }

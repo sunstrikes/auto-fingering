@@ -210,6 +210,12 @@ function buildHandIndex(
     }
   };
 
+  if (solveResult.earlyReleasesByNoteUid) {
+    for (const [uid, rel] of Object.entries(solveResult.earlyReleasesByNoteUid)) {
+      recordRelease(uid, rel.releaseSec);
+    }
+  }
+
   for (let t = 0; t < slices.length; t++) {
     const slice = slices[t];
     for (const rel of releasedHeldBySlice[t]) {
@@ -241,6 +247,10 @@ function buildHandIndex(
       ).feasible;
     const acceptedActive: typeof activeNewestFirst = [];
     for (const h of activeNewestFirst) {
+      const solverReleaseSec = fingerReleaseSecByUid.get(h.noteUid);
+      if (solverReleaseSec !== undefined && solverReleaseSec <= slice.onsetSec + 1e-6) {
+        continue;
+      }
       const fH = solveResult.fingerByNoteUid[h.noteUid];
       if (!fH) continue;
       let released = false;

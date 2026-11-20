@@ -1369,9 +1369,11 @@ describe("solver seam: solveFingering", () => {
       const a4 = doc.noteEvents.find((n) => n.midi === 69)!;
       const b4Beat2 = b4Slice.notes[0];
       const fE5 = res.fingerByNoteUid[e5.noteUid];
+      const e5ReleaseTick = res.earlyReleasesByNoteUid?.[e5.noteUid]?.releaseTick;
       for (const low of [a4, b4Beat2]) {
+        const isE5StillHeld = e5ReleaseTick === undefined || e5ReleaseTick > low.onsetTick;
         const fLow = res.fingerByNoteUid[low.noteUid];
-        if (fLow > 1 && fE5 > 1) {
+        if (isE5StillHeld && fLow > 1 && fE5 > 1) {
           expect(fLow).toBeLessThan(fE5);
         }
       }
@@ -1509,6 +1511,73 @@ describe("solver seam: solveFingering", () => {
       expect([fG3, fB3]).not.toEqual([5, 1]);
       expect(fG3 - fB3).toBeLessThanOrEqual(3);
       expect(fG3).toBeGreaterThan(fB3);
+    }
+  });
+
+  it("recognizes short rolls (< 80 ms) and resolves Measure 83 (D4+G4 -> 39 ms -> B4+D5) across S/M/L without static 2-1-5 crossings, exporting earlyReleasesByNoteUid", () => {
+    const { DOMParser } = new JSDOM("").window;
+    // Measure 83 pattern: D4+G4 (held quarter) followed 39 ms later (32nd at 192 BPM) by B4+D5
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="83">
+      <attributes>
+        <divisions>8</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <direction><sound tempo="192"/></direction>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>8</duration><voice>2</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>8</duration><voice>2</voice></note>
+      <backup><duration>8</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>7</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>5</octave></pitch><duration>7</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    expect(doc.onsetSlices.length).toBe(2);
+    const dtMs = (doc.onsetSlices[1].onsetSec - doc.onsetSlices[0].onsetSec) * 1000;
+    expect(dtMs).toBeGreaterThan(35);
+    expect(dtMs).toBeLessThan(45);
+
+    const d4 = doc.noteEvents.find((n) => n.midi === 62)!;
+    const g4 = doc.noteEvents.find((n) => n.midi === 67)!;
+    const b4 = doc.noteEvents.find((n) => n.midi === 71)!;
+    const d5 = doc.noteEvents.find((n) => n.midi === 74)!;
+
+    for (const preset of ["S", "M", "L"] as const) {
+      const profile = { preset, avoidThumbOnBlack: true, preferStablePosition: false };
+      const res = solveFingering(doc.onsetSlices, profile);
+
+      const fD4 = res.fingerByNoteUid[d4.noteUid];
+      const fG4 = res.fingerByNoteUid[g4.noteUid];
+      const fB4 = res.fingerByNoteUid[b4.noteUid];
+      const fD5 = res.fingerByNoteUid[d5.noteUid];
+
+      // Must never form static 3-finger crossed posture G4=2, B4=1, D5=5
+      expect([fG4, fB4, fD5]).not.toEqual([2, 1, 5]);
+      // B4 and D5 must be ordered monotonically
+      expect(fD5).toBeGreaterThan(fB4);
+      // D4+G4 must be ordered monotonically
+      expect(fG4).toBeGreaterThan(fD4);
+
+      // Pure-JSON earlyReleasesByNoteUid must be present and serializable
+      expect(res.earlyReleasesByNoteUid).toBeDefined();
+      const roundTripped = JSON.parse(JSON.stringify(res.earlyReleasesByNoteUid));
+      expect(roundTripped).toEqual(res.earlyReleasesByNoteUid);
+
+      // Under S profile (D5 - D4 = 7.0 > 6.806), D4 must be released by slice 2
+      if (preset === "S") {
+        expect(res.earlyReleasesByNoteUid![d4.noteUid]).toBeDefined();
+        expect(res.earlyReleasesByNoteUid![d4.noteUid].releaseSec).toBeCloseTo(
+          doc.onsetSlices[1].onsetSec,
+          4
+        );
+      }
     }
   });
 });

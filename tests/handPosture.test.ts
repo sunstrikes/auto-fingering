@@ -1155,4 +1155,63 @@ describe("handPostureModel continuous 88-key kinematics", () => {
     expect(idleGapByPreset.S).toBeLessThan(idleGapByPreset.M);
     expect(idleGapByPreset.M).toBeLessThan(idleGapByPreset.L);
   });
+
+  it("lifts solver-released fingers from SolveResult.earlyReleasesByNoteUid into pedal-sustained key highlights across discrete slices and 0.25x continuous frames", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="83">
+      <attributes>
+        <divisions>8</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <direction><sound tempo="192"/></direction>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>8</duration><voice>2</voice></note>
+      <backup><duration>8</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>7</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>5</octave></pitch><duration>7</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml, { DOMParser });
+    const g4 = scoreDoc.noteEvents.find((n) => n.midi === 67)!;
+    const b4 = scoreDoc.noteEvents.find((n) => n.midi === 71)!;
+    const d5 = scoreDoc.noteEvents.find((n) => n.midi === 74)!;
+    const slice2 = scoreDoc.onsetSlices[1];
+
+    // G4=2, B4=3, D5=5 is statically feasible, so only SolveResult.earlyReleasesByNoteUid tells the renderer G4 was roll-released
+    const solveWithRelease = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    solveWithRelease.fingerByNoteUid[g4.noteUid] = 2;
+    solveWithRelease.fingerByNoteUid[b4.noteUid] = 3;
+    solveWithRelease.fingerByNoteUid[d5.noteUid] = 5;
+    solveWithRelease.earlyReleasesByNoteUid = {
+      [g4.noteUid]: {
+        releaseSec: slice2.onsetSec,
+        releaseTick: slice2.onsetTick,
+        reason: "roll",
+      },
+    };
+
+    const discreteFrame = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveWithRelease,
+      slice2.sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    expect(discreteFrame.rh.fingers[2].targetMidi).toBeNull();
+    expect(discreteFrame.rh.fingers[3].targetMidi).toBe(71);
+    expect(discreteFrame.rh.fingers[5].targetMidi).toBe(74);
+    expect(discreteFrame.activeKeyHighlights.get(67)?.rh).toBe("held");
+    expect(discreteFrame.activeKeyHighlights.get(67)?.rhPedalSustained).toBe(true);
+
+    // Continuous 0.25x slow-playback frame shortly after slice2 onset
+    const index = buildHandPostureIndex(scoreDoc, solveWithRelease, DEFAULT_HAND_SPAN_PROFILE);
+    const slowFrame = computeDualHandPostureFrameAtTime(index, slice2.onsetSec + 0.01);
+    expect(slowFrame.rh.fingers[2].targetMidi).toBeNull();
+    expect(slowFrame.activeKeyHighlights.get(67)?.rhPedalSustained).toBe(true);
+  });
 });

@@ -1,9 +1,11 @@
 import {
   DEFAULT_HAND_SPAN_PROFILE,
+  type EarlyReleaseReason,
   type Finger,
   type Hand,
   type HandPosition,
   type HandSpanProfile,
+  type HeldNoteRelease,
   type OnsetSlice,
   type SolveOptions,
   type SolveResult,
@@ -21,6 +23,7 @@ import {
   getComfortSpan,
   getMaxSpan,
   getSpanScale,
+  keyPos,
   toHandFramePos,
   whiteKeyIndex,
 } from "./keyboard";
@@ -30,6 +33,10 @@ import { DEFAULT_COST_WEIGHTS } from "./weights";
 export const BEAM_WIDTH = 28; // SPEC 4.1: BEAM = 24-32
 export const ASTAR_MAX_EXPANSIONS_PER_SLICE = 64;
 export const ASTAR_MIN_EXPANSION_BUDGET = 4000;
+export const ROLL_RELEASE_COST = 1.8;
+export const KINEMATIC_RELEASE_COST = 120.0;
+const EMPTY_ROLL_UIDS = new Set<string>();
+const EMPTY_HELD_MAP = new Map<Finger, number>();
 
 export interface BeamNode {
   fingers: Finger[];
@@ -37,11 +44,140 @@ export interface BeamNode {
   rankScore: number;
   prevIdx: number;
   stateKey: string;
+  releasedUids?: string[];
+}
+
+export interface HeldReleaseOption {
+  heldFingers: Map<Finger, number>;
+  releasedUids?: string[];
+  releaseCost: number;
+}
+
+/**
+ * Enumerates monotonic, oldest-first early release prefixes (0..k) for the
+ * physically retained held notes at `slice`, prioritizing roll-releasable notes
+ * over non-roll sustained voices.
+ */
+export function buildHeldReleaseOptions(
+  slice: OnsetSlice,
+  heldFingerByUid: Map<string, Finger>,
+  rollReleasableUids: Set<string> = EMPTY_ROLL_UIDS
+): HeldReleaseOption[] {
+  if (slice.heldNotes.length === 0 || heldFingerByUid.size === 0) {
+    return [{ heldFingers: EMPTY_HELD_MAP, releaseCost: 0 }];
+  }
+
+  const retained: Array<{
+    noteUid: string;
+    midi: number;
+    finger: Finger;
+    onsetTick: number;
+    isRoll: boolean;
+    distToCentroid: number;
+  }> = [];
+
+  let centroid = 0;
+  if (slice.notes.length > 0) {
+    for (const n of slice.notes) centroid += keyPos(n.midi);
+    centroid /= slice.notes.length;
+  }
+
+  for (const h of slice.heldNotes) {
+    const f = heldFingerByUid.get(h.noteUid);
+    if (f === undefined) continue;
+    retained.push({
+      noteUid: h.noteUid,
+      midi: h.midi,
+      finger: f,
+      onsetTick: h.onsetTick ?? 0,
+      isRoll: rollReleasableUids.has(h.noteUid),
+      distToCentroid: Math.abs(keyPos(h.midi) - centroid),
+    });
+  }
+
+  if (retained.length === 0) {
+    return [{ heldFingers: EMPTY_HELD_MAP, releaseCost: 0 }];
+  }
+
+  // Sort oldest-first; tie-break by roll-releasable first, then lowest pitch first (retain upper voice)
+  retained.sort((a, b) => {
+    if (a.onsetTick !== b.onsetTick) return a.onsetTick - b.onsetTick;
+    if (a.isRoll !== b.isRoll) return a.isRoll ? -1 : 1;
+    return a.midi - b.midi;
+  });
+
+  const options: HeldReleaseOption[] = [];
+  let cumulativeReleaseCost = 0;
+
+  for (let k = 0; k <= retained.length; k++) {
+    if (k > 0) {
+      const releasedItem = retained[k - 1];
+      cumulativeReleaseCost += releasedItem.isRoll ? ROLL_RELEASE_COST : KINEMATIC_RELEASE_COST;
+    }
+    const heldFingers = new Map<Finger, number>();
+    for (let i = k; i < retained.length; i++) {
+      heldFingers.set(retained[i].finger, retained[i].midi);
+    }
+    const releasedUids =
+      k > 0 ? retained.slice(0, k).map((item) => item.noteUid) : undefined;
+    options.push({
+      heldFingers,
+      releasedUids,
+      releaseCost: cumulativeReleaseCost,
+    });
+  }
+
+  return options;
 }
 
 export interface HeldReservation {
   finger: Finger;
   untilSliceIdx: number;
+}
+
+export function buildHeldFingerByUidFromBeam(
+  slice: OnsetSlice,
+  slices: OnsetSlice[],
+  layers: BeamNode[][],
+  t: number,
+  pIdx: number,
+  priorFingerByNoteUid?: Record<string, Finger>
+): Map<string, Finger> {
+  const heldFingerByUid = new Map<string, Finger>();
+  if (slice.heldNotes.length === 0) {
+    return heldFingerByUid;
+  }
+  const remaining = new Set<string>();
+  for (const h of slice.heldNotes) {
+    remaining.add(h.noteUid);
+  }
+  let cursor = pIdx;
+  for (let back = t - 1; back >= 0 && remaining.size > 0 && cursor >= 0; back--) {
+    const prevSlice = slices[back];
+    const node = layers[back][cursor];
+    if (node.releasedUids) {
+      for (const relUid of node.releasedUids) {
+        remaining.delete(relUid);
+      }
+    }
+    for (let i = 0; i < prevSlice.notes.length; i++) {
+      const uid = prevSlice.notes[i].noteUid;
+      if (remaining.has(uid)) {
+        heldFingerByUid.set(uid, node.fingers[i]);
+        remaining.delete(uid);
+      }
+    }
+    cursor = node.prevIdx;
+  }
+  if (priorFingerByNoteUid && remaining.size > 0) {
+    for (const uid of remaining) {
+      const priorF = priorFingerByNoteUid[uid];
+      if (priorF) {
+        heldFingerByUid.set(uid, priorF);
+      }
+    }
+  }
+  return heldFingerByUid;
 }
 
 export function buildHeldFingerMapFromBeam(
@@ -56,30 +192,18 @@ export function buildHeldFingerMapFromBeam(
   if (slice.heldNotes.length === 0) {
     return heldMap;
   }
-  const heldByUid = new Map<string, number>();
+  const byUid = buildHeldFingerByUidFromBeam(
+    slice,
+    slices,
+    layers,
+    t,
+    pIdx,
+    priorFingerByNoteUid
+  );
   for (const h of slice.heldNotes) {
-    heldByUid.set(h.noteUid, h.midi);
-  }
-  let cursor = pIdx;
-  for (let back = t - 1; back >= 0 && heldByUid.size > 0 && cursor >= 0; back--) {
-    const prevSlice = slices[back];
-    const node = layers[back][cursor];
-    for (let i = 0; i < prevSlice.notes.length; i++) {
-      const uid = prevSlice.notes[i].noteUid;
-      const midi = heldByUid.get(uid);
-      if (midi !== undefined) {
-        heldMap.set(node.fingers[i], midi);
-        heldByUid.delete(uid);
-      }
-    }
-    cursor = node.prevIdx;
-  }
-  if (priorFingerByNoteUid) {
-    for (const [uid, midi] of heldByUid.entries()) {
-      const priorF = priorFingerByNoteUid[uid];
-      if (priorF) {
-        heldMap.set(priorF, midi);
-      }
+    const f = byUid.get(h.noteUid);
+    if (f !== undefined) {
+      heldMap.set(f, h.midi);
     }
   }
   return heldMap;
@@ -92,11 +216,17 @@ export function resolveActiveNoteFingers(
   layers: BeamNode[][],
   t: number,
   pIdx: number,
-  neededUids: string[]
+  neededUids: string[],
+  releasedAtSlice?: string[]
 ): Map<string, Finger> {
   const result = new Map<string, Finger>();
   if (neededUids.length === 0) return result;
   const remaining = new Set(neededUids);
+  if (releasedAtSlice) {
+    for (const relUid of releasedAtSlice) {
+      remaining.delete(relUid);
+    }
+  }
 
   for (let i = 0; i < slice.notes.length; i++) {
     const uid = slice.notes[i].noteUid;
@@ -110,6 +240,11 @@ export function resolveActiveNoteFingers(
   for (let back = t - 1; back >= 0 && remaining.size > 0; back--) {
     const prevSlice = slices[back];
     const node = layers[back][cursor];
+    if (node.releasedUids) {
+      for (const relUid of node.releasedUids) {
+        remaining.delete(relUid);
+      }
+    }
     for (let i = 0; i < prevSlice.notes.length; i++) {
       const uid = prevSlice.notes[i].noteUid;
       if (remaining.has(uid)) {
@@ -290,12 +425,22 @@ export function buildStateKeyAndLookaheadPenalty(
   pIdx: number,
   cIdx: number,
   nextSliceHeldUids: string[],
-  lookahead: { hFuture: number[][]; reservationsByNoteUid: Map<string, HeldReservation[]> } | null
+  lookahead: { hFuture: number[][]; reservationsByNoteUid: Map<string, HeldReservation[]> } | null,
+  releasedAtSlice?: string[]
 ): { stateKey: string; penalty: number } {
   let penalty = lookahead ? lookahead.hFuture[t][cIdx] : 0;
   let stateKey = cand.join("");
   if (nextSliceHeldUids.length > 0) {
-    const carried = resolveActiveNoteFingers(slice, cand, slices, layers, t, pIdx, nextSliceHeldUids);
+    const carried = resolveActiveNoteFingers(
+      slice,
+      cand,
+      slices,
+      layers,
+      t,
+      pIdx,
+      nextSliceHeldUids,
+      releasedAtSlice
+    );
     stateKey += `|${nextSliceHeldUids.map((uid) => carried.get(uid) ?? 0).join("")}`;
     if (lookahead) {
       const stealPenalty = DEFAULT_COST_WEIGHTS.vertical.heldStealPenalty;
@@ -368,6 +513,7 @@ export interface AdvanceBeamLayerOptions {
   priorFingerByNoteUid?: Record<string, Finger>;
   prevPrefixSlice?: OnsetSlice | null;
   prevPrefixFingers?: Finger[] | null;
+  rollReleasableUids?: Set<string>;
 }
 
 /**
@@ -386,13 +532,14 @@ export function advanceBeamLayer(opts: AdvanceBeamLayerOptions): BeamNode[] {
     priorFingerByNoteUid,
     prevPrefixSlice,
     prevPrefixFingers,
+    rollReleasableUids = EMPTY_ROLL_UIDS,
   } = opts;
 
   const slice = slices[t];
   const nextBeam: BeamNode[] = [];
 
   if (t === 0) {
-    const heldFingers = buildHeldFingerMapFromBeam(
+    const heldFingerByUid = buildHeldFingerByUidFromBeam(
       slice,
       slices,
       layers,
@@ -400,39 +547,44 @@ export function advanceBeamLayer(opts: AdvanceBeamLayerOptions): BeamNode[] {
       -1,
       priorFingerByNoteUid
     );
-    for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
-      const cand = candidates[cIdx];
-      const vertCost = computeVerticalCost(slice, cand, heldFingers, profile).cost;
-      const horizCost =
-        prevPrefixSlice && prevPrefixFingers
-          ? computeHorizontalCost(
-              prevPrefixSlice,
-              prevPrefixFingers,
-              slice,
-              cand,
-              profile,
-              ignoreExistingFingerings
-            ).cost
-          : 0;
-      const totalCost = vertCost + horizCost;
-      const { stateKey, penalty } = buildStateKeyAndLookaheadPenalty(
-        slice,
-        cand,
-        slices,
-        layers,
-        t,
-        -1,
-        cIdx,
-        nextSliceHeldUids,
-        lookahead
-      );
-      nextBeam.push({
-        fingers: cand,
-        totalCost,
-        rankScore: totalCost + penalty,
-        prevIdx: -1,
-        stateKey,
-      });
+    const releaseOptions = buildHeldReleaseOptions(slice, heldFingerByUid, rollReleasableUids);
+    for (const relOpt of releaseOptions) {
+      for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
+        const cand = candidates[cIdx];
+        const vertCost = computeVerticalCost(slice, cand, relOpt.heldFingers, profile).cost;
+        const horizCost =
+          prevPrefixSlice && prevPrefixFingers
+            ? computeHorizontalCost(
+                prevPrefixSlice,
+                prevPrefixFingers,
+                slice,
+                cand,
+                profile,
+                ignoreExistingFingerings
+              ).cost
+            : 0;
+        const totalCost = vertCost + horizCost + relOpt.releaseCost;
+        const { stateKey, penalty } = buildStateKeyAndLookaheadPenalty(
+          slice,
+          cand,
+          slices,
+          layers,
+          t,
+          -1,
+          cIdx,
+          nextSliceHeldUids,
+          lookahead,
+          relOpt.releasedUids
+        );
+        nextBeam.push({
+          fingers: cand,
+          totalCost,
+          rankScore: totalCost + penalty,
+          prevIdx: -1,
+          stateKey,
+          releasedUids: relOpt.releasedUids,
+        });
+      }
     }
   } else {
     const prevBeam = layers[t - 1];
@@ -440,57 +592,65 @@ export function advanceBeamLayer(opts: AdvanceBeamLayerOptions): BeamNode[] {
     const cachedVertCosts =
       slice.heldNotes.length === 0
         ? candidates.map(
-            (cand) => computeVerticalCost(slice, cand, new Map<Finger, number>(), profile).cost
+            (cand) => computeVerticalCost(slice, cand, EMPTY_HELD_MAP, profile).cost
           )
         : null;
 
     for (let pIdx = 0; pIdx < prevBeam.length; pIdx++) {
       const prevNode = prevBeam[pIdx];
-      const heldFingers =
+      const releaseOptions =
         slice.heldNotes.length > 0
-          ? buildHeldFingerMapFromBeam(
+          ? buildHeldReleaseOptions(
               slice,
-              slices,
-              layers,
-              t,
-              pIdx,
-              priorFingerByNoteUid
+              buildHeldFingerByUidFromBeam(
+                slice,
+                slices,
+                layers,
+                t,
+                pIdx,
+                priorFingerByNoteUid
+              ),
+              rollReleasableUids
             )
-          : null;
+          : [{ heldFingers: EMPTY_HELD_MAP, releaseCost: 0 } as HeldReleaseOption];
 
-      for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
-        const cand = candidates[cIdx];
-        const vertCost =
-          cachedVertCosts !== null
-            ? cachedVertCosts[cIdx]
-            : computeVerticalCost(slice, cand, heldFingers!, profile).cost;
-        const horiz = computeHorizontalCost(
-          prevSlice,
-          prevNode.fingers,
-          slice,
-          cand,
-          profile,
-          ignoreExistingFingerings
-        );
-        const totalCost = prevNode.totalCost + vertCost + horiz.cost;
-        const { stateKey, penalty } = buildStateKeyAndLookaheadPenalty(
-          slice,
-          cand,
-          slices,
-          layers,
-          t,
-          pIdx,
-          cIdx,
-          nextSliceHeldUids,
-          lookahead
-        );
-        nextBeam.push({
-          fingers: cand,
-          totalCost,
-          rankScore: totalCost + penalty,
-          prevIdx: pIdx,
-          stateKey,
-        });
+      for (const relOpt of releaseOptions) {
+        for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
+          const cand = candidates[cIdx];
+          const vertCost =
+            cachedVertCosts !== null
+              ? cachedVertCosts[cIdx]
+              : computeVerticalCost(slice, cand, relOpt.heldFingers, profile).cost;
+          const horiz = computeHorizontalCost(
+            prevSlice,
+            prevNode.fingers,
+            slice,
+            cand,
+            profile,
+            ignoreExistingFingerings
+          );
+          const totalCost = prevNode.totalCost + vertCost + horiz.cost + relOpt.releaseCost;
+          const { stateKey, penalty } = buildStateKeyAndLookaheadPenalty(
+            slice,
+            cand,
+            slices,
+            layers,
+            t,
+            pIdx,
+            cIdx,
+            nextSliceHeldUids,
+            lookahead,
+            relOpt.releasedUids
+          );
+          nextBeam.push({
+            fingers: cand,
+            totalCost,
+            rankScore: totalCost + penalty,
+            prevIdx: pIdx,
+            stateKey,
+            releasedUids: relOpt.releasedUids,
+          });
+        }
       }
     }
   }
@@ -516,6 +676,7 @@ interface AStarNode {
   parentIdx: number;
   nextHeldByUid: Map<string, Finger>;
   stateKey: string;
+  releasedUids?: string[];
 }
 
 class MinNodeHeap {
@@ -611,13 +772,19 @@ function recordSolvedPath(
   }
 }
 
+interface SegmentSolveOutput {
+  chosen: Finger[][];
+  releasesBySlice: Array<string[] | undefined>;
+}
+
 function solvePhraseSegmentBeamFallback(
   slices: OnsetSlice[],
   candidatesBySlice: Finger[][][],
   lookahead: AnchorLookahead | null,
   profile: HandSpanProfile,
-  ignoreExistingFingerings: boolean
-): Finger[][] {
+  ignoreExistingFingerings: boolean,
+  rollReleasableUids: Set<string> = EMPTY_ROLL_UIDS
+): SegmentSolveOutput {
   const layers: BeamNode[][] = [];
 
   for (let t = 0; t < slices.length; t++) {
@@ -633,6 +800,7 @@ function solvePhraseSegmentBeamFallback(
         lookahead,
         profile,
         ignoreExistingFingerings,
+        rollReleasableUids,
       })
     );
   }
@@ -646,13 +814,15 @@ function solvePhraseSegmentBeamFallback(
   }
 
   const chosen: Finger[][] = new Array(slices.length);
+  const releasesBySlice: Array<string[] | undefined> = new Array(slices.length);
   let cursor = bestIdx;
   for (let t = slices.length - 1; t >= 0; t--) {
     const node = layers[t][cursor];
     chosen[t] = node.fingers;
+    releasesBySlice[t] = node.releasedUids;
     cursor = node.prevIdx;
   }
-  return chosen;
+  return { chosen, releasesBySlice };
 }
 
 function buildNextHeldState(
@@ -662,7 +832,8 @@ function buildNextHeldState(
   nextSliceHeldUids: string[],
   lookahead: AnchorLookahead | null,
   t: number,
-  cIdx: number
+  cIdx: number,
+  releasedAtSlice?: string[]
 ): { nextHeldByUid: Map<string, Finger>; stateKey: string; heuristic: number } {
   let heuristic = lookahead ? lookahead.hFuture[t][cIdx] : 0;
   let stateKey = String(cIdx);
@@ -671,17 +842,20 @@ function buildNextHeldState(
   if (nextSliceHeldUids.length > 0) {
     const stealPenalty = DEFAULT_COST_WEIGHTS.vertical.heldStealPenalty;
     const suffixParts: number[] = [];
+    const releasedSet = releasedAtSlice ? new Set(releasedAtSlice) : null;
 
     for (const uid of nextSliceHeldUids) {
       let f: Finger | undefined;
-      for (let i = 0; i < slice.notes.length; i++) {
-        if (slice.notes[i].noteUid === uid) {
-          f = cand[i];
-          break;
+      if (!releasedSet || !releasedSet.has(uid)) {
+        for (let i = 0; i < slice.notes.length; i++) {
+          if (slice.notes[i].noteUid === uid) {
+            f = cand[i];
+            break;
+          }
         }
-      }
-      if (f === undefined && prevHeldByUid) {
-        f = prevHeldByUid.get(uid);
+        if (f === undefined && prevHeldByUid) {
+          f = prevHeldByUid.get(uid);
+        }
       }
       if (f !== undefined) {
         nextHeldByUid.set(uid, f);
@@ -705,14 +879,15 @@ function solvePhraseSegmentAStar(
   candidatesBySlice: Finger[][][],
   lookahead: AnchorLookahead,
   profile: HandSpanProfile,
-  ignoreExistingFingerings: boolean
-): Finger[][] | null {
+  ignoreExistingFingerings: boolean,
+  rollReleasableUids: Set<string> = EMPTY_ROLL_UIDS
+): SegmentSolveOutput | null {
   const nSlices = slices.length;
   const maxExpansions = Math.max(
     ASTAR_MIN_EXPANSION_BUDGET,
     nSlices * ASTAR_MAX_EXPANSIONS_PER_SLICE
   );
-  const emptyHeld = new Map<Finger, number>();
+  const emptyHeld = EMPTY_HELD_MAP;
 
   // Precompute vertical cost for slices without heldNotes
   const cachedBaseVertCosts: Array<number[] | null> = slices.map((s, t) =>
@@ -779,13 +954,15 @@ function solvePhraseSegmentAStar(
 
     if (node.t === nSlices - 1) {
       const chosen: Finger[][] = new Array(nSlices);
+      const releasesBySlice: Array<string[] | undefined> = new Array(nSlices);
       let cursor = nodeIdx;
       while (cursor >= 0) {
         const cur = nodes[cursor];
         chosen[cur.t] = candidatesBySlice[cur.t][cur.cIdx];
+        releasesBySlice[cur.t] = cur.releasedUids;
         cursor = cur.parentIdx;
       }
-      return chosen;
+      return { chosen, releasesBySlice };
     }
 
     expansions++;
@@ -799,66 +976,98 @@ function solvePhraseSegmentAStar(
     const currSlice = slices[nextT];
     const currCands = candidatesBySlice[nextT];
 
-    let heldFingers = emptyHeld;
-    if (currSlice.heldNotes.length > 0) {
-      heldFingers = new Map<Finger, number>();
-      for (const h of currSlice.heldNotes) {
-        const f = node.nextHeldByUid.get(h.noteUid);
-        if (f !== undefined) {
-          heldFingers.set(f, h.midi);
-        }
-      }
-    }
+    const releaseOptions =
+      currSlice.heldNotes.length > 0
+        ? buildHeldReleaseOptions(currSlice, node.nextHeldByUid, rollReleasableUids)
+        : [{ heldFingers: emptyHeld, releaseCost: 0 } as HeldReleaseOption];
 
     const cachedVert = cachedBaseVertCosts[nextT];
     const nextHeldUids = nextHeldUidsBySlice[nextT];
     const bestLayerMap = bestGByLayer[nextT];
 
-    for (let cIdx = 0; cIdx < currCands.length; cIdx++) {
-      const cand = currCands[cIdx];
-      const vertCost =
-        cachedVert !== null
-          ? cachedVert[cIdx]
-          : computeVerticalCost(currSlice, cand, heldFingers, profile).cost;
-      const horizCost = computeHorizontalCost(
-        prevSlice,
-        prevCand,
-        currSlice,
-        cand,
-        profile,
-        ignoreExistingFingerings
-      ).cost;
-      const g = node.g + vertCost + horizCost;
+    for (const relOpt of releaseOptions) {
+      for (let cIdx = 0; cIdx < currCands.length; cIdx++) {
+        const cand = currCands[cIdx];
+        const vertCost =
+          cachedVert !== null
+            ? cachedVert[cIdx]
+            : computeVerticalCost(currSlice, cand, relOpt.heldFingers, profile).cost;
+        const horizCost = computeHorizontalCost(
+          prevSlice,
+          prevCand,
+          currSlice,
+          cand,
+          profile,
+          ignoreExistingFingerings
+        ).cost;
+        const g = node.g + vertCost + horizCost + relOpt.releaseCost;
 
-      const { nextHeldByUid, stateKey, heuristic } = buildNextHeldState(
-        currSlice,
-        cand,
-        node.nextHeldByUid,
-        nextHeldUids,
-        lookahead,
-        nextT,
-        cIdx
-      );
-      const prevBest = bestLayerMap.get(stateKey);
-      if (prevBest !== undefined && prevBest <= g) {
-        continue;
+        const { nextHeldByUid, stateKey, heuristic } = buildNextHeldState(
+          currSlice,
+          cand,
+          node.nextHeldByUid,
+          nextHeldUids,
+          lookahead,
+          nextT,
+          cIdx,
+          relOpt.releasedUids
+        );
+        const prevBest = bestLayerMap.get(stateKey);
+        if (prevBest !== undefined && prevBest <= g) {
+          continue;
+        }
+        bestLayerMap.set(stateKey, g);
+        const childIdx = nodes.length;
+        nodes.push({
+          t: nextT,
+          cIdx,
+          g,
+          f: g + heuristic,
+          parentIdx: nodeIdx,
+          nextHeldByUid,
+          stateKey,
+          releasedUids: relOpt.releasedUids,
+        });
+        heap.push(childIdx);
       }
-      bestLayerMap.set(stateKey, g);
-      const childIdx = nodes.length;
-      nodes.push({
-        t: nextT,
-        cIdx,
-        g,
-        f: g + heuristic,
-        parentIdx: nodeIdx,
-        nextHeldByUid,
-        stateKey,
-      });
-      heap.push(childIdx);
     }
   }
 
   return null;
+}
+
+export function recordEarlyRelease(
+  earlyReleasesByNoteUid: Record<string, HeldNoteRelease>,
+  noteUid: string,
+  releaseSec: number,
+  releaseTick: number,
+  reason: EarlyReleaseReason
+): void {
+  const existing = earlyReleasesByNoteUid[noteUid];
+  if (!existing || releaseSec < existing.releaseSec) {
+    earlyReleasesByNoteUid[noteUid] = { releaseSec, releaseTick, reason };
+  }
+}
+
+export function recordStaticHeldReleases(
+  slices: OnsetSlice[],
+  releasedHeldBySlice: ReturnType<typeof analyzeHandHeldNotes>["releasedHeldBySlice"],
+  earlyReleasesByNoteUid: Record<string, HeldNoteRelease>
+): void {
+  for (let t = 0; t < slices.length; t++) {
+    const rels = releasedHeldBySlice[t];
+    if (!rels || rels.length === 0) continue;
+    const slice = slices[t];
+    for (const rel of rels) {
+      const reason: EarlyReleaseReason =
+        rel.reason === "pedal"
+          ? "pedal"
+          : rel.reason === "unreachable"
+            ? "unreachable"
+            : "kinematic-release";
+      recordEarlyRelease(earlyReleasesByNoteUid, rel.noteUid, slice.onsetSec, slice.onsetTick, reason);
+    }
+  }
 }
 
 function solvePhraseSegment(
@@ -867,11 +1076,13 @@ function solvePhraseSegment(
   fingerByNoteUid: Record<string, Finger>,
   repairedAnchorUids: string[],
   anchorConflictSliceIds: Set<string>,
+  earlyReleasesByNoteUid: Record<string, HeldNoteRelease>,
   ignoreExistingFingerings = false
 ): void {
   if (slices.length === 0) return;
 
   const heldAnalysis = analyzeHandHeldNotes(slices, profile);
+  recordStaticHeldReleases(slices, heldAnalysis.releasedHeldBySlice, earlyReleasesByNoteUid);
   const effectiveSlices = applyEffectiveHeldNotes(slices, heldAnalysis);
 
   const { candidatesBySlice, lookahead } = prepareSegmentBeamContext(
@@ -882,11 +1093,11 @@ function solvePhraseSegment(
   );
 
   const hasHeldNotes = effectiveSlices.some((s) => s.heldNotes.length > 0);
-  let chosen: Finger[][] | null = null;
+  let output: SegmentSolveOutput | null = null;
 
   if (!hasHeldNotes && lookahead) {
     // Strictly 1st-order Markov segment: backward DP already gives the exact global optimum
-    chosen = new Array<Finger[]>(effectiveSlices.length);
+    const chosen = new Array<Finger[]>(effectiveSlices.length);
     const firstBack = lookahead.backward[0];
     let c = 0;
     for (let i = 1; i < firstBack.length; i++) {
@@ -896,30 +1107,45 @@ function solvePhraseSegment(
       chosen[t] = candidatesBySlice[t][c];
       c = lookahead.bestNextChoice[t][c];
     }
+    output = { chosen, releasesBySlice: new Array(effectiveSlices.length) };
   } else if (lookahead) {
     // Polyphonic / held-note segment: admissible A* with anytime Beam fallback
-    chosen = solvePhraseSegmentAStar(
+    output = solvePhraseSegmentAStar(
       effectiveSlices,
       candidatesBySlice,
       lookahead,
       profile,
-      ignoreExistingFingerings
+      ignoreExistingFingerings,
+      heldAnalysis.rollReleasableUids
     );
   }
 
-  if (!chosen) {
-    chosen = solvePhraseSegmentBeamFallback(
+  if (!output) {
+    output = solvePhraseSegmentBeamFallback(
       effectiveSlices,
       candidatesBySlice,
       lookahead,
       profile,
-      ignoreExistingFingerings
+      ignoreExistingFingerings,
+      heldAnalysis.rollReleasableUids
     );
+  }
+
+  for (let t = 0; t < slices.length; t++) {
+    const relUids = output.releasesBySlice[t];
+    if (!relUids) continue;
+    const slice = slices[t];
+    for (const uid of relUids) {
+      const reason: EarlyReleaseReason = heldAnalysis.rollReleasableUids.has(uid)
+        ? "roll"
+        : "kinematic-release";
+      recordEarlyRelease(earlyReleasesByNoteUid, uid, slice.onsetSec, slice.onsetTick, reason);
+    }
   }
 
   recordSolvedPath(
     slices,
-    chosen,
+    output.chosen,
     fingerByNoteUid,
     repairedAnchorUids,
     ignoreExistingFingerings
@@ -1291,6 +1517,7 @@ export function solveFingering(
   const fingerByNoteUid: Record<string, Finger> = {};
   const repairedAnchorUids: string[] = [];
   const anchorConflictSliceIds = new Set<string>();
+  const earlyReleasesByNoteUid: Record<string, HeldNoteRelease> = {};
 
   // Group slices into independent (hand, phraseId) segments
   const segmentMap = new Map<string, OnsetSlice[]>();
@@ -1315,6 +1542,7 @@ export function solveFingering(
       fingerByNoteUid,
       repairedAnchorUids,
       anchorConflictSliceIds,
+      earlyReleasesByNoteUid,
       ignoreExistingFingerings
     );
   }
@@ -1341,5 +1569,6 @@ export function solveFingering(
     repairedAnchorUids,
     solveTimeMs: end - start,
     repairSuggestions,
+    earlyReleasesByNoteUid,
   };
 }

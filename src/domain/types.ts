@@ -158,6 +158,14 @@ export interface ScoreRepairSuggestion {
   options: ScoreRepairOption[];
 }
 
+export type EarlyReleaseReason = "pedal" | "roll" | "kinematic-release" | "unreachable";
+
+export interface HeldNoteRelease {
+  releaseSec: number;
+  releaseTick?: number;
+  reason: EarlyReleaseReason;
+}
+
 export interface SolveResult {
   fingerByNoteUid: Record<string, Finger>;
   handPositions: HandPosition[];
@@ -166,6 +174,7 @@ export interface SolveResult {
   repairedAnchorUids: string[];
   solveTimeMs: number;
   repairSuggestions?: ScoreRepairSuggestion[];
+  earlyReleasesByNoteUid?: Record<string, HeldNoteRelease>;
 }
 
 export interface TempoPoint {

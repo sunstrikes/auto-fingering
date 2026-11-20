@@ -426,4 +426,79 @@ describe("Seam 1: localResolveFingering", () => {
       expect(fG3).toBeGreaterThan(fB3);
     }
   });
+
+  it("supports short-roll recognition and DP early release in local phrase re-solving (m.83 D4+G4 -> 39 ms -> B4+D5) across S/M/L", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="83">
+      <attributes>
+        <divisions>8</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <direction><sound tempo="192"/></direction>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>8</duration><voice>2</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>8</duration><voice>2</voice></note>
+      <backup><duration>8</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>7</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>5</octave></pitch><duration>7</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    const d4 = doc.noteEvents.find((n) => n.midi === 62)!;
+    const g4 = doc.noteEvents.find((n) => n.midi === 67)!;
+    const b4 = doc.noteEvents.find((n) => n.midi === 71)!;
+    const d5 = doc.noteEvents.find((n) => n.midi === 74)!;
+
+    for (const preset of ["S", "M", "L"] as const) {
+      const profile = { preset, avoidThumbOnBlack: true, preferStablePosition: false };
+      const initial = solveFingering(doc.onsetSlices, profile);
+      const localRes = localResolveFingering({
+        onsetSlices: doc.onsetSlices,
+        priorFingerByNoteUid: initial.fingerByNoteUid,
+        targetNoteUid: g4.noteUid,
+        override: { finger: 2, mode: "phrase" },
+        anchors: { [g4.noteUid]: { finger: 2, mode: "phrase" } },
+        profile,
+      });
+
+      const fD4 = localRes.fingerByNoteUid[d4.noteUid];
+      const fG4 = localRes.fingerByNoteUid[g4.noteUid];
+      const fB4 = localRes.fingerByNoteUid[b4.noteUid];
+      const fD5 = localRes.fingerByNoteUid[d5.noteUid];
+
+      expect(fD4).toBe(1);
+      expect(fG4).toBe(2);
+      expect([fG4, fB4, fD5]).not.toEqual([2, 1, 5]);
+      expect(fD5).toBeGreaterThan(fB4);
+      expect(localRes.earlyReleasesByNoteUid).toBeDefined();
+      if (preset === "S") {
+        expect(localRes.earlyReleasesByNoteUid![d4.noteUid]).toBeDefined();
+      }
+
+      // Pinning G4=2 and B4=1 forces DP search to roll-release G4 rather than forming static 2-1-5
+      const forcedRollRes = localResolveFingering({
+        onsetSlices: doc.onsetSlices,
+        priorFingerByNoteUid: localRes.fingerByNoteUid,
+        targetNoteUid: b4.noteUid,
+        override: { finger: 1, mode: "phrase" },
+        anchors: {
+          [g4.noteUid]: { finger: 2, mode: "phrase" },
+          [b4.noteUid]: { finger: 1, mode: "phrase" },
+        },
+        profile,
+      });
+      expect(forcedRollRes.fingerByNoteUid[g4.noteUid]).toBe(2);
+      expect(forcedRollRes.fingerByNoteUid[b4.noteUid]).toBe(1);
+      expect(forcedRollRes.earlyReleasesByNoteUid).toBeDefined();
+      expect(forcedRollRes.earlyReleasesByNoteUid![g4.noteUid]).toBeDefined();
+      expect(forcedRollRes.earlyReleasesByNoteUid![g4.noteUid].reason).toBe("roll");
+    }
+  });
 });
