@@ -17,7 +17,14 @@ import {
   resolveDepartureFingers,
 } from "./costModel";
 import { analyzeHandHeldNotes, applyEffectiveHeldNotes } from "./heldNotes";
-import { getMaxSpan, getSpanScale, toHandFramePos, whiteKeyIndex } from "./keyboard";
+import {
+  getComfortSpan,
+  getMaxSpan,
+  getSpanScale,
+  toHandFramePos,
+  whiteKeyIndex,
+} from "./keyboard";
+import { analyzeScoreRepairSuggestions } from "./scoreRepair";
 import { DEFAULT_COST_WEIGHTS } from "./weights";
 
 export const BEAM_WIDTH = 28; // SPEC 4.1: BEAM = 24-32
@@ -235,10 +242,11 @@ export function resolveCrossSliceAnchorConflicts(
           }
           const dist = Math.abs(posS - toHandFramePos(hCommitted.midi, slice.hand));
           const maxSpan = getMaxSpan(hCommitted.finger, fS, scale);
-          if (dist > maxSpan) {
+          if (dist > maxSpan + 1e-6) {
             const allFingers: Finger[] = [1, 2, 3, 4, 5];
             const canImprove = allFingers.some(
-              (fAlt) => fAlt !== hCommitted.finger && getMaxSpan(hCommitted.finger, fAlt, scale) >= dist
+              (fAlt) =>
+                fAlt !== hCommitted.finger && getMaxSpan(hCommitted.finger, fAlt, scale) + 1e-6 >= dist
             );
             if (canImprove) {
               conflictedNoteUids.add(sNote.noteUid);
@@ -1001,11 +1009,15 @@ export function derivePositionsAndCues(
 
       // Check vertical chord & active held+struck span warnings
       let emittedChordExceeds5 = false;
+      const allNotesArpeggiated =
+        slice.notes.length >= 2 && slice.notes.every((n) => Boolean(n.isArpeggiated));
       for (let i = 0; i < slice.notes.length; i++) {
         const posI = toHandFramePos(slice.notes[i].midi, hand);
         for (let j = i + 1; j < slice.notes.length; j++) {
           const dist = Math.abs(toHandFramePos(slice.notes[j].midi, hand) - posI);
           const semitoneDiff = Math.abs(slice.notes[j].midi - slice.notes[i].midi);
+          const pairArpeggiated =
+            Boolean(slice.notes[i].isArpeggiated) && Boolean(slice.notes[j].isArpeggiated);
           if (fingers[i] === fingers[j]) {
             const isValidDouble =
               (fingers[i] === 1 || fingers[i] === 5) && semitoneDiff <= 2 && dist <= 1.5;
@@ -1015,34 +1027,37 @@ export function derivePositionsAndCues(
                 sliceId: slice.sliceId,
                 hand,
                 measureIndex: slice.measureIndex,
-                type: "unreachable-span",
-                severity: "danger",
+                type: allNotesArpeggiated ? "wide-stretch" : "unreachable-span",
+                severity: allNotesArpeggiated ? "info" : "danger",
                 cost: dist + 10,
-                label: "Chord exceeds 5 fingers (arpeggiate / split)",
+                label: allNotesArpeggiated
+                  ? "Chord exceeds 5 fingers (arpeggiated)"
+                  : "Chord exceeds 5 fingers (arpeggiate / split)",
               });
             }
             continue;
           }
           const maxSpan = getMaxSpan(fingers[i], fingers[j], scale);
-          if (dist > maxSpan) {
+          const comfortSpan = getComfortSpan(fingers[i], fingers[j], scale);
+          if (dist > maxSpan + 1e-6) {
             transitionCues.push({
               sliceId: slice.sliceId,
               hand,
               measureIndex: slice.measureIndex,
-              type: "unreachable-span",
-              severity: "danger",
+              type: pairArpeggiated ? "wide-stretch" : "unreachable-span",
+              severity: pairArpeggiated ? "info" : "danger",
               cost: dist - maxSpan,
-              label: "Unreachable span",
+              label: pairArpeggiated ? "Arpeggiated span" : "Unreachable span",
             });
-          } else if (dist >= maxSpan * 0.85) {
+          } else if (dist >= comfortSpan * 0.85 - 1e-6) {
             transitionCues.push({
               sliceId: slice.sliceId,
               hand,
               measureIndex: slice.measureIndex,
               type: "wide-stretch",
-              severity: "warn",
-              cost: dist / maxSpan,
-              label: "Wide stretch",
+              severity: pairArpeggiated ? "info" : "warn",
+              cost: dist / comfortSpan,
+              label: pairArpeggiated ? "Arpeggiated span" : "Wide stretch",
             });
           }
         }
@@ -1052,7 +1067,8 @@ export function derivePositionsAndCues(
           if (!heldFinger || heldFinger === fingers[i]) continue;
           const dist = Math.abs(posI - toHandFramePos(held.midi, hand));
           const maxSpan = getMaxSpan(heldFinger, fingers[i], scale);
-          if (dist > maxSpan) {
+          const comfortSpan = getComfortSpan(heldFinger, fingers[i], scale);
+          if (dist > maxSpan + 1e-6) {
             transitionCues.push({
               sliceId: slice.sliceId,
               hand,
@@ -1062,14 +1078,14 @@ export function derivePositionsAndCues(
               cost: dist - maxSpan,
               label: "Unreachable span (held)",
             });
-          } else if (dist >= maxSpan * 0.85) {
+          } else if (dist >= comfortSpan * 0.85 - 1e-6) {
             transitionCues.push({
               sliceId: slice.sliceId,
               hand,
               measureIndex: slice.measureIndex,
               type: "wide-stretch",
               severity: "warn",
-              cost: dist / maxSpan,
+              cost: dist / comfortSpan,
               label: "Wide stretch (held)",
             });
           }
@@ -1136,7 +1152,8 @@ export function derivePositionsAndCues(
             ((d > 0 && fCurr > fPrev) || (d < 0 && fCurr < fPrev))
           ) {
             const maxSpan = getMaxSpan(fPrev, fCurr, scale);
-            if (Math.abs(d) > maxSpan && dt < 0.2) {
+            const comfortSpan = getComfortSpan(fPrev, fCurr, scale);
+            if (Math.abs(d) > maxSpan + 1e-6 && dt < 0.2) {
               transitionCues.push({
                 sliceId: slice.sliceId,
                 hand,
@@ -1146,14 +1163,14 @@ export function derivePositionsAndCues(
                 cost: Math.abs(d) - maxSpan,
                 label: "Unreachable span",
               });
-            } else if (Math.abs(d) >= maxSpan * 0.85 && dt < 0.4) {
+            } else if (Math.abs(d) >= comfortSpan * 0.85 - 1e-6 && dt < 0.4) {
               transitionCues.push({
                 sliceId: slice.sliceId,
                 hand,
                 measureIndex: slice.measureIndex,
                 type: "wide-stretch",
                 severity: "warn",
-                cost: Math.abs(d) / maxSpan,
+                cost: Math.abs(d) / comfortSpan,
                 label: "Wide stretch",
               });
             }
@@ -1313,6 +1330,7 @@ export function solveFingering(
   const warnings = transitionCues.filter(
     (c) => c.severity === "warn" || c.severity === "danger"
   );
+  const repairSuggestions = analyzeScoreRepairSuggestions(onsetSlices, profile);
   const end = typeof performance !== "undefined" ? performance.now() : Date.now();
 
   return {
@@ -1322,5 +1340,6 @@ export function solveFingering(
     warnings,
     repairedAnchorUids,
     solveTimeMs: end - start,
+    repairSuggestions,
   };
 }

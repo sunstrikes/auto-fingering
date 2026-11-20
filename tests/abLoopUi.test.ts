@@ -203,12 +203,16 @@ function createMockMidiDeps() {
 }
 
 describe("Slice 4: Whole-Measure A-B Loop & Loop Gap in <App />", () => {
-  it("allows toggling A-B Loop, picking/normalizing A and B bounds, highlighting [A..B] on the measure ruler, and clearing the loop", async () => {
+  it("allows two-step picking and normalizing A and B bounds, highlighting [A..B] on the ruler and score, and clearing the loop", async () => {
     const { audioDeps } = createFakeAudioDeps();
+    const highlightAbLoop = vi.fn();
     const container = mount(
       createElement(App, {
         solverClientFactory: inProcessWorkerFactory(),
-        scoreRendererFactory: () => createNoopScoreRenderer(),
+        scoreRendererFactory: () => ({
+          ...createNoopScoreRenderer(),
+          highlightAbLoop,
+        }),
         audioDeps,
       })
     );
@@ -216,30 +220,30 @@ describe("Slice 4: Whole-Measure A-B Loop & Loop Gap in <App />", () => {
     await uploadXml(container, FOUR_MEASURE_XML);
 
     const toggleBtn = container.querySelector('[data-testid="ab-loop-toggle-btn"]') as HTMLButtonElement;
-    const startSelect = container.querySelector('[data-testid="ab-loop-start-select"]') as HTMLSelectElement;
-    const endSelect = container.querySelector('[data-testid="ab-loop-end-select"]') as HTMLSelectElement;
-    const clearBtn = container.querySelector('[data-testid="ab-loop-clear-btn"]') as HTMLButtonElement;
-
     expect(toggleBtn.getAttribute("aria-pressed")).toBe("false");
 
-    // Pick A = 2 (m.3), B = 1 (m.2) -> auto-normalizes to A = 1, B = 2
-    act(() => {
-      startSelect.value = "2";
-      startSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    act(() => {
-      endSelect.value = "1";
-      endSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-
-    expect(startSelect.value).toBe("1");
-    expect(endSelect.value).toBe("2");
-
-    // Enable A-B Loop
+    // Step 1: Enter two-step pick mode -> pick start = 2 (m.3), then end = 1 (m.2) -> auto-normalizes to [1..2]
     act(() => {
       toggleBtn.click();
     });
+    expect(toggleBtn.getAttribute("data-pick-step")).toBe("start");
+
+    act(() => {
+      (container.querySelector('[data-testid="measure-ruler-item-2"]') as HTMLButtonElement).click();
+    });
+    expect(toggleBtn.getAttribute("data-pick-step")).toBe("end");
+
+    act(() => {
+      (container.querySelector('[data-testid="measure-ruler-item-1"]') as HTMLButtonElement).click();
+    });
+
+    expect(toggleBtn.getAttribute("data-pick-step")).toBe("idle");
     expect(toggleBtn.getAttribute("aria-pressed")).toBe("true");
+    expect(toggleBtn.textContent).toContain("2-3");
+    expect(highlightAbLoop).toHaveBeenLastCalledWith({
+      startMeasureIndex: 1,
+      endMeasureIndex: 2,
+    });
 
     // Ruler measures 1 and 2 (0-based) are highlighted, 0 and 3 are not
     expect(
@@ -256,10 +260,12 @@ describe("Slice 4: Whole-Measure A-B Loop & Loop Gap in <App />", () => {
     ).toBe("false");
 
     // Clear resets loop
+    const clearBtn = container.querySelector('[data-testid="ab-loop-clear-btn"]') as HTMLButtonElement;
     act(() => {
       clearBtn.click();
     });
     expect(toggleBtn.getAttribute("aria-pressed")).toBe("false");
+    expect(highlightAbLoop).toHaveBeenLastCalledWith(null);
     expect(
       container.querySelector('[data-testid="measure-ruler-item-1"]')?.getAttribute("data-in-ab-loop")
     ).toBe("false");
@@ -296,20 +302,16 @@ describe("Slice 4: Whole-Measure A-B Loop & Loop Gap in <App />", () => {
       closeBtn.click();
     });
 
-    // Set A-B Loop to [1..2] (m.2..m.3: D4=62, E4=64) and enable
-    const startSelect = container.querySelector('[data-testid="ab-loop-start-select"]') as HTMLSelectElement;
-    const endSelect = container.querySelector('[data-testid="ab-loop-end-select"]') as HTMLSelectElement;
+    // Set A-B Loop to [1..2] (m.2..m.3: D4=62, E4=64) via two-step click
     const abToggleBtn = container.querySelector('[data-testid="ab-loop-toggle-btn"]') as HTMLButtonElement;
     act(() => {
-      startSelect.value = "1";
-      startSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    act(() => {
-      endSelect.value = "2";
-      endSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    act(() => {
       abToggleBtn.click();
+    });
+    act(() => {
+      (container.querySelector('[data-testid="measure-ruler-item-1"]') as HTMLButtonElement).click();
+    });
+    act(() => {
+      (container.querySelector('[data-testid="measure-ruler-item-2"]') as HTMLButtonElement).click();
     });
 
     // Enable Waiting Mode and click Play
@@ -385,20 +387,16 @@ describe("Slice 4: Whole-Measure A-B Loop & Loop Gap in <App />", () => {
       (container.querySelector('[data-testid="practice-settings-close-btn"]') as HTMLButtonElement).click();
     });
 
-    // Enable A-B Loop on [1..1] (m.2 only: D4=62)
-    const startSelect = container.querySelector('[data-testid="ab-loop-start-select"]') as HTMLSelectElement;
-    const endSelect = container.querySelector('[data-testid="ab-loop-end-select"]') as HTMLSelectElement;
+    // Enable A-B Loop on [1..1] (m.2 only: D4=62) via two-step click
     const abToggleBtn = container.querySelector('[data-testid="ab-loop-toggle-btn"]') as HTMLButtonElement;
     act(() => {
-      startSelect.value = "1";
-      startSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    act(() => {
-      endSelect.value = "1";
-      endSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    act(() => {
       abToggleBtn.click();
+    });
+    act(() => {
+      (container.querySelector('[data-testid="measure-ruler-item-1"]') as HTMLButtonElement).click();
+    });
+    act(() => {
+      (container.querySelector('[data-testid="measure-ruler-item-1"]') as HTMLButtonElement).click();
     });
 
     // Enable Metronome + Waiting Mode and start Play

@@ -1,5 +1,5 @@
 import type { HandSpanProfile, OnsetSlice } from "../domain/types";
-import { getMaxSpan, getSpanScale, keyPos } from "./keyboard";
+import { MAX_OCTAVE_SPAN, getMaxSpan, getSpanScale, keyPos } from "./keyboard";
 import { DEFAULT_COST_WEIGHTS } from "./weights";
 
 export type HeldReleaseReason = "pedal" | "unreachable" | "pre-release";
@@ -39,10 +39,11 @@ export function analyzeHandHeldNotes(
   profile: HandSpanProfile
 ): HandHeldAnalysis {
   const scale = getSpanScale(profile);
-  const maxOuterSpan = getMaxSpan(1, 5, scale);
+  const maxOuterSpan = Math.min(getMaxSpan(1, 5, scale), MAX_OCTAVE_SPAN);
   const wideThreshold = maxOuterSpan * DEFAULT_COST_WEIGHTS.vertical.wideStretchThreshold;
 
   // Pass 1: Look ahead for held notes that eventually exceed max outer (1-5) reach
+  // against struck notes OR newer simultaneously held notes (joint envelope check)
   const eventuallyUnreachableUids = new Set<string>();
   const boundsBySlice = handSlices.map((s) =>
     s.notes.length > 0 ? sliceNotePosBounds(s) : null
@@ -51,15 +52,25 @@ export function analyzeHandHeldNotes(
   for (let t = 0; t < handSlices.length; t++) {
     const slice = handSlices[t];
     const bounds = boundsBySlice[t];
-    if (!bounds || slice.heldNotes.length === 0) continue;
+    if (slice.heldNotes.length === 0) continue;
 
-    for (const h of slice.heldNotes) {
-      if (h.pedalSustained) continue;
+    const nonPedalNewestFirst = slice.heldNotes
+      .filter((h) => !h.pedalSustained)
+      .sort((a, b) => (b.onsetTick ?? 0) - (a.onsetTick ?? 0));
+
+    let envMin = bounds ? bounds.minPos : Infinity;
+    let envMax = bounds ? bounds.maxPos : -Infinity;
+
+    for (const h of nonPedalNewestFirst) {
       const hPos = keyPos(h.midi);
-      const requiredOuterSpan =
-        Math.max(bounds.maxPos, hPos) - Math.min(bounds.minPos, hPos);
-      if (requiredOuterSpan > maxOuterSpan) {
+      const nextMin = Math.min(envMin, hPos);
+      const nextMax = Math.max(envMax, hPos);
+      const requiredOuterSpan = nextMin === Infinity ? 0 : nextMax - nextMin;
+      if (requiredOuterSpan > maxOuterSpan + 1e-6) {
         eventuallyUnreachableUids.add(h.noteUid);
+      } else {
+        envMin = nextMin;
+        envMax = nextMax;
       }
     }
   }
@@ -72,18 +83,14 @@ export function analyzeHandHeldNotes(
   for (let t = 0; t < handSlices.length; t++) {
     const slice = handSlices[t];
     const bounds = boundsBySlice[t];
-    const activeHeld: OnsetSlice["heldNotes"] = [];
-    const releasedHeld: ReleasedHeldNote[] = [];
+    const activeSet = new Set<string>();
+    const releasedMap = new Map<string, ReleasedHeldNote>();
 
+    const nonPedalNewestFirst: OnsetSlice["heldNotes"] = [];
     for (const h of slice.heldNotes) {
-      const hPos = keyPos(h.midi);
-      const requiredOuterSpan = bounds
-        ? Math.max(bounds.maxPos, hPos) - Math.min(bounds.minPos, hPos)
-        : 0;
-
       if (h.pedalSustained) {
         releasedUids.add(h.noteUid);
-        releasedHeld.push({
+        releasedMap.set(h.noteUid, {
           noteUid: h.noteUid,
           midi: h.midi,
           endTick: h.endTick,
@@ -91,9 +98,25 @@ export function analyzeHandHeldNotes(
           reason: "pedal",
           minOverSpan: 0,
         });
-      } else if (requiredOuterSpan > maxOuterSpan) {
+      } else {
+        nonPedalNewestFirst.push(h);
+      }
+    }
+
+    nonPedalNewestFirst.sort((a, b) => (b.onsetTick ?? 0) - (a.onsetTick ?? 0));
+
+    let envMin = bounds ? bounds.minPos : Infinity;
+    let envMax = bounds ? bounds.maxPos : -Infinity;
+
+    for (const h of nonPedalNewestFirst) {
+      const hPos = keyPos(h.midi);
+      const nextMin = Math.min(envMin, hPos);
+      const nextMax = Math.max(envMax, hPos);
+      const requiredOuterSpan = nextMin === Infinity ? 0 : nextMax - nextMin;
+
+      if (requiredOuterSpan > maxOuterSpan + 1e-6) {
         releasedUids.add(h.noteUid);
-        releasedHeld.push({
+        releasedMap.set(h.noteUid, {
           noteUid: h.noteUid,
           midi: h.midi,
           endTick: h.endTick,
@@ -102,7 +125,7 @@ export function analyzeHandHeldNotes(
           minOverSpan: requiredOuterSpan - maxOuterSpan,
         });
       } else if (releasedUids.has(h.noteUid)) {
-        releasedHeld.push({
+        releasedMap.set(h.noteUid, {
           noteUid: h.noteUid,
           midi: h.midi,
           endTick: h.endTick,
@@ -115,7 +138,7 @@ export function analyzeHandHeldNotes(
         requiredOuterSpan >= wideThreshold
       ) {
         releasedUids.add(h.noteUid);
-        releasedHeld.push({
+        releasedMap.set(h.noteUid, {
           noteUid: h.noteUid,
           midi: h.midi,
           endTick: h.endTick,
@@ -124,7 +147,20 @@ export function analyzeHandHeldNotes(
           minOverSpan: 0,
         });
       } else {
+        activeSet.add(h.noteUid);
+        envMin = nextMin;
+        envMax = nextMax;
+      }
+    }
+
+    const activeHeld: OnsetSlice["heldNotes"] = [];
+    const releasedHeld: ReleasedHeldNote[] = [];
+    for (const h of slice.heldNotes) {
+      if (activeSet.has(h.noteUid)) {
         activeHeld.push(h);
+      } else {
+        const rel = releasedMap.get(h.noteUid);
+        if (rel) releasedHeld.push(rel);
       }
     }
 

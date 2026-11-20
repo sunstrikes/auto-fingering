@@ -29,6 +29,9 @@ export function midiToPitchLabel(midi: number): string {
   return `${PITCH_NAMES[((midi % 12) + 12) % 12]}${octave}`;
 }
 
+export const MAX_OCTAVE_SPAN = 7.0;
+export const MAX_OCTAVE_SEMITONES = 12;
+
 export const SPAN_PRESET_SCALE: Record<SpanPreset, number> = {
   S: 0.82,
   M: 1.0,
@@ -47,6 +50,20 @@ const BASE_MAX_SPAN: Record<string, number> = {
   "3,4": 2.4,
   "3,5": 4.3,
   "4,5": 2.6,
+};
+
+// Anatomical hard ceilings across all presets (hard-capped at pure octave = 7.0)
+const MAX_SPAN_CEILING: Record<string, number> = {
+  "1,2": 6.5,
+  "1,3": 6.8,
+  "1,4": 7.0,
+  "1,5": 7.0,
+  "2,3": 3.5,
+  "2,4": 5.5,
+  "2,5": 6.5,
+  "3,4": 3.0,
+  "3,5": 5.2,
+  "4,5": 3.2,
 };
 
 export function isBlackKey(midi: number): boolean {
@@ -81,6 +98,14 @@ export function getSpanScale(profile: HandSpanProfile): number {
 }
 
 export function getMaxSpan(fLow: Finger, fHigh: Finger, scale: number): number {
+  const a = Math.min(fLow, fHigh);
+  const b = Math.max(fLow, fHigh);
+  if (a === b) return 0;
+  const key = `${a},${b}`;
+  return Math.min((BASE_MAX_SPAN[key] ?? 8.3) * scale, MAX_SPAN_CEILING[key] ?? MAX_OCTAVE_SPAN);
+}
+
+export function getComfortSpan(fLow: Finger, fHigh: Finger, scale: number): number {
   const a = Math.min(fLow, fHigh);
   const b = Math.max(fLow, fHigh);
   if (a === b) return 0;

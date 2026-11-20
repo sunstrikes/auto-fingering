@@ -19,6 +19,90 @@ export interface MeasureGeometry {
   width?: number;
 }
 
+export interface MeasureSystemGroup {
+  systemIndex: number;
+  measureIndices: number[];
+  top: number;
+  height: number;
+}
+
+/**
+ * Group measures into visual systems (staff rows) using rendered OSMD geometry when
+ * available, or fixed-size fallback chunks when horizontal/unrendered.
+ */
+export function groupMeasuresIntoSystems(
+  measureCount: number,
+  measureGeometry: MeasureGeometry[],
+  options?: { layoutMode?: "horizontal" | "page"; fallbackPerRow?: number }
+): MeasureSystemGroup[] {
+  const total = Math.max(0, measureCount);
+  if (total === 0) return [];
+  const fallbackPerRow = Math.max(1, options?.fallbackPerRow ?? 4);
+  const layoutMode = options?.layoutMode ?? "page";
+
+  if (layoutMode === "page" && measureGeometry.length > 0) {
+    const geoByMeasure = new Map<number, MeasureGeometry>();
+    for (const g of measureGeometry) {
+      if (g.height > 0 && g.measureIndex >= 0 && g.measureIndex < total) {
+        geoByMeasure.set(g.measureIndex, g);
+      }
+    }
+
+    if (geoByMeasure.size > 0) {
+      const bands: MeasureSystemGroup[] = [];
+      const unmapped: number[] = [];
+
+      for (let m = 0; m < total; m++) {
+        const g = geoByMeasure.get(m);
+        if (!g) {
+          unmapped.push(m);
+          continue;
+        }
+        const existing = bands.find((b) => Math.abs(b.top - g.top) < 16);
+        if (existing) {
+          existing.measureIndices.push(m);
+          existing.height = Math.max(existing.height, g.height);
+        } else {
+          bands.push({
+            systemIndex: bands.length,
+            measureIndices: [m],
+            top: g.top,
+            height: g.height,
+          });
+        }
+      }
+
+      for (let i = 0; i < unmapped.length; i += fallbackPerRow) {
+        bands.push({
+          systemIndex: bands.length,
+          measureIndices: unmapped.slice(i, i + fallbackPerRow),
+          top: 0,
+          height: 0,
+        });
+      }
+
+      if (bands.length > 0) {
+        return bands.map((b, idx) => ({ ...b, systemIndex: idx }));
+      }
+    }
+  }
+
+  const groups: MeasureSystemGroup[] = [];
+  for (let i = 0; i < total; i += fallbackPerRow) {
+    const indices: number[] = [];
+    for (let m = i; m < Math.min(total, i + fallbackPerRow); m++) {
+      indices.push(m);
+    }
+    groups.push({
+      systemIndex: groups.length,
+      measureIndices: indices,
+      top: 0,
+      height: 0,
+    });
+  }
+  return groups;
+}
+
 export interface MarginRiskGutterProps {
   measures: MeasureRiskSummary[];
   selectedMeasureIndex: number | null;
@@ -112,54 +196,85 @@ export function buildMeasureRiskSummaries(
   return summaries;
 }
 
-interface PositionedBar {
-  summary: MeasureRiskSummary;
+interface PositionedSystemBar {
+  systemIndex: number;
+  targetMeasureIndex: number;
+  startMeasureIndex: number;
+  endMeasureIndex: number;
+  highestSeverity: RiskSeverity;
+  warningCount: number;
+  labels: string[];
+  containsSelected: boolean;
   top: number;
   height: number;
 }
 
-function computeAlignedBars(
+function computeAlignedSystemBars(
   measures: MeasureRiskSummary[],
-  geometry: MeasureGeometry[]
-): PositionedBar[] | null {
+  geometry: MeasureGeometry[],
+  selectedMeasureIndex: number | null
+): PositionedSystemBar[] | null {
   if (geometry.length !== measures.length || geometry.length === 0) {
     return null;
   }
 
-  const geoByMeasure = new Map<number, MeasureGeometry>();
-  for (const g of geometry) {
-    if (g.height <= 0) return null;
-    geoByMeasure.set(g.measureIndex, g);
+  const measureMap = new Map<number, MeasureRiskSummary>();
+  for (const m of measures) {
+    measureMap.set(m.measureIndex, m);
   }
 
-  // Group measures sharing the same system row (similar vertical top) so bars never overlap
-  const bands: Array<{ top: number; height: number; items: MeasureRiskSummary[] }> = [];
-  for (const summary of measures) {
-    const g = geoByMeasure.get(summary.measureIndex);
-    if (!g) return null;
-    const existingBand = bands.find((b) => Math.abs(b.top - g.top) < 16);
-    if (existingBand) {
-      existingBand.items.push(summary);
-      existingBand.height = Math.max(existingBand.height, g.height);
-    } else {
-      bands.push({ top: g.top, height: g.height, items: [summary] });
+  const systems = groupMeasuresIntoSystems(measures.length, geometry, {
+    layoutMode: "page",
+  });
+  if (systems.length === 0 || systems.some((s) => s.height <= 0)) {
+    return null;
+  }
+
+  return systems.map((sys) => {
+    const rowSummaries = sys.measureIndices
+      .map((idx) => measureMap.get(idx))
+      .filter((s): s is MeasureRiskSummary => Boolean(s));
+
+    let highestSeverity: RiskSeverity = "none";
+    let warningCount = 0;
+    const labels: string[] = [];
+    let firstRiskMeasure: number | null = null;
+    let containsSelected = false;
+
+    for (const s of rowSummaries) {
+      if (s.measureIndex === selectedMeasureIndex) {
+        containsSelected = true;
+      }
+      warningCount += s.warningCount;
+      labels.push(...s.labels);
+      if (SEVERITY_RANK[s.highestSeverity] > SEVERITY_RANK[highestSeverity]) {
+        highestSeverity = s.highestSeverity;
+        firstRiskMeasure = s.measureIndex;
+      } else if (
+        s.highestSeverity !== "none" &&
+        s.highestSeverity === highestSeverity &&
+        firstRiskMeasure === null
+      ) {
+        firstRiskMeasure = s.measureIndex;
+      }
     }
-  }
 
-  const bars: PositionedBar[] = [];
-  for (const band of bands) {
-    const gap = 3;
-    const totalGap = gap * (band.items.length - 1);
-    const sliceHeight = Math.max(12, (band.height - totalGap) / band.items.length);
-    band.items.forEach((summary, idx) => {
-      bars.push({
-        summary,
-        top: band.top + idx * (sliceHeight + gap),
-        height: sliceHeight,
-      });
-    });
-  }
-  return bars;
+    const startMeasureIndex = sys.measureIndices[0] ?? 0;
+    const endMeasureIndex = sys.measureIndices[sys.measureIndices.length - 1] ?? startMeasureIndex;
+
+    return {
+      systemIndex: sys.systemIndex,
+      targetMeasureIndex: firstRiskMeasure ?? startMeasureIndex,
+      startMeasureIndex,
+      endMeasureIndex,
+      highestSeverity,
+      warningCount,
+      labels,
+      containsSelected,
+      top: sys.top,
+      height: Math.max(20, sys.height),
+    };
+  });
 }
 
 /**
@@ -274,19 +389,64 @@ export function MarginRiskGutter({
     );
   }
 
-  const alignedBars = computeAlignedBars(measures, measureGeometry);
+  const alignedSystemBars = computeAlignedSystemBars(
+    measures,
+    measureGeometry,
+    selectedMeasureIndex
+  );
 
-  if (alignedBars) {
-    const maxBottom = alignedBars.reduce((acc, b) => Math.max(acc, b.top + b.height), 120);
+  if (alignedSystemBars) {
+    const maxBottom = alignedSystemBars.reduce((acc, b) => Math.max(acc, b.top + b.height), 120);
     return (
       <nav
         data-testid="margin-risk-gutter"
         data-orientation="vertical"
-        aria-label="小节风险边栏"
+        aria-label="谱行风险边栏"
         className="relative w-5 shrink-0 select-none"
         style={{ minHeight: `${Math.ceil(maxBottom)}px` }}
       >
-        {alignedBars.map((bar) => renderBarButton(bar.summary, { top: bar.top, height: bar.height }))}
+        {alignedSystemBars.map((bar) => {
+          const rangeLabel =
+            bar.startMeasureIndex === bar.endMeasureIndex
+              ? `第 ${bar.startMeasureIndex + 1} 小节`
+              : `第 ${bar.startMeasureIndex + 1}–${bar.endMeasureIndex + 1} 小节`;
+          const titleParts = [`第 ${bar.systemIndex + 1} 行 (${rangeLabel})`];
+          if (bar.warningCount > 0) {
+            titleParts.push(`${bar.warningCount} 条提示（点击跳至第 ${bar.targetMeasureIndex + 1} 小节）`);
+          } else {
+            titleParts.push("无风险提示");
+          }
+
+          return (
+            <button
+              key={`sys-${bar.systemIndex}`}
+              type="button"
+              data-system-index={bar.systemIndex}
+              data-measure-index={bar.targetMeasureIndex}
+              data-severity={bar.highestSeverity}
+              aria-pressed={bar.containsSelected}
+              aria-label={`第 ${bar.systemIndex + 1} 行 ${rangeLabel}${
+                bar.highestSeverity !== "none"
+                  ? ` (${bar.highestSeverity === "danger" ? "高风险" : "警告"})`
+                  : ""
+              }`}
+              title={titleParts.join(" · ")}
+              onClick={() => onSelectMeasure(bar.targetMeasureIndex)}
+              style={{
+                position: "absolute",
+                top: `${bar.top}px`,
+                height: `${bar.height}px`,
+                left: 0,
+                right: 0,
+              }}
+              className={`flex w-5 items-center justify-center rounded text-[10px] font-bold transition focus:outline-none ${
+                BAR_STYLE[bar.highestSeverity]
+              } ${bar.containsSelected ? "ring-2 ring-blue-600 ring-offset-1" : ""}`}
+            >
+              {bar.systemIndex + 1}
+            </button>
+          );
+        })}
       </nav>
     );
   }

@@ -274,7 +274,9 @@ describe("walking skeleton end-to-end headless pipeline", () => {
     <measure number="1">
       <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
       <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
-      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
     </measure>
   </part>
 </score-partwise>`;

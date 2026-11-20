@@ -19,9 +19,16 @@ export interface PianoTimbrePreset {
   instrument?: string;
 }
 
-export const DEFAULT_PIANO_TIMBRE: PianoTimbreId = "ep-fluid-ep1";
+export const DEFAULT_PIANO_TIMBRE: PianoTimbreId = "grand-splendid";
 
 export const PIANO_TIMBRE_PRESETS: readonly PianoTimbrePreset[] = [
+  {
+    id: "grand-splendid",
+    label: "原声三角钢琴 (Splendid Grand)",
+    shortLabel: "Splendid 三角钢",
+    kind: "acoustic",
+    source: "splendid-grand",
+  },
   {
     id: "ep-fluid-ep1",
     label: "电钢琴 1 · Rhodes (FluidR3_GM)",
@@ -72,13 +79,6 @@ export const PIANO_TIMBRE_PRESETS: readonly PianoTimbrePreset[] = [
     kind: "electric",
     source: "electric-piano",
     instrument: "TX81Z",
-  },
-  {
-    id: "grand-splendid",
-    label: "原声三角钢琴 (Splendid Grand)",
-    shortLabel: "Splendid 三角钢",
-    kind: "acoustic",
-    source: "splendid-grand",
   },
 ] as const;
 

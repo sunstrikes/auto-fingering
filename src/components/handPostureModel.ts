@@ -12,7 +12,16 @@ import {
   type SpanPreset,
 } from "../domain/types";
 import { analyzeHandHeldNotes } from "../solver/heldNotes";
-import { SPAN_PRESET_SCALE, getMaxSpan, isBlackKey, keyPos, whiteKeyIndex } from "../solver/keyboard";
+import {
+  MAX_OCTAVE_SPAN,
+  SPAN_PRESET_SCALE,
+  getMaxSpan,
+  isBlackKey,
+  keyPos,
+  toHandFramePos,
+  whiteKeyIndex,
+} from "../solver/keyboard";
+import { DEFAULT_COST_WEIGHTS } from "../solver/weights";
 import {
   buildTransitionCueArcs,
   findHandPositionForSlice,
@@ -137,6 +146,42 @@ function whiteIdxToUnit(whiteIdx: number): number {
   return midiToWhiteUnitX(whiteKeyIndexToMidi(whiteIdx));
 }
 
+/**
+ * Checks whether two simultaneously held/struck fingers violate physical reuse,
+ * anatomical span ceiling, or prohibited held-note inversion (preserving thumb
+ * crossings within `crossMax * handScale`, excluding thumb-pinky).
+ */
+function hasHeldFingerConflict(
+  fA: Finger,
+  midiA: number,
+  fB: Finger,
+  midiB: number,
+  hand: Hand,
+  handScale: number
+): boolean {
+  if (fA === fB) {
+    return midiA !== midiB;
+  }
+  const maxAllowed = Math.min(getMaxSpan(fA, fB, handScale), MAX_OCTAVE_SPAN);
+  if (Math.abs(keyPos(midiA) - keyPos(midiB)) > maxAllowed + 1e-4) {
+    return true;
+  }
+  const posA = toHandFramePos(midiA, hand);
+  const posB = toHandFramePos(midiB, hand);
+  const isInverted = (fA > fB && posA < posB - 0.5) || (fA < fB && posA > posB + 0.5);
+  if (!isInverted) {
+    return false;
+  }
+  const invDist = Math.abs(posA - posB);
+  const involvesThumb = fA === 1 || fB === 1;
+  const involvesPinky = fA === 5 || fB === 5;
+  return (
+    !involvesThumb ||
+    involvesPinky ||
+    invDist > DEFAULT_COST_WEIGHTS.horizontal.crossMax * handScale
+  );
+}
+
 function buildHandIndex(
   hand: Hand,
   scoreDoc: ScoreDocument,
@@ -164,18 +209,85 @@ function buildHandIndex(
     }
 
     // Defensive guard for manual pinOnly overrides or residual finger collisions/over-spans
-    for (const h of activeHeldBySlice[t]) {
+    const activeNewestFirst = [...activeHeldBySlice[t]].sort(
+      (a, b) => (b.onsetTick ?? 0) - (a.onsetTick ?? 0)
+    );
+    const acceptedActive: typeof activeNewestFirst = [];
+    for (const h of activeNewestFirst) {
       const fH = solveResult.fingerByNoteUid[h.noteUid];
       if (!fH) continue;
+      let released = false;
       for (const n of slice.notes) {
         const fN = solveResult.fingerByNoteUid[n.noteUid];
         if (!fN) continue;
-        if (
-          (fN === fH && n.midi !== h.midi) ||
-          (fN !== fH &&
-            Math.abs(keyPos(n.midi) - keyPos(h.midi)) > getMaxSpan(fH, fN, handScale) + 1e-4)
-        ) {
+        if (hasHeldFingerConflict(fH, h.midi, fN, n.midi, hand, handScale)) {
           recordRelease(h.noteUid, slice.onsetSec);
+          released = true;
+          break;
+        }
+      }
+      if (!released) {
+        for (const newer of acceptedActive) {
+          const fNewer = solveResult.fingerByNoteUid[newer.noteUid];
+          if (!fNewer) continue;
+          if (hasHeldFingerConflict(fH, h.midi, fNewer, newer.midi, hand, handScale)) {
+            recordRelease(h.noteUid, slice.onsetSec);
+            released = true;
+            break;
+          }
+        }
+      }
+      if (!released) {
+        acceptedActive.push(h);
+      }
+    }
+  }
+
+  // Clip artificial 0.08s/0.09s visual minimum tails that bleed across a subsequent slice
+  // when the note has already logically ended and conflicts with the next slice's fingering/span.
+  for (let t = 0; t < slices.length; t++) {
+    const slice = slices[t];
+    for (const ev of slice.notes) {
+      if (ev.isTieStop) continue;
+      const fEv = solveResult.fingerByNoteUid[ev.noteUid];
+      if (!fEv) continue;
+      const logicalEndSec = ev.isGrace
+        ? ev.onsetSec
+        : (chainEndSecByRoot.get(ev.noteUid) ?? ev.onsetSec + ev.durationSec);
+      const rawEnd = ev.isGrace
+        ? ev.onsetSec + GRACE_VISUAL_SEC
+        : chainEndSecByRoot.get(ev.noteUid) ?? ev.onsetSec + Math.max(0.08, ev.durationSec);
+      const endSec = Math.max(ev.onsetSec + 0.08, rawEnd);
+      if (endSec <= logicalEndSec + 1e-4) continue;
+
+      for (let k = t + 1; k < slices.length; k++) {
+        const nextSlice = slices[k];
+        if (nextSlice.onsetSec >= endSec + 1e-4) break;
+        if (nextSlice.onsetSec <= ev.onsetSec + 1e-4) continue;
+        if (nextSlice.onsetSec < logicalEndSec - 1e-4) continue;
+        if (nextSlice.heldNotes.some((h) => h.noteUid === ev.noteUid)) continue;
+
+        let conflicts = false;
+        for (const n of nextSlice.notes) {
+          const fN = solveResult.fingerByNoteUid[n.noteUid];
+          if (!fN) continue;
+          if (hasHeldFingerConflict(fEv, ev.midi, fN, n.midi, hand, handScale)) {
+            conflicts = true;
+            break;
+          }
+        }
+        if (!conflicts) {
+          for (const h of activeHeldBySlice[k]) {
+            const fH = solveResult.fingerByNoteUid[h.noteUid];
+            if (!fH) continue;
+            if (hasHeldFingerConflict(fEv, ev.midi, fH, h.midi, hand, handScale)) {
+              conflicts = true;
+              break;
+            }
+          }
+        }
+        if (conflicts) {
+          recordRelease(ev.noteUid, nextSlice.onsetSec);
           break;
         }
       }
@@ -559,6 +671,87 @@ function projectSingleHandPosture(
           finger: f,
           isRepairedAnchor: repairedSet.has(w.ev.noteUid),
         });
+      }
+    }
+  }
+
+  // Runtime physical span & anatomical inversion invariant guard over activeByFinger
+  if (activeByFinger.size >= 2) {
+    type ActiveEntry = NonNullable<ReturnType<typeof activeByFinger.get>>;
+    const entries = Array.from(activeByFinger.entries());
+    const hasStruck = entries.some(([, entry]) => entry.isStruck);
+    let maxActiveOnset = -Infinity;
+    if (!hasStruck) {
+      for (const [, entry] of entries) {
+        if (entry.w.onsetSec > maxActiveOnset) maxActiveOnset = entry.w.onsetSec;
+      }
+    }
+    const rawKept: Array<[Finger, ActiveEntry]> = [];
+    const heldCandidates: Array<[Finger, ActiveEntry]> = [];
+    for (const pair of entries) {
+      const isPrimary = hasStruck
+        ? pair[1].isStruck
+        : Math.abs(pair[1].w.onsetSec - maxActiveOnset) <= 1e-4;
+      if (isPrimary) {
+        rawKept.push(pair);
+      } else {
+        heldCandidates.push(pair);
+      }
+    }
+
+    // Ensure cross-slice same-onset primary entries cannot bypass held-conflict checks
+    rawKept.sort(
+      (a, b) =>
+        Number(b[1].isStruck) - Number(a[1].isStruck) ||
+        b[1].w.onsetSec - a[1].w.onsetSec ||
+        Number(a[1].w.ev.isGrace) - Number(b[1].w.ev.isGrace)
+    );
+    const kept: Array<[Finger, ActiveEntry]> = [];
+    for (const pair of rawKept) {
+      const [fCand, candEntry] = pair;
+      const crossSliceConflict = kept.some(
+        ([fKept, keptEntry]) =>
+          keptEntry.w.sliceId !== candEntry.w.sliceId &&
+          hasHeldFingerConflict(
+            fKept,
+            keptEntry.w.ev.midi,
+            fCand,
+            candEntry.w.ev.midi,
+            hand,
+            handScale
+          )
+      );
+      if (crossSliceConflict) {
+        heldCandidates.push(pair);
+      } else {
+        kept.push(pair);
+      }
+    }
+
+    heldCandidates.sort((a, b) => b[1].w.onsetSec - a[1].w.onsetSec);
+
+    for (const [fCand, candEntry] of heldCandidates) {
+      const candMidi = candEntry.w.ev.midi;
+      let conflict = false;
+
+      for (const [fKept, keptEntry] of kept) {
+        if (hasHeldFingerConflict(fKept, keptEntry.w.ev.midi, fCand, candMidi, hand, handScale)) {
+          conflict = true;
+          break;
+        }
+      }
+
+      if (conflict) {
+        activeByFinger.delete(fCand);
+        if (!pedalSustainedMap.has(candMidi)) {
+          pedalSustainedMap.set(candMidi, {
+            midi: candMidi,
+            finger: fCand,
+            isRepairedAnchor: repairedSet.has(candEntry.w.ev.noteUid),
+          });
+        }
+      } else {
+        kept.push([fCand, candEntry]);
       }
     }
   }

@@ -1290,7 +1290,7 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     });
 
     expect(engine.getTimbre()).toBe(DEFAULT_PIANO_TIMBRE);
-    expect(DEFAULT_PIANO_TIMBRE).toBe("ep-fluid-ep1");
+    expect(DEFAULT_PIANO_TIMBRE).toBe("grand-splendid");
 
     // Switching while idle should NOT trigger sample loading
     const idleResult = engine.setTimbre("ep-cp80");
@@ -1381,7 +1381,7 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     });
 
     const timbreSelect = mountedContainer.querySelector('[data-testid="piano-timbre-select"]') as HTMLSelectElement;
-    expect(timbreSelect.value).toBe("ep-fluid-ep1");
+    expect(timbreSelect.value).toBe("grand-splendid");
     expect(loadSmplrPiano).not.toHaveBeenCalled();
 
     // Switch to Yamaha CP-80 while idle, then click Preview button

@@ -35,6 +35,7 @@ export interface NoteEvent {
   graceOrder?: number;
   isTieStop: boolean;
   isTieStart: boolean;
+  isArpeggiated?: boolean;
   tieChainRootUid?: string;
   anchorFinger?: Finger;
   anchorExitFinger?: Finger;
@@ -98,6 +99,65 @@ export interface SolveOptions {
   ignoreExistingFingerings?: boolean;
 }
 
+export type ScoreRepairStrategy =
+  | "hand-redistribution"
+  | "octave-fold-thin"
+  | "arpeggiate"
+  | "clip-duration";
+
+export type ScoreRepairIssueKind =
+  | "chord-over-octave"
+  | "chord-exceeds-5"
+  | "held-over-octave";
+
+export type ScoreRepairNoteEdit =
+  | {
+      kind: "reassign-hand";
+      noteUid: string;
+      targetHand: Hand;
+    }
+  | {
+      kind: "change-pitch";
+      noteUid: string;
+      oldMidi: number;
+      newMidi: number;
+    }
+  | {
+      kind: "remove-note";
+      noteUid: string;
+    }
+  | {
+      kind: "add-arpeggiate";
+      noteUid: string;
+    }
+  | {
+      kind: "clip-duration";
+      noteUid: string;
+      newDurationTick: number;
+    };
+
+export interface ScoreRepairOption {
+  optionId: string;
+  strategy: ScoreRepairStrategy;
+  label: string;
+  description: string;
+  fidelityScore: number;
+  previewSummary: string;
+  edits: ScoreRepairNoteEdit[];
+}
+
+export interface ScoreRepairSuggestion {
+  repairId: string;
+  measureIndex: number;
+  sliceId: string;
+  hand: Hand;
+  onsetTick: number;
+  issueKind: ScoreRepairIssueKind;
+  summary: string;
+  maxSemitones: number;
+  options: ScoreRepairOption[];
+}
+
 export interface SolveResult {
   fingerByNoteUid: Record<string, Finger>;
   handPositions: HandPosition[];
@@ -105,6 +165,7 @@ export interface SolveResult {
   warnings: TransitionCue[];
   repairedAnchorUids: string[];
   solveTimeMs: number;
+  repairSuggestions?: ScoreRepairSuggestion[];
 }
 
 export interface TempoPoint {

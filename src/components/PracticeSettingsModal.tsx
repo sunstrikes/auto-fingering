@@ -11,7 +11,7 @@ import type { MidiConnectionState } from "../midi/webMidi";
 const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
   { preset: "S", title: "小手型（偏保守跨度，0.82×）" },
   { preset: "M", title: "标准手型（1.00×）" },
-  { preset: "L", title: "大手型（允许更大八度/九度扩张，1.18×）" },
+  { preset: "L", title: "大手型（上限纯八度，放宽八度内内指跨度，1.18×）" },
 ];
 
 export interface PracticeSettingsModalProps {
@@ -234,7 +234,7 @@ export function PracticeSettingsModal({
                 )}
               </div>
               <p className="text-[11px] text-slate-500">
-                默认使用在线 FluidR3_GM 电钢琴采样，首次加载后会在浏览器本地缓存；切换 SFZ 电钢或原声钢琴后可点击「试听」即时加载。
+                默认使用在线原声三角钢琴 (Splendid Grand) 采样，首次加载后会在浏览器本地缓存；切换电钢或其它音色后可点击「试听」即时加载。
               </p>
             </div>
           )}

@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { DEFAULT_HAND_SPAN_PROFILE } from "../src/domain/types";
 import { parseMusicXml } from "../src/musicxml/parser";
+import { MAX_OCTAVE_SPAN, keyPos } from "../src/solver/keyboard";
 import { solveFingering } from "../src/solver/solveFingering";
 import {
   PIANO_MAX_MIDI,
@@ -689,5 +690,156 @@ describe("handPostureModel continuous 88-key kinematics", () => {
 
     expect(Math.abs(f[4].xUnit - f[5].xUnit)).toBeLessThanOrEqual(2.1);
     expect(Math.abs(f[1].xUnit - f[2].xUnit)).toBeGreaterThan(Math.abs(f[3].xUnit - f[4].xUnit));
+  });
+
+  it("prevents over-octave phantom 3-finger holds under L preset (Measure 69 E2+E3+Ab3 & <0.08s short roll at 0.25x slow playback)", () => {
+    const profileL = { preset: "L" as const, avoidThumbOnBlack: true, preferStablePosition: false };
+
+    // Case 1: Held E2 + E3 while Ab3 strikes under L preset
+    const heldM69Xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="69">
+      <attributes>
+        <divisions>4</divisions>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <direction><sound tempo="120"/></direction>
+      <note><pitch><step>A</step><alter>-1</alter><octave>4</octave></pitch><duration>4</duration><voice>1</voice><staff>1</staff></note>
+      <note><chord/><pitch><step>D</step><alter>-1</alter><octave>5</octave></pitch><duration>4</duration><voice>1</voice><staff>1</staff></note>
+      <note><chord/><pitch><step>A</step><alter>-1</alter><octave>5</octave></pitch><duration>4</duration><voice>1</voice><staff>1</staff></note>
+      <backup><duration>4</duration></backup>
+      <note><pitch><step>E</step><octave>2</octave></pitch><duration>4</duration><voice>2</voice><staff>2</staff></note>
+      <backup><duration>4</duration></backup>
+      <note><rest/><duration>1</duration><voice>3</voice><staff>2</staff></note>
+      <note><pitch><step>E</step><octave>3</octave></pitch><duration>3</duration><voice>3</voice><staff>2</staff></note>
+      <backup><duration>2</duration></backup>
+      <note><pitch><step>A</step><alter>-1</alter><octave>3</octave></pitch><duration>2</duration><voice>4</voice><staff>2</staff></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const heldDoc = parseMusicXml(heldM69Xml, { DOMParser });
+    const heldSolve = solveFingering(heldDoc.onsetSlices, profileL);
+    const ab3Slice = heldDoc.onsetSlices.find(
+      (s) => s.hand === "LH" && s.notes.some((n) => n.midi === 56)
+    )!;
+
+    const frameHeld = projectDualHandPostureAtSlice(heldDoc, heldSolve, ab3Slice.sliceId, profileL);
+    const activeMidisHeld = Object.values(frameHeld.lh.fingers)
+      .filter((fp) => fp.targetMidi !== null && fp.pressDepth > 0)
+      .map((fp) => fp.targetMidi!);
+    expect(activeMidisHeld).not.toContain(40); // E2 lifted
+    if (activeMidisHeld.length >= 2) {
+      const span =
+        Math.max(...activeMidisHeld.map(keyPos)) - Math.min(...activeMidisHeld.map(keyPos));
+      expect(span).toBeLessThanOrEqual(MAX_OCTAVE_SPAN + 1e-4);
+    }
+    expect(frameHeld.activeKeyHighlights.get(40)?.lh).toBe("held");
+    expect(frameHeld.activeKeyHighlights.get(40)?.lhPedalSustained).toBe(true);
+
+    // Case 2: Fast < 0.08s arpeggiated roll (E2 -> E3 -> Ab3, each 0.03125s at 240 BPM)
+    const shortRollXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="69">
+      <attributes><divisions>8</divisions><clef><sign>F</sign><line>4</line></clef></attributes>
+      <direction><sound tempo="240"/></direction>
+      <note><pitch><step>E</step><octave>2</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>3</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>A</step><alter>-1</alter><octave>3</octave></pitch><duration>6</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const rollDoc = parseMusicXml(shortRollXml, { DOMParser });
+    const rollSolve = solveFingering(rollDoc.onsetSlices, profileL);
+    const rollIndex = buildHandPostureIndex(rollDoc, rollSolve, profileL);
+    const rollAb3Slice = rollDoc.onsetSlices[2];
+    // Evaluate right at Ab3 onset (simulating 0.25x slow playback stepping through Ab3 attack)
+    const rollFrame = computeDualHandPostureFrameAtTime(
+      rollIndex,
+      rollAb3Slice.onsetSec + 0.005,
+      "L"
+    );
+    const rollActiveMidis = Object.values(rollFrame.lh.fingers)
+      .filter((fp) => fp.targetMidi !== null && fp.pressDepth > 0)
+      .map((fp) => fp.targetMidi!);
+    expect(rollActiveMidis).toContain(56);
+    expect(rollActiveMidis).not.toContain(40);
+    if (rollActiveMidis.length >= 2) {
+      const span =
+        Math.max(...rollActiveMidis.map(keyPos)) - Math.min(...rollActiveMidis.map(keyPos));
+      expect(span).toBeLessThanOrEqual(MAX_OCTAVE_SPAN + 1e-4);
+    }
+  });
+
+  it("lifts non-thumb inverted held notes to pedal highlight in hand posture while preserving thumb crossings", () => {
+    const profileL = { preset: "L" as const, avoidThumbOnBlack: true, preferStablePosition: false };
+
+    // Case 1: Held E5 on finger 3 while B4 is manually pinned to finger 5 -> E5 must lift to pedal highlight
+    const invXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="32">
+      <attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice></note>
+      <backup><duration>4</duration></backup>
+      <note><rest/><duration>2</duration><voice>2</voice></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>2</duration><voice>2</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const invDoc = parseMusicXml(invXml, { DOMParser });
+    const invSolve = solveFingering(invDoc.onsetSlices, profileL);
+    const e5Note = invDoc.noteEvents.find((n) => n.midi === 76)!;
+    const b4Note = invDoc.noteEvents.find((n) => n.midi === 71)!;
+    invSolve.fingerByNoteUid[e5Note.noteUid] = 3;
+    invSolve.fingerByNoteUid[b4Note.noteUid] = 5;
+
+    const b4Slice = invDoc.onsetSlices[1];
+    const invFrame = projectDualHandPostureAtSlice(invDoc, invSolve, b4Slice.sliceId, profileL);
+    expect(invFrame.rh.fingers[5].targetMidi).toBe(71);
+    expect(invFrame.rh.fingers[3].targetMidi).toBeNull();
+    expect(invFrame.activeKeyHighlights.get(76)?.rh).toBe("held");
+    expect(invFrame.activeKeyHighlights.get(76)?.rhPedalSustained).toBe(true);
+
+    // Case 2: Held E4 on finger 2 while thumb 1 plays F4 (short thumb-under crossing) -> both stay physically pressed
+    const thumbXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
+      <backup><duration>4</duration></backup>
+      <note><rest/><duration>2</duration><voice>2</voice></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>2</duration><voice>2</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const thumbDoc = parseMusicXml(thumbXml, { DOMParser });
+    const thumbSolve = solveFingering(thumbDoc.onsetSlices, profileL);
+    const e4Note = thumbDoc.noteEvents.find((n) => n.midi === 64)!;
+    const f4Note = thumbDoc.noteEvents.find((n) => n.midi === 65)!;
+    thumbSolve.fingerByNoteUid[e4Note.noteUid] = 2;
+    thumbSolve.fingerByNoteUid[f4Note.noteUid] = 1;
+
+    const thumbFrame = projectDualHandPostureAtSlice(
+      thumbDoc,
+      thumbSolve,
+      thumbDoc.onsetSlices[1].sliceId,
+      profileL
+    );
+    expect(thumbFrame.rh.fingers[2].targetMidi).toBe(64);
+    expect(thumbFrame.rh.fingers[1].targetMidi).toBe(65);
+    expect(thumbFrame.activeKeyHighlights.get(64)?.rhPedalSustained).toBeUndefined();
   });
 });

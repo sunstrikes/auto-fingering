@@ -201,6 +201,15 @@ function extractTieState(noteEl: Element): { isTieStop: boolean; isTieStart: boo
   };
 }
 
+function extractIsArpeggiated(noteEl: Element): boolean {
+  for (const notations of directChildrenByTag(noteEl, "notations")) {
+    if (firstDirectChild(notations, "arpeggiate") !== null) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function getFirstMeasureClefSign(part: Element): string | null {
   const firstMeasure = firstDirectChild(part, "measure");
   if (!firstMeasure) return null;
@@ -601,6 +610,7 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
               : handForPart;
 
           const { isTieStop, isTieStart } = extractTieState(child);
+          const isArpeggiated = extractIsArpeggiated(child);
 
           const noteUid = `${partId}-m${measureIndex}-n${noteSeq++}`;
           noteElementsByUid.set(noteUid, child);
@@ -625,6 +635,7 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
             graceOrder,
             isTieStop,
             isTieStart,
+            ...(isArpeggiated ? { isArpeggiated: true } : {}),
             anchorFinger,
             anchorExitFinger,
             anchorRawPreserved: anchorFinger !== undefined,

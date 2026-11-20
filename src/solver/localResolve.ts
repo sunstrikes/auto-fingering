@@ -9,6 +9,7 @@ import {
 } from "../domain/types";
 import { analyzeHandHeldNotes, applyEffectiveHeldNotes } from "./heldNotes";
 import { getMaxSpan, getSpanScale, toHandFramePos } from "./keyboard";
+import { analyzeScoreRepairSuggestions } from "./scoreRepair";
 import {
   advanceBeamLayer,
   derivePositionsAndCues,
@@ -127,7 +128,7 @@ function resolvePinOnlyOverride(
             toHandFramePos(targetNote.midi, targetSlice.hand) -
               toHandFramePos(held.midi, targetSlice.hand)
           );
-          if (dist > getMaxSpan(heldF, finger, scale)) {
+          if (dist > getMaxSpan(heldF, finger, scale) + 1e-6) {
             hasConflict = true;
             break;
           }
@@ -262,6 +263,7 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
       new Set<string>()
     );
     const warnings = transitionCues.filter((c) => c.severity === "warn" || c.severity === "danger");
+    const repairSuggestions = analyzeScoreRepairSuggestions(input.onsetSlices, profile);
     return {
       fingerByNoteUid,
       handPositions,
@@ -269,6 +271,7 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
       warnings,
       repairedAnchorUids: [],
       solveTimeMs: (typeof performance !== "undefined" ? performance.now() : Date.now()) - start,
+      repairSuggestions,
     };
   }
 
@@ -385,6 +388,7 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
     ignoreExistingFingerings
   );
   const warnings = transitionCues.filter((c) => c.severity === "warn" || c.severity === "danger");
+  const repairSuggestions = analyzeScoreRepairSuggestions(effectiveSlices, profile);
   const end = typeof performance !== "undefined" ? performance.now() : Date.now();
 
   return {
@@ -394,5 +398,6 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
     warnings,
     repairedAnchorUids,
     solveTimeMs: end - start,
+    repairSuggestions,
   };
 }

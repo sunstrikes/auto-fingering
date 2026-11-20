@@ -448,14 +448,20 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
       expect.objectContaining({ measureIndex: 0, midi: 64, hand: "RH", finger: 2 }),
     ]);
 
-    // Horizontal risk gutter shows 3 measures: m.1 none, m.2 warn/danger, m.3 danger
-    const gutterBars = Array.from(
-      mountedContainer.querySelectorAll<HTMLButtonElement>("[data-testid='margin-risk-gutter'] [data-measure-index]")
+    // Page mode: vertical MarginRiskGutter aggregates the 1 system row; measure-ruler shows 1 system pill with 3 measure cells
+    const systemGutterBars = Array.from(
+      mountedContainer.querySelectorAll<HTMLButtonElement>("[data-testid='margin-risk-gutter'] [data-system-index]")
     );
-    expect(gutterBars).toHaveLength(3);
-    expect(gutterBars[0].dataset.severity).toBe("none");
-    expect(["warn", "danger"]).toContain(gutterBars[1].dataset.severity);
-    expect(gutterBars[2].dataset.severity).toBe("danger");
+    expect(systemGutterBars).toHaveLength(1);
+    expect(systemGutterBars[0].dataset.severity).toBe("danger");
+
+    const rulerItems = Array.from(
+      mountedContainer.querySelectorAll<HTMLButtonElement>("[data-testid='measure-ruler'] [data-testid^='measure-ruler-item-']")
+    );
+    expect(rulerItems).toHaveLength(3);
+    expect(rulerItems[0].dataset.severity).toBe("none");
+    expect(["warn", "danger"]).toContain(rulerItems[1].dataset.severity);
+    expect(rulerItems[2].dataset.severity).toBe("danger");
 
     // Step Prev warning from -1 wraps to last warning (m.3)
     const prevWarnBtn = mountedContainer.querySelector('[data-testid="warning-prev-btn"]') as HTMLButtonElement;
@@ -466,23 +472,22 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
 
     const viewer = mountedContainer.querySelector('[data-testid="score-viewer"]') as HTMLElement;
     expect(viewer.dataset.activeMeasure).toBe("2");
-    expect(gutterBars[2].getAttribute("aria-pressed")).toBe("true");
+    expect(systemGutterBars[0].getAttribute("aria-pressed")).toBe("true");
     expect(highlightMeasure).toHaveBeenLastCalledWith(2);
     expect(scrollToMeasure).toHaveBeenLastCalledWith(2, expect.any(HTMLElement));
     expect(mountedContainer.querySelector('[data-testid="active-warning-label"]')?.textContent).toContain("第3小节");
     expect(mountedContainer.querySelector('[data-testid="piano-slice-summary"]')?.textContent).toContain("第3小节");
 
-    // Click risk bar for m.2 -> selects slice in m.2 and scrolls
+    // Click ruler item for m.2 -> selects slice in m.2 and scrolls
     await act(async () => {
-      gutterBars[1].click();
+      rulerItems[1].click();
       await Promise.resolve();
     });
     expect(viewer.dataset.activeMeasure).toBe("1");
-    expect(gutterBars[1].getAttribute("aria-pressed")).toBe("true");
     expect(highlightMeasure).toHaveBeenLastCalledWith(1);
     expect(scrollToMeasure).toHaveBeenLastCalledWith(1, expect.any(HTMLElement));
 
-    // Toggle layout mode to Horizontal -> re-renders with layoutMode: "horizontal", then back to Multi-line Page
+    // Toggle layout mode to Horizontal -> re-renders with layoutMode: "horizontal" and horizontal 3-bar gutter, then back to Multi-line Page
     const horizontalBtn = mountedContainer.querySelector('[data-testid="layout-horizontal-btn"]') as HTMLButtonElement;
     await act(async () => {
       horizontalBtn.click();
@@ -493,6 +498,11 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
       expect.any(String),
       { layoutMode: "horizontal", zoom: 0.85 }
     );
+    const horizontalGutterBars = Array.from(
+      mountedContainer.querySelectorAll<HTMLButtonElement>("[data-testid='margin-risk-gutter'] [data-measure-index]")
+    );
+    expect(horizontalGutterBars).toHaveLength(3);
+    expect(horizontalGutterBars[1].getAttribute("aria-pressed")).toBe("true");
 
     const pageBtn = mountedContainer.querySelector('[data-testid="layout-page-btn"]') as HTMLButtonElement;
     await act(async () => {
@@ -547,5 +557,63 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
     expect(mountedContainer.querySelector('[data-testid="overhead-lane-LH"]')).not.toBeNull();
     expect(mountedContainer.querySelector('[data-layer="hand-posture-simulation"]')).not.toBeNull();
     expect(pianoSvg.getAttribute("viewBox")).toBe("0 0 1248 244");
+  });
+
+  it("aggregates vertical MarginRiskGutter by system row when measureGeometry is provided and renders system pills in TransportPracticeBar", () => {
+    const slices: OnsetSlice[] = [
+      makeSlice("s0", "RH", 0, 0, 60, 1),
+      makeSlice("s1", "RH", 1, 4, 62),
+      makeSlice("s2", "RH", 2, 8, 64),
+      makeSlice("s3", "RH", 3, 12, 65),
+    ];
+    const warnings: TransitionCue[] = [
+      {
+        sliceId: "s1",
+        hand: "RH",
+        measureIndex: 1,
+        type: "unreachable-span",
+        severity: "danger",
+        cost: 5,
+        label: "Danger in m2",
+      },
+      {
+        sliceId: "s2",
+        hand: "RH",
+        measureIndex: 2,
+        type: "wide-stretch",
+        severity: "warn",
+        cost: 2,
+        label: "Warn in m3",
+      },
+    ];
+    const summaries = buildMeasureRiskSummaries(4, slices, warnings);
+    const geometry = [
+      { measureIndex: 0, top: 10, height: 110, left: 10, width: 100 },
+      { measureIndex: 1, top: 12, height: 110, left: 110, width: 100 },
+      { measureIndex: 2, top: 140, height: 110, left: 10, width: 100 },
+      { measureIndex: 3, top: 142, height: 110, left: 110, width: 100 },
+    ];
+    const onSelectMeasure = vi.fn();
+
+    const gutterRoot = mount(
+      createElement(MarginRiskGutter, {
+        measures: summaries,
+        measureGeometry: geometry,
+        selectedMeasureIndex: 3,
+        onSelectMeasure,
+      })
+    );
+
+    const sysButtons = Array.from(gutterRoot.querySelectorAll<HTMLButtonElement>("[data-system-index]"));
+    expect(sysButtons).toHaveLength(2);
+    expect(sysButtons[0].dataset.severity).toBe("danger");
+    expect(sysButtons[0].style.height).toBe("110px");
+    expect(sysButtons[1].dataset.severity).toBe("warn");
+    expect(sysButtons[1].getAttribute("aria-pressed")).toBe("true");
+
+    act(() => {
+      sysButtons[0].click();
+    });
+    expect(onSelectMeasure).toHaveBeenCalledWith(1); // jumps to first danger measure in row 1
   });
 });

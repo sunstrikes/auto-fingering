@@ -20,6 +20,13 @@ import {
   type AbLoopBounds,
   type MeasureTimeline,
 } from "../domain/types";
+import {
+  groupMeasuresIntoSystems,
+  type MeasureGeometry,
+  type MeasureRiskSummary,
+  type RiskSeverity,
+} from "./MarginRiskGutter";
+import type { AbPickStep, ScoreLayoutMode } from "./ScoreViewer";
 
 export interface TransportPracticeBarProps {
   hasScore: boolean;
@@ -31,6 +38,9 @@ export interface TransportPracticeBarProps {
   pianoTimbre?: PianoTimbreId;
   measureCount: number;
   measureTimelines: MeasureTimeline[];
+  measureRisks?: MeasureRiskSummary[];
+  measureGeometry?: MeasureGeometry[];
+  layoutMode?: ScoreLayoutMode;
   activeMeasureIndex: number | null;
   midiStatusLabel?: string;
   onOpenSettings?: () => void;
@@ -39,6 +49,8 @@ export interface TransportPracticeBarProps {
   activeMetronomeBeat?: MetronomeBeatEvent | null;
   waitingModeEnabled?: boolean;
   abLoop?: AbLoopBounds;
+  abPickStep?: AbPickStep;
+  abPickStartMeasure?: number | null;
   onPlay: () => void;
   onPlayFromSlice: () => void;
   onPause: () => void;
@@ -49,6 +61,7 @@ export interface TransportPracticeBarProps {
   onToggleMetronome?: () => void;
   onToggleWaitingMode?: () => void;
   onToggleAbLoop?: () => void;
+  onPickAbMeasure?: (measureIndex: number) => void;
   onChangeAbLoopBounds?: (bounds: AbLoopBounds) => void;
   onClearAbLoop?: () => void;
 }
@@ -93,6 +106,9 @@ export function TransportPracticeBar({
   pianoTimbre = DEFAULT_PIANO_TIMBRE,
   measureCount,
   measureTimelines,
+  measureRisks = [],
+  measureGeometry = [],
+  layoutMode = "page",
   activeMeasureIndex,
   midiStatusLabel,
   onOpenSettings,
@@ -101,6 +117,8 @@ export function TransportPracticeBar({
   activeMetronomeBeat = null,
   waitingModeEnabled = false,
   abLoop,
+  abPickStep = "idle",
+  abPickStartMeasure = null,
   onPlay,
   onPlayFromSlice,
   onPause,
@@ -111,6 +129,7 @@ export function TransportPracticeBar({
   onToggleMetronome,
   onToggleWaitingMode,
   onToggleAbLoop,
+  onPickAbMeasure,
   onChangeAbLoopBounds,
   onClearAbLoop,
 }: TransportPracticeBarProps) {
@@ -145,6 +164,31 @@ export function TransportPracticeBar({
           label: `第${i + 1}小节`,
         }));
 
+  const riskByMeasure = new Map<number, MeasureRiskSummary>();
+  for (const r of measureRisks) {
+    riskByMeasure.set(r.measureIndex, r);
+  }
+  const rulerMeasureByIndex = new Map(rulerMeasures.map((m) => [m.measureIndex, m]));
+  const systemGroups = groupMeasuresIntoSystems(totalMeasureCount, measureGeometry, {
+    layoutMode,
+    fallbackPerRow: 4,
+  });
+
+  const RISK_CELL_STYLE: Record<RiskSeverity, string> = {
+    none: "bg-slate-100/80 hover:bg-slate-200/80 text-slate-600",
+    warn: "bg-amber-200/80 hover:bg-amber-300/80 text-amber-950",
+    danger: "bg-red-200/90 hover:bg-red-300/90 text-red-950",
+  };
+
+  const abButtonLabel =
+    abPickStep === "start"
+      ? "选择起点 A"
+      : abPickStep === "end"
+        ? `选择终点 B${abPickStartMeasure !== null ? ` (A:${abPickStartMeasure + 1})` : ""}`
+        : normalizedLoop.enabled
+          ? `循环中 ${normalizedLoop.startMeasureIndex + 1}-${normalizedLoop.endMeasureIndex + 1}`
+          : "A-B 循环";
+
   const beginEditBpm = () => {
     setBpmDraft(String(effectiveBpm));
     setEditingBpm(true);
@@ -162,122 +206,196 @@ export function TransportPracticeBar({
     <section
       data-testid="transport-practice-bar"
       aria-label="播放与练习控制栏"
-      className="shrink-0 border-y border-slate-200 bg-white px-3 py-1 sm:px-4"
+      className="shrink-0 border-y border-slate-200 bg-white px-3 py-1.5 sm:px-4"
     >
-      <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2">
-        {/* Left: Transport Buttons */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            data-testid="transport-jump-start-btn"
-            disabled={!hasScore}
-            onClick={onJumpToStart}
-            title="跳回乐谱开头"
-            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            ⏮ 开头
-          </button>
-
-          <button
-            type="button"
-            data-testid="audio-play-btn"
-            disabled={!hasScore || playbackState === "playing"}
-            onClick={onPlay}
-            className="rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            {playbackState === "paused" ? "继续" : "播放"}
-          </button>
-
-          <button
-            type="button"
-            data-testid="audio-play-slice-btn"
-            disabled={!hasScore || !hasSelectedSlice}
-            onClick={onPlayFromSlice}
-            title="从当前选中的音符切片开始播放"
-            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            从当前
-          </button>
-
-          <button
-            type="button"
-            data-testid="audio-pause-btn"
-            disabled={playbackState !== "playing"}
-            onClick={onPause}
-            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            暂停
-          </button>
-
-          <button
-            type="button"
-            data-testid="audio-stop-btn"
-            disabled={playbackState === "stopped"}
-            onClick={onStop}
-            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            停止
-          </button>
-        </div>
-
-        {/* Center: Interactive Measure Ruler */}
+      <div className="mx-auto flex max-w-[1600px] flex-col gap-1.5">
+        {/* Top Row: Full-Width System-Segmented Measure Ruler */}
         <div
           data-testid="measure-ruler"
-          aria-label="小节标尺"
-          className="flex min-w-[160px] flex-1 items-center gap-1 overflow-x-auto rounded-md border border-slate-200 bg-slate-50 px-1.5 py-1"
+          aria-label="谱行与小节进度条"
+          className="flex w-full items-center gap-1.5 overflow-x-auto py-0.5"
         >
-          {rulerMeasures.length === 0 ? (
-            <span className="px-2 text-[11px] text-slate-400">加载乐谱后显示小节</span>
+          {systemGroups.length === 0 ? (
+            <div className="flex h-6 w-full items-center rounded-md border border-slate-200 bg-slate-50 px-2.5 text-[11px] text-slate-400">
+              加载乐谱后显示谱行与小节进度
+            </div>
           ) : (
-            rulerMeasures.map((m) => {
-              const isActive = activeMeasureIndex === m.measureIndex;
-              const inAbLoop =
-                normalizedLoop.enabled &&
-                m.measureIndex >= normalizedLoop.startMeasureIndex &&
-                m.measureIndex <= normalizedLoop.endMeasureIndex;
+            systemGroups.map((group) => {
+              const containsActive =
+                activeMeasureIndex !== null && group.measureIndices.includes(activeMeasureIndex);
               return (
-                <button
-                  key={m.measureIndex}
-                  type="button"
-                  data-testid={`measure-ruler-item-${m.measureIndex}`}
-                  data-in-ab-loop={inAbLoop ? "true" : "false"}
-                  title={`${m.label}${inAbLoop ? " (A-B 循环内)" : ""} · Shift+点击设为 A-B 循环终点`}
-                  onClick={(e) => {
-                    if (e.shiftKey && onChangeAbLoopBounds) {
-                      onChangeAbLoopBounds(
-                        normalizeAbLoopBounds(
-                          {
-                            ...normalizedLoop,
-                            endMeasureIndex: m.measureIndex,
-                            enabled: true,
-                          },
-                          totalMeasureCount
-                        )
-                      );
-                      return;
-                    }
-                    onJumpToMeasure(m.measureIndex);
+                <div
+                  key={`sys-pill-${group.systemIndex}`}
+                  data-testid={`system-pill-${group.systemIndex}`}
+                  style={{
+                    flexGrow: group.measureIndices.length,
+                    flexBasis: 0,
+                    minWidth: `${Math.max(28, group.measureIndices.length * 12)}px`,
                   }}
-                  className={`shrink-0 rounded px-2 py-0.5 text-[11px] font-medium transition ${
-                    isActive
-                      ? "bg-blue-600 text-white shadow-sm"
-                      : inAbLoop
-                        ? "border border-indigo-400 bg-indigo-50 text-indigo-800 hover:bg-indigo-100"
-                        : m.isPickup
-                          ? "border border-dashed border-slate-300 bg-white text-slate-600 hover:bg-slate-100"
-                          : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-100"
+                  className={`relative flex h-6 items-stretch overflow-hidden rounded-md border transition ${
+                    containsActive
+                      ? "border-blue-500 ring-1 ring-blue-300"
+                      : "border-slate-200 bg-slate-100"
                   }`}
                 >
-                  {m.measureIndex + 1}
-                  {m.isPickup ? "·p" : ""}
-                </button>
+                  <span
+                    aria-hidden="true"
+                    className={`pointer-events-none flex shrink-0 items-center px-1 text-[10px] font-bold select-none ${
+                      containsActive
+                        ? "bg-blue-600 text-white"
+                        : "bg-slate-200/90 text-slate-600"
+                    }`}
+                  >
+                    {group.systemIndex + 1}
+                  </span>
+
+                  <div className="flex min-w-0 flex-1 items-stretch">
+                    {group.measureIndices.map((mIdx, posIdx) => {
+                      const meta = rulerMeasureByIndex.get(mIdx) ?? {
+                        measureIndex: mIdx,
+                        isPickup: false,
+                        label: `第${mIdx + 1}小节`,
+                      };
+                      const risk = riskByMeasure.get(mIdx);
+                      const severity: RiskSeverity = risk?.highestSeverity ?? "none";
+                      const isActive = activeMeasureIndex === mIdx;
+                      const inAbLoop =
+                        normalizedLoop.enabled &&
+                        mIdx >= normalizedLoop.startMeasureIndex &&
+                        mIdx <= normalizedLoop.endMeasureIndex;
+                      const isPickStart =
+                        abPickStep !== "idle" && abPickStartMeasure === mIdx;
+                      const isLastInPill = posIdx === group.measureIndices.length - 1;
+
+                      const riskHint =
+                        risk && risk.warningCount > 0
+                          ? ` · ${risk.warningCount} 条提示`
+                          : "";
+                      const actionHint =
+                        abPickStep === "start"
+                          ? " · 点击设为 A-B 起点"
+                          : abPickStep === "end"
+                            ? " · 点击设为 A-B 终点"
+                            : " · Shift+点击设为 A-B 循环终点";
+
+                      return (
+                        <button
+                          key={mIdx}
+                          type="button"
+                          data-testid={`measure-ruler-item-${mIdx}`}
+                          data-in-ab-loop={inAbLoop ? "true" : "false"}
+                          data-severity={severity}
+                          title={`${meta.label}${riskHint}${inAbLoop ? " (A-B 循环内)" : ""}${actionHint}`}
+                          aria-label={`${meta.label}${inAbLoop ? " (A-B 循环内)" : ""}`}
+                          onClick={(e) => {
+                            if (abPickStep !== "idle" && onPickAbMeasure) {
+                              onPickAbMeasure(mIdx);
+                              return;
+                            }
+                            if (e.shiftKey && onChangeAbLoopBounds) {
+                              onChangeAbLoopBounds(
+                                normalizeAbLoopBounds(
+                                  {
+                                    ...normalizedLoop,
+                                    endMeasureIndex: mIdx,
+                                    enabled: true,
+                                  },
+                                  totalMeasureCount
+                                )
+                              );
+                              return;
+                            }
+                            onJumpToMeasure(mIdx);
+                          }}
+                          className={`relative min-w-[6px] flex-1 transition focus:outline-none ${
+                            !isLastInPill ? "border-r border-slate-300/70" : ""
+                          } ${
+                            isActive
+                              ? "bg-blue-600 text-white"
+                              : isPickStart
+                                ? "bg-indigo-500 text-white"
+                                : inAbLoop
+                                  ? "bg-indigo-100/95 ring-1 ring-inset ring-indigo-500"
+                                  : RISK_CELL_STYLE[severity]
+                          }`}
+                        >
+                          {severity !== "none" && !isActive && (
+                            <span
+                              aria-hidden="true"
+                              className={`absolute inset-x-0 bottom-0 h-0.5 ${
+                                severity === "danger" ? "bg-red-600" : "bg-amber-500"
+                              }`}
+                            />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               );
             })
           )}
         </div>
 
-        {/* Right: Speed Multiplier Presets + Steppers + BPM Editor + Audio Status + Settings */}
-        <div className="flex flex-wrap items-center gap-1.5">
+        {/* Bottom Row: Transport, Speed, Metronome, Waiting Mode, Two-Step A-B Loop & Settings */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {/* Left: Transport Buttons */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              data-testid="transport-jump-start-btn"
+              disabled={!hasScore}
+              onClick={onJumpToStart}
+              title="跳回乐谱开头"
+              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              ⏮ 开头
+            </button>
+
+            <button
+              type="button"
+              data-testid="audio-play-btn"
+              disabled={!hasScore || playbackState === "playing"}
+              onClick={onPlay}
+              className="rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              {playbackState === "paused" ? "继续" : "播放"}
+            </button>
+
+            <button
+              type="button"
+              data-testid="audio-play-slice-btn"
+              disabled={!hasScore || !hasSelectedSlice}
+              onClick={onPlayFromSlice}
+              title="从当前选中的音符切片开始播放"
+              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              从当前
+            </button>
+
+            <button
+              type="button"
+              data-testid="audio-pause-btn"
+              disabled={playbackState !== "playing"}
+              onClick={onPause}
+              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              暂停
+            </button>
+
+            <button
+              type="button"
+              data-testid="audio-stop-btn"
+              disabled={playbackState === "stopped"}
+              onClick={onStop}
+              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              停止
+            </button>
+          </div>
+
+          {/* Right: Speed Multiplier Presets + Steppers + BPM Editor + Audio Status + Practice Modes + A-B Loop */}
+          <div className="flex flex-wrap items-center gap-1.5">
           <div className="flex items-center gap-0.5 rounded-md border border-slate-200 bg-slate-50 p-0.5">
             <button
               type="button"
@@ -432,81 +550,42 @@ export function TransportPracticeBar({
             <button
               type="button"
               data-testid="ab-loop-toggle-btn"
+              data-pick-step={abPickStep}
               aria-pressed={normalizedLoop.enabled}
               disabled={!hasScore}
               onClick={onToggleAbLoop}
-              title="开关整小节 A-B 循环"
+              title={
+                abPickStep === "start"
+                  ? "请点击谱面或顶部进度条选择循环起点小节（再次点击取消）"
+                  : abPickStep === "end"
+                    ? "请点击谱面或顶部进度条选择循环终点小节（再次点击取消）"
+                    : normalizedLoop.enabled
+                      ? "点击关闭 A-B 循环"
+                      : "点击进入两步点选 A-B 循环小节"
+              }
               className={`rounded px-2 py-0.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
-                normalizedLoop.enabled
-                  ? "bg-indigo-600 text-white hover:bg-indigo-700"
-                  : "bg-white text-slate-700 hover:bg-slate-100"
+                abPickStep !== "idle"
+                  ? "bg-amber-500 text-white hover:bg-amber-600"
+                  : normalizedLoop.enabled
+                    ? "bg-indigo-600 text-white hover:bg-indigo-700"
+                    : "bg-white text-slate-700 hover:bg-slate-100"
               }`}
             >
-              A-B 循环
+              {abButtonLabel}
             </button>
 
-            <label className="flex items-center gap-0.5 text-[11px] text-slate-600">
-              <span>A:</span>
-              <select
-                data-testid="ab-loop-start-select"
-                aria-label="循环起点小节 A"
+            {(normalizedLoop.enabled || abPickStep !== "idle") && (
+              <button
+                type="button"
+                data-testid="ab-loop-clear-btn"
                 disabled={!hasScore}
-                value={normalizedLoop.startMeasureIndex}
-                onChange={(e) => {
-                  const nextA = Number.parseInt(e.target.value, 10);
-                  onChangeAbLoopBounds?.(
-                    normalizeAbLoopBounds(
-                      { ...normalizedLoop, startMeasureIndex: nextA },
-                      totalMeasureCount
-                    )
-                  );
-                }}
-                className="rounded border border-slate-300 bg-white px-1 py-0.5 text-[11px] text-slate-800 disabled:opacity-45"
+                onClick={onClearAbLoop}
+                title="清除并重置 A-B 循环"
+                className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
               >
-                {rulerMeasures.map((m) => (
-                  <option key={m.measureIndex} value={m.measureIndex}>
-                    第{m.measureIndex + 1}小节
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="flex items-center gap-0.5 text-[11px] text-slate-600">
-              <span>B:</span>
-              <select
-                data-testid="ab-loop-end-select"
-                aria-label="循环终点小节 B"
-                disabled={!hasScore}
-                value={normalizedLoop.endMeasureIndex}
-                onChange={(e) => {
-                  const nextB = Number.parseInt(e.target.value, 10);
-                  onChangeAbLoopBounds?.(
-                    normalizeAbLoopBounds(
-                      { ...normalizedLoop, endMeasureIndex: nextB },
-                      totalMeasureCount
-                    )
-                  );
-                }}
-                className="rounded border border-slate-300 bg-white px-1 py-0.5 text-[11px] text-slate-800 disabled:opacity-45"
-              >
-                {rulerMeasures.map((m) => (
-                  <option key={m.measureIndex} value={m.measureIndex}>
-                    第{m.measureIndex + 1}小节
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <button
-              type="button"
-              data-testid="ab-loop-clear-btn"
-              disabled={!hasScore}
-              onClick={onClearAbLoop}
-              title="清除并重置 A-B 循环"
-              className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              清除
-            </button>
+                清除
+              </button>
+            )}
           </div>
 
           <button
@@ -517,6 +596,7 @@ export function TransportPracticeBar({
           >
             {midiStatusLabel ? `练习设置 · ${midiStatusLabel}` : "练习设置"}
           </button>
+          </div>
         </div>
       </div>
     </section>

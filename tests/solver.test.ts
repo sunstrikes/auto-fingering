@@ -8,9 +8,12 @@ import { solveFingering } from "../src/solver/solveFingering";
 import {
   IMPOSSIBLE_COST,
   computeHorizontalCost,
+  computePairwiseSpanCost,
   computeVerticalCost,
   generateSliceCandidates,
 } from "../src/solver/costModel";
+import { analyzeHandHeldNotes } from "../src/solver/heldNotes";
+import { getSpanScale, toHandFramePos } from "../src/solver/keyboard";
 import { DEFAULT_COST_WEIGHTS } from "../src/solver/weights";
 import { DEFAULT_HAND_SPAN_PROFILE, type Finger } from "../src/domain/types";
 import { perfBudget } from "./perfBudget";
@@ -181,7 +184,8 @@ describe("solver seam: solveFingering", () => {
   it("parameterizes HandSpanProfile (S/M/L scaling, avoidThumbOnBlack, preferStablePosition) and changes fingering & warnings", () => {
     const { DOMParser } = new JSDOM("").window;
 
-    // 1. Span scaling S (0.82) vs M (1.00) vs L (1.18) on octave (C4-C5) and 10th (C4-E5)
+    // 1. Span scaling S (0.82) vs M (1.00) vs L (1.18) with hard pure-octave ceiling (7.0):
+    // Octave (C4-C5 = 7.0), minor 9th (C4-Db5 = 7.416), 10th (C4-E5 = 9.0), and inner wide stretch (C4-D4-E4-C5)
     const spanXml = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="4.0">
   <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
@@ -191,7 +195,13 @@ describe("solver seam: solveFingering", () => {
       <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
       <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
       <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><alter>-1</alter><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
       <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
     </measure>
   </part>
 </score-partwise>`;
@@ -213,13 +223,35 @@ describe("solver seam: solveFingering", () => {
       preferStablePosition: false,
     });
 
-    // Under S (1-5 max = 6.806), both octave (7.0) and 10th (9.0) emit unreachable-span
-    expect(resS.warnings.filter((w) => w.type === "unreachable-span")).toHaveLength(2);
-    // Under M (1-5 max = 8.3), octave is playable without warning, 10th (9.0) emits unreachable-span
-    expect(resM.warnings.filter((w) => w.type === "unreachable-span")).toHaveLength(1);
-    // Under L (1-5 max = 9.794), 10th (9.0 >= 0.85 * 9.794 = 8.325) is wide-stretch, 0 unreachable-span
-    expect(resL.warnings.filter((w) => w.type === "unreachable-span")).toHaveLength(0);
-    expect(resL.warnings.filter((w) => w.type === "wide-stretch")).toHaveLength(1);
+    const octaveSliceId = spanDoc.onsetSlices[0].sliceId;
+    const min9SliceId = spanDoc.onsetSlices[1].sliceId;
+    const tenthSliceId = spanDoc.onsetSlices[2].sliceId;
+
+    // Pure octave (7.0): unreachable under S (1-5 max = 6.806), 0 unreachable-span under M & L
+    expect(
+      resS.warnings.some((w) => w.sliceId === octaveSliceId && w.type === "unreachable-span")
+    ).toBe(true);
+    expect(
+      resM.warnings.some((w) => w.sliceId === octaveSliceId && w.type === "unreachable-span")
+    ).toBe(false);
+    expect(
+      resL.warnings.some((w) => w.sliceId === octaveSliceId && w.type === "unreachable-span")
+    ).toBe(false);
+
+    // Minor 9th (7.416) and 10th (9.0): hard-capped > octave so S / M / L all flag unreachable-span
+    for (const res of [resS, resM, resL]) {
+      expect(
+        res.warnings.some((w) => w.sliceId === min9SliceId && w.type === "unreachable-span")
+      ).toBe(true);
+      expect(
+        res.warnings.some((w) => w.sliceId === tenthSliceId && w.type === "unreachable-span")
+      ).toBe(true);
+    }
+
+    // Total warning counts strictly decrease as hand preset grows (S >= M >= L)
+    expect(resS.warnings.length).toBeGreaterThanOrEqual(resM.warnings.length);
+    expect(resM.warnings.length).toBeGreaterThanOrEqual(resL.warnings.length);
+    expect(resS.warnings.length).toBeGreaterThan(resL.warnings.length);
 
     // 2. avoidThumbOnBlack: F#4 -> G4 -> A4 -> B4 -> C5 -> D5 avoids thumb on F#4 when enabled
     const blackXml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -471,9 +503,10 @@ describe("solver seam: solveFingering", () => {
       <note>
         <pitch><step>C</step><octave>6</octave></pitch><duration>1</duration><voice>1</voice>
       </note>
-      <!-- Chord with wide-stretch (E4 + F5 -> 1,5 span 8.0 / 8.3 = 96% -> wide-stretch warn) -->
-      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
-      <note><chord/><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <!-- Chord with wide-stretch within octave (C4 + D4 + C5 -> 2-5 span 6.0 / 6.0 >= 0.85 -> wide-stretch warn) -->
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
       <!-- Chord with anchor-conflict: C4=3, E4=1 (inverted) -->
       <note>
         <pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice>
@@ -540,8 +573,8 @@ describe("solver seam: solveFingering", () => {
     expect(resM.solveTimeMs).toBeLessThanOrEqual(perfBudget(200));
     expect(resL.solveTimeMs).toBeLessThanOrEqual(perfBudget(200));
 
-    // 15-16 semitone 10th chords in measures 23, 27, 66, 72 (0-based 22, 26, 65, 71) are flagged under S and M
-    for (const measureIdx of [22, 26, 65, 71]) {
+    // Un-arpeggiated over-octave spans in measures 12, 26, 36, 41 (0-based 11, 25, 35, 40) are flagged across S/M/L
+    for (const measureIdx of [11, 25, 35, 40]) {
       expect(
         resS.warnings.some(
           (w) => w.measureIndex === measureIdx && w.type === "unreachable-span"
@@ -552,6 +585,23 @@ describe("solver seam: solveFingering", () => {
           (w) => w.measureIndex === measureIdx && w.type === "unreachable-span"
         )
       ).toBe(true);
+      expect(
+        resL.warnings.some(
+          (w) => w.measureIndex === measureIdx && w.type === "unreachable-span"
+        )
+      ).toBe(true);
+    }
+
+    // Explicitly arpeggiated 10th chords in measures 23, 27, 66, 72 emit info cues instead of danger warnings
+    for (const measureIdx of [22, 26, 65, 71]) {
+      expect(
+        resM.transitionCues.some(
+          (c) =>
+            c.measureIndex === measureIdx &&
+            c.severity === "info" &&
+            /Arpeggiated/i.test(c.label)
+        )
+      ).toBe(true);
     }
 
     const dangerS = resS.warnings.filter((w) => w.severity === "danger").length;
@@ -559,7 +609,7 @@ describe("solver seam: solveFingering", () => {
     const dangerL = resL.warnings.filter((w) => w.severity === "danger").length;
 
     expect(dangerS).toBeGreaterThan(dangerM);
-    expect(dangerL).toBeLessThan(dangerM);
+    expect(dangerL).toBeLessThanOrEqual(dangerM);
     expect(resL.warnings.length).toBeLessThan(resM.warnings.length * 0.85);
     expect(resL.warnings.length).toBeLessThan(resS.warnings.length * 0.4);
   });
@@ -803,9 +853,9 @@ describe("solver seam: solveFingering", () => {
 
   it("uses A* admissible heuristic on unanchored held-note passages to avoid late-slice span traps", () => {
     const { DOMParser } = new JSDOM("").window;
-    // Held C4 (unanchored!) sustains across 4 steps while upper voice climbs to D5 (9th above C4).
-    // At slice 0, C4=1 is required so upper D5=5 reaches C4..D5 within MAX_SPAN(1,5)=8.3;
-    // picking C4=2 would trigger unreachable-span at the final slice.
+    // Held C4 (unanchored!) sustains across 4 steps while upper voice climbs to C5 (octave above C4).
+    // At slice 0, C4=1 is required so upper C5=5 reaches C4..C5 within MAX_SPAN(1,5)=7.0;
+    // picking C4=2 would trigger unreachable-span (2-5 max=6.0 < 7.0) at the final slice.
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="4.0">
   <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
@@ -817,17 +867,17 @@ describe("solver seam: solveFingering", () => {
       <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
       <note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
       <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
-      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
     </measure>
   </part>
 </score-partwise>`;
     const doc = parseMusicXml(xml, { DOMParser });
     const res = solveFingering(doc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
     const c4 = doc.noteEvents.find((n) => n.midi === 60)!;
-    const d5 = doc.noteEvents.find((n) => n.midi === 74)!;
+    const c5 = doc.noteEvents.find((n) => n.midi === 72)!;
 
     expect(res.fingerByNoteUid[c4.noteUid]).toBe(1);
-    expect(res.fingerByNoteUid[d5.noteUid]).toBe(5);
+    expect(res.fingerByNoteUid[c5.noteUid]).toBe(5);
     expect(res.warnings.some((w) => w.type === "unreachable-span")).toBe(false);
   });
 
@@ -1011,5 +1061,305 @@ describe("solver seam: solveFingering", () => {
     expect(resPedal.fingerByNoteUid[m19PedalC4.noteUid]).toBeGreaterThan(
       resPedal.fingerByNoteUid[m19PedalD4.noteUid]
     );
+  });
+
+  it("enforces hard octave ceiling across S/M/L on Measure 69 LH model (E2 held + E3 held + Ab3) and fast 5->2 octave transitions", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const m69Xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="69">
+      <attributes><divisions>4</divisions><clef><sign>F</sign><line>4</line></clef></attributes>
+      <direction><sound tempo="120"/></direction>
+      <note><pitch><step>E</step><octave>2</octave></pitch><duration>8</duration><voice>2</voice></note>
+      <backup><duration>8</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>3</octave></pitch><duration>4</duration><voice>1</voice></note>
+      <note><pitch><step>A</step><alter>-1</alter><octave>3</octave></pitch><duration>3</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const doc = parseMusicXml(m69Xml, { DOMParser });
+    const e2 = doc.noteEvents.find((n) => n.midi === 40)!;
+    const e3 = doc.noteEvents.find((n) => n.midi === 52)!;
+    const ab3 = doc.noteEvents.find((n) => n.midi === 56)!;
+    const ab3Slice = doc.onsetSlices.find((s) => s.notes.some((n) => n.noteUid === ab3.noteUid))!;
+
+    for (const preset of ["S", "M", "L"] as const) {
+      const profile = { preset, avoidThumbOnBlack: true, preferStablePosition: false };
+      const scale = getSpanScale(profile);
+
+      // 1. Pairwise span > 7.0 (E2 -> Ab3 = 9.5) always incurs >= IMPOSSIBLE_COST
+      const pairOverOctave = computePairwiseSpanCost(
+        5,
+        toHandFramePos(e2.midi, "LH"),
+        1,
+        toHandFramePos(ab3.midi, "LH"),
+        scale,
+        1.0,
+        preset
+      );
+      expect(pairOverOctave.hasUnreachableSpan).toBe(true);
+      expect(pairOverOctave.cost).toBeGreaterThanOrEqual(IMPOSSIBLE_COST);
+
+      // 2. Vertical cost with forced held E2(5) + E3(2) + struck Ab3(1) incurs >= IMPOSSIBLE_COST
+      const forcedHeld = new Map<Finger, number>([
+        [5, e2.midi],
+        [2, e3.midi],
+      ]);
+      const vertForced = computeVerticalCost(ab3Slice, [1], forcedHeld, profile);
+      expect(vertForced.hasUnreachableSpan).toBe(true);
+      expect(vertForced.cost).toBeGreaterThanOrEqual(IMPOSSIBLE_COST);
+
+      // 3. Held-note analyzer releases E2 before/at Ab3 even under L preset
+      const heldAnalysis = analyzeHandHeldNotes(doc.onsetSlices, profile);
+      const ab3Idx = doc.onsetSlices.findIndex((s) => s.sliceId === ab3Slice.sliceId);
+      expect(heldAnalysis.activeHeldBySlice[ab3Idx].some((h) => h.noteUid === e2.noteUid)).toBe(false);
+
+      // 4. Full solve never uses 5->2 to hold E2-E3 octave, and flags unreachable-span on E2 held
+      const res = solveFingering(doc.onsetSlices, profile);
+      const fE2 = res.fingerByNoteUid[e2.noteUid];
+      const fE3 = res.fingerByNoteUid[e3.noteUid];
+      expect(!(fE2 === 5 && fE3 === 2)).toBe(true);
+      expect(res.warnings.some((w) => w.type === "unreachable-span")).toBe(true);
+
+      // 5. Fast E2(5) -> E3(2) octave transition (absD = 7.0 > 5.5, dt = 0.125s < 0.2s) hits fastOverSpan
+      const fastTrans = computeHorizontalCost(
+        doc.onsetSlices[0],
+        [5],
+        doc.onsetSlices[1],
+        [2],
+        profile
+      );
+      expect(fastTrans.hasUnreachableSpan).toBe(true);
+      expect(fastTrans.cost).toBeGreaterThanOrEqual(DEFAULT_COST_WEIGHTS.horizontal.fastOverSpanBase);
+    }
+  });
+
+  it("keeps 1,5 on white-key LH octaves before downward leaps while preserving legato 1,4 octaves and slow monophonic scales", () => {
+    const { DOMParser } = new JSDOM("").window;
+
+    // 1. Measure 49->50 LH octave leap regression (98 BPM half note and faster < 0.5s quarter note)
+    const buildM49Xml = (tempo: number, g2g3Dur: number): string => `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="49">
+      <attributes><divisions>2</divisions><clef><sign>F</sign><line>4</line></clef></attributes>
+      <direction><sound tempo="${tempo}"/></direction>
+      <note><pitch><step>G</step><octave>1</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><chord/><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><pitch><step>G</step><octave>3</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>${g2g3Dur}</duration><voice>5</voice></note>
+      <note><chord/><pitch><step>G</step><octave>3</octave></pitch><duration>${g2g3Dur}</duration><voice>5</voice></note>
+    </measure>
+    <measure number="50">
+      <note><pitch><step>F</step><octave>1</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><chord/><pitch><step>F</step><octave>2</octave></pitch><duration>1</duration><voice>5</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    for (const [tempo, dur] of [
+      [98, 4],
+      [150, 2],
+    ]) {
+      const m49Doc = parseMusicXml(buildM49Xml(tempo, dur), { DOMParser });
+      const prevG3Slice = m49Doc.onsetSlices[3];
+      const g2g3Slice = m49Doc.onsetSlices[4];
+      const f1f2Slice = m49Doc.onsetSlices[5];
+
+      for (const preset of ["S", "M", "L"] as const) {
+        for (const preferStablePosition of [false, true]) {
+          const profile = { preset, avoidThumbOnBlack: true, preferStablePosition };
+          const res = solveFingering(m49Doc.onsetSlices, profile);
+          expect(g2g3Slice.notes.map((n) => res.fingerByNoteUid[n.noteUid])).toEqual([5, 1]);
+        }
+      }
+
+      // 2. Direct computeHorizontalCost + computeVerticalCost sanity for M and L
+      for (const preset of ["M", "L"] as const) {
+        const profile = { preset, avoidThumbOnBlack: true, preferStablePosition: false };
+        const emptyHeld = new Map<Finger, number>();
+        const vert15 = computeVerticalCost(g2g3Slice, [5, 1], emptyHeld, profile).cost;
+        const vert14 = computeVerticalCost(g2g3Slice, [4, 1], emptyHeld, profile).cost;
+        const horiz15 = computeHorizontalCost(g2g3Slice, [5, 1], f1f2Slice, [5, 1], profile).cost;
+        const horiz14 = computeHorizontalCost(g2g3Slice, [4, 1], f1f2Slice, [5, 1], profile).cost;
+        expect(horiz15 - horiz14).toBeLessThan(2.0);
+
+        const local15 =
+          computeHorizontalCost(prevG3Slice, [1], g2g3Slice, [5, 1], profile).cost +
+          vert15 +
+          horiz15;
+        const local14 =
+          computeHorizontalCost(prevG3Slice, [1], g2g3Slice, [4, 1], profile).cost +
+          vert14 +
+          horiz14;
+        expect(local15).toBeLessThan(local14);
+
+        if (tempo === 98) {
+          expect(vert15 + horiz15).toBeLessThan(vert14 + horiz14);
+        }
+      }
+    }
+
+    // 3a. Legato chromatic RH octaves (C4-C5, Db4-Db5, D4-D5, Eb4-Eb5, E4-E5, dt = 0.25s) under L
+    const chromXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <direction><sound tempo="120"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><alter>-1</alter><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><alter>-1</alter><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><alter>-1</alter><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><alter>-1</alter><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const chromDoc = parseMusicXml(chromXml, { DOMParser });
+    const chromRes = solveFingering(chromDoc.onsetSlices, {
+      preset: "L",
+      avoidThumbOnBlack: true,
+      preferStablePosition: false,
+    });
+    expect(
+      chromDoc.onsetSlices.map((s) => s.notes.map((n) => chromRes.fingerByNoteUid[n.noteUid]))
+    ).toEqual([
+      [1, 5],
+      [1, 4],
+      [1, 5],
+      [1, 4],
+      [1, 5],
+    ]);
+
+    // 3b. Stepwise Romantic LH octaves (Bb2-Bb3, B2-B3, Bb2-Bb3) under M and L
+    const romanticXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><clef><sign>F</sign><line>4</line></clef></attributes>
+      <direction><sound tempo="110"/></direction>
+      <note><pitch><step>B</step><alter>-1</alter><octave>2</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><chord/><pitch><step>B</step><alter>-1</alter><octave>3</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><pitch><step>B</step><octave>2</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><chord/><pitch><step>B</step><octave>3</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><pitch><step>B</step><alter>-1</alter><octave>2</octave></pitch><duration>1</duration><voice>5</voice></note>
+      <note><chord/><pitch><step>B</step><alter>-1</alter><octave>3</octave></pitch><duration>1</duration><voice>5</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const romanticDoc = parseMusicXml(romanticXml, { DOMParser });
+    for (const preset of ["M", "L"] as const) {
+      const res = solveFingering(romanticDoc.onsetSlices, {
+        preset,
+        avoidThumbOnBlack: true,
+        preferStablePosition: false,
+      });
+      expect(
+        romanticDoc.onsetSlices.map((s) => s.notes.map((n) => res.fingerByNoteUid[n.noteUid]))
+      ).toEqual([
+        [5, 1],
+        [4, 1],
+        [5, 1],
+      ]);
+    }
+
+    // 4. Slow monophonic half-note scale (C4..G4, dt >= 1.0s) preserves 1-2-3-4-5
+    const slowScaleXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <direction><sound tempo="120"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const slowDoc = parseMusicXml(slowScaleXml, { DOMParser });
+    const slowRes = solveFingering(slowDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    expect(slowDoc.noteEvents.map((n) => slowRes.fingerByNoteUid[n.noteUid])).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("forbids non-thumb held-note finger inversions across S/M/L (m.32 held E5 pattern) while preserving short thumb crossings", () => {
+    const { DOMParser } = new JSDOM("").window;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="32">
+      <attributes><divisions>4</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><tie type="start"/><voice>1</voice><notations><tied type="start"/></notations></note>
+      <note><chord/><pitch><step>B</step><octave>5</octave></pitch><duration>1</duration><tie type="start"/><voice>1</voice><notations><tied type="start"/></notations></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><tie type="stop"/><tie type="start"/><voice>1</voice><notations><tied type="stop"/><tied type="start"/></notations></note>
+      <note><chord/><pitch><step>B</step><octave>5</octave></pitch><duration>1</duration><tie type="stop"/><tie type="start"/><voice>1</voice><notations><tied type="stop"/><tied type="start"/></notations></note>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>5</octave></pitch><duration>2</duration><tie type="stop"/><voice>1</voice><notations><tied type="stop"/></notations></note>
+      <note><chord/><pitch><step>B</step><octave>5</octave></pitch><duration>2</duration><tie type="stop"/><voice>1</voice><notations><tied type="stop"/></notations></note>
+      <backup><duration>4</duration></backup>
+      <note><pitch><step>A</step><alter>-1</alter><octave>4</octave></pitch><duration>4</duration><voice>2</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(xml, { DOMParser });
+    const a4Slice = doc.onsetSlices[1];
+    const b4Slice = doc.onsetSlices[2];
+    const profileL = { preset: "L" as const, avoidThumbOnBlack: true, preferStablePosition: false };
+
+    // Non-thumb held inversion under L: E5 held on 3 while A4 or B4 uses 5 -> IMPOSSIBLE_COST
+    const invA4 = computeVerticalCost(a4Slice, [5], new Map<Finger, number>([[3, 76]]), profileL);
+    expect(invA4.cost).toBeGreaterThanOrEqual(IMPOSSIBLE_COST);
+    expect(invA4.hasUnreachableSpan).toBe(true);
+
+    const invB4 = computeVerticalCost(b4Slice, [5], new Map<Finger, number>([[3, 76]]), profileL);
+    expect(invB4.cost).toBeGreaterThanOrEqual(IMPOSSIBLE_COST);
+    expect(invB4.hasUnreachableSpan).toBe(true);
+
+    // Thumb crossing with held non-thumb finger (E4 held on 2 while thumb 1 passes to F4) stays soft
+    const thumbUnder = computeVerticalCost(
+      b4Slice,
+      [1],
+      new Map<Finger, number>([[2, 64]]),
+      profileL
+    );
+    expect(thumbUnder.hasUnreachableSpan).toBe(false);
+    expect(thumbUnder.cost).toBeLessThan(DEFAULT_COST_WEIGHTS.vertical.overSpanBase);
+
+    for (const preset of ["S", "M", "L"] as const) {
+      const res = solveFingering(doc.onsetSlices, {
+        preset,
+        avoidThumbOnBlack: true,
+        preferStablePosition: false,
+      });
+      const e5 = doc.noteEvents.find((n) => n.midi === 76 && !n.isTieStop)!;
+      const a4 = doc.noteEvents.find((n) => n.midi === 69)!;
+      const b4Beat2 = b4Slice.notes[0];
+      const fE5 = res.fingerByNoteUid[e5.noteUid];
+      for (const low of [a4, b4Beat2]) {
+        const fLow = res.fingerByNoteUid[low.noteUid];
+        if (fLow > 1 && fE5 > 1) {
+          expect(fLow).toBeLessThan(fE5);
+        }
+      }
+    }
   });
 });

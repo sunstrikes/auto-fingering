@@ -651,4 +651,44 @@ describe("musicxml pipeline seam: parseMusicXml", () => {
     expect(d4SliceM2.heldNotes[0].onsetTick).toBe(16);
     expect(d4SliceM2.heldNotes[0].pedalSustained).toBe(true);
   });
+
+  it("extracts <notations><arpeggiate/> onto NoteEvent.isArpeggiated and preserves it on export", () => {
+    const { DOMParser, XMLSerializer } = createJsdomDom();
+    const arpXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><clef><sign>F</sign><line>4</line></clef></attributes>
+      <note>
+        <pitch><step>E</step><octave>2</octave></pitch><duration>2</duration><voice>1</voice>
+        <notations><arpeggiate/></notations>
+      </note>
+      <note>
+        <chord/><pitch><step>A</step><alter>-1</alter><octave>3</octave></pitch><duration>2</duration><voice>1</voice>
+        <notations><arpeggiate/></notations>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>3</octave></pitch><duration>2</duration><voice>1</voice>
+      </note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const doc = parseMusicXml(arpXml, { DOMParser });
+    expect(doc.noteEvents[0].isArpeggiated).toBe(true);
+    expect(doc.noteEvents[1].isArpeggiated).toBe(true);
+    expect(doc.noteEvents[2].isArpeggiated).toBeUndefined();
+
+    writeFingeringsToScore(doc, {
+      [doc.noteEvents[0].noteUid]: 5,
+      [doc.noteEvents[1].noteUid]: 1,
+      [doc.noteEvents[2].noteUid]: 3,
+    });
+    const out = serializeScoreDocument(doc, { XMLSerializer });
+    expect(out).toContain("<arpeggiate/>");
+    const reloaded = parseMusicXml(out, { DOMParser });
+    expect(reloaded.noteEvents[0].isArpeggiated).toBe(true);
+    expect(reloaded.noteEvents[1].isArpeggiated).toBe(true);
+  });
 });

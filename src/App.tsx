@@ -11,6 +11,8 @@ import {
   type PracticeMode,
   type PracticeStep,
   type ScoreDocument,
+  type ScoreRepairOption,
+  type ScoreRepairSuggestion,
   type TransitionCue,
   type WaitingModeState,
 } from "./domain/types";
@@ -24,16 +26,23 @@ import {
 } from "./practice/waitingMode";
 import type { MxlContainer } from "./musicxml/mxl";
 import { parseMusicXml } from "./musicxml/parser";
+import {
+  applyAllScoreRepairsToXml,
+  applyScoreRepairToXml,
+  type BatchScoreRepairSelection,
+} from "./musicxml/repairWriter";
 import { exportScoreOutput, loadScoreInput, type ExportFormat } from "./musicxml/scoreSession";
 import { applyAnchorOverridesToSlices, localResolveFingering } from "./solver/localResolve";
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
 import { computeNextAnchorState, useStudioStore } from "./store/useStudioStore";
-import { buildMeasureRiskSummaries } from "./components/MarginRiskGutter";
+import { buildMeasureRiskSummaries, type MeasureGeometry } from "./components/MarginRiskGutter";
 import { NoteAnchorPopover, type PopoverAnchorRect } from "./components/NoteAnchorPopover";
+import { ScoreRepairPanel } from "./components/ScoreRepairPanel";
 import { UnifiedPiano88 } from "./components/UnifiedPiano88";
 import { sortWarningsForNavigation } from "./components/warningUtils";
 import {
   ScoreViewer,
+  type AbPickStep,
   type AnchorMarkerInfo,
   type ScoreLayoutMode,
   type ScoreRendererFactory,
@@ -146,9 +155,15 @@ export default function App({
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
   const [playbackFrame, setPlaybackFrame] = useState<PlaybackFrame | null>(null);
   const [layoutMode, setLayoutMode] = useState<ScoreLayoutMode>("page");
+  const [measureGeometry, setMeasureGeometry] = useState<MeasureGeometry[]>([]);
+  const [abPickStep, setAbPickStep] = useState<AbPickStep>("idle");
+  const [abPickStartMeasure, setAbPickStartMeasure] = useState<number | null>(null);
   const [popoverOpen, setPopoverOpen] = useState<boolean>(false);
   const [popoverAnchorRect, setPopoverAnchorRect] = useState<PopoverAnchorRect | null>(null);
   const [diffDropdownOpen, setDiffDropdownOpen] = useState<boolean>(false);
+  const [repairPanelOpen, setRepairPanelOpen] = useState<boolean>(false);
+  const [isApplyingRepair, setIsApplyingRepair] = useState<boolean>(false);
+  const [dismissedRepairIds, setDismissedRepairIds] = useState<Set<string>>(() => new Set());
   const [warningNavIndex, setWarningNavIndex] = useState<number>(-1);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [showStatusBar, setShowStatusBar] = useState<boolean>(true);
@@ -346,6 +361,8 @@ export default function App({
     if (resetHistory) {
       const nextLoop = createDefaultAbLoopBounds(nextDoc.measureCount);
       setAbLoop(nextLoop);
+      setAbPickStep("idle");
+      setAbPickStartMeasure(null);
       playbackEngineRef.current?.setAbLoop(nextLoop);
     }
   };
@@ -686,10 +703,142 @@ export default function App({
   }, [solveResult]);
 
   useEffect(() => {
+    setDismissedRepairIds(new Set());
+  }, [rawXmlText]);
+
+  useEffect(() => {
     if (lastDiff.length === 0) {
       setDiffDropdownOpen(false);
     }
   }, [lastDiff]);
+
+  const visibleRepairSuggestions = useMemo(
+    () =>
+      (solveResult?.repairSuggestions ?? []).filter(
+        (s) => !dismissedRepairIds.has(s.repairId)
+      ),
+    [solveResult?.repairSuggestions, dismissedRepairIds]
+  );
+
+  const hasHighRiskRepair = useMemo(
+    () =>
+      visibleRepairSuggestions.some(
+        (s) => s.issueKind === "chord-over-octave" || s.issueKind === "held-over-octave"
+      ),
+    [visibleRepairSuggestions]
+  );
+
+  useEffect(() => {
+    if (visibleRepairSuggestions.length === 0) {
+      setRepairPanelOpen(false);
+    }
+  }, [visibleRepairSuggestions.length]);
+
+  const handleLocateRepairSuggestion = (suggestion: ScoreRepairSuggestion) => {
+    useStudioStore.getState().selectSlice(suggestion.sliceId);
+    setPopoverOpen(false);
+  };
+
+  const handleDismissRepair = (repairId: string) => {
+    setDismissedRepairIds((prev) => {
+      const next = new Set(prev);
+      next.add(repairId);
+      return next;
+    });
+  };
+
+  const commitRepairedScore = async (
+    nextRawXml: string,
+    nextDoc: ScoreDocument,
+    repairSummary: string
+  ) => {
+    const store = useStudioStore.getState();
+    if (!solverClientRef.current) return;
+
+    const nextAnchors: Record<string, AnchorOverride> = {};
+    for (const [uid, ov] of Object.entries(store.anchors)) {
+      if (nextDoc.noteElementsByUid.has(uid)) {
+        nextAnchors[uid] = ov;
+      }
+    }
+    const nextRemoved = store.removedRawAnchorUids.filter((uid) =>
+      nextDoc.noteElementsByUid.has(uid)
+    );
+    const slicesToSolve = applyAnchorOverridesToSlices(
+      nextDoc.onsetSlices,
+      nextAnchors,
+      nextRemoved,
+      store.ignoreExistingFingerings
+    );
+    const nextResult = await solverClientRef.current.solve(
+      slicesToSolve,
+      store.handSpanProfile,
+      { ignoreExistingFingerings: false }
+    );
+    store.applyScoreRepair({
+      rawXmlText: nextRawXml,
+      scoreDoc: nextDoc,
+      solveResult: nextResult,
+      anchors: nextAnchors,
+      removedRawAnchorUids: nextRemoved,
+      repairSummary,
+    });
+  };
+
+  const handleApplyRepairOption = async (
+    suggestion: ScoreRepairSuggestion,
+    option: ScoreRepairOption
+  ) => {
+    const store = useStudioStore.getState();
+    if (!store.rawXmlText || !store.scoreDoc || !solverClientRef.current) return;
+
+    playbackEngineRef.current?.stop();
+    setIsApplyingRepair(true);
+    try {
+      const nextRawXml = applyScoreRepairToXml(store.rawXmlText, store.scoreDoc, option);
+      const nextDoc = parseMusicXml(
+        nextRawXml,
+        store.isSingleStaff ? { singleStaffHandOverride: store.singleStaffHand } : undefined
+      );
+      await commitRepairedScore(nextRawXml, nextDoc, suggestion.summary);
+    } catch (err) {
+      if (!(err instanceof SolverCancelledError)) {
+        store.setErrorMsg(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setIsApplyingRepair(false);
+    }
+  };
+
+  const handleApplyAllRepairs = async (items: BatchScoreRepairSelection[]) => {
+    const store = useStudioStore.getState();
+    if (!store.rawXmlText || !store.scoreDoc || !solverClientRef.current || items.length === 0) {
+      return;
+    }
+
+    playbackEngineRef.current?.stop();
+    setIsApplyingRepair(true);
+    try {
+      const { rawXmlText: nextRawXml, scoreDoc: nextDoc, appliedCount } =
+        applyAllScoreRepairsToXml(
+          store.rawXmlText,
+          store.scoreDoc,
+          items,
+          store.handSpanProfile,
+          dismissedRepairIds,
+          store.solveResult?.repairSuggestions
+        );
+      if (appliedCount > 0) {
+        await commitRepairedScore(nextRawXml, nextDoc, `一键修复 ${appliedCount} 处`);
+      }
+    } catch (err) {
+      if (!(err instanceof SolverCancelledError)) {
+        store.setErrorMsg(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setIsApplyingRepair(false);
+    }
+  };
 
   const handleSelectWarning = (cue: TransitionCue) => {
     useStudioStore.getState().selectWarning(cue);
@@ -872,6 +1021,7 @@ export default function App({
       if (e.key === "Escape") {
         setPopoverOpen(false);
         setDiffDropdownOpen(false);
+        setRepairPanelOpen(false);
         setSettingsOpen(false);
         return;
       }
@@ -1038,7 +1188,39 @@ export default function App({
   };
 
   const handleToggleAbLoop = () => {
-    updateAbLoop({ ...abLoop, enabled: !abLoop.enabled });
+    if (abLoop.enabled) {
+      updateAbLoop({ ...abLoop, enabled: false });
+      setAbPickStep("idle");
+      setAbPickStartMeasure(null);
+      return;
+    }
+    if (abPickStep !== "idle") {
+      setAbPickStep("idle");
+      setAbPickStartMeasure(null);
+      return;
+    }
+    setPopoverOpen(false);
+    setAbPickStartMeasure(null);
+    setAbPickStep("start");
+  };
+
+  const handlePickAbMeasure = (measureIndex: number) => {
+    if (abPickStep === "start") {
+      setAbPickStartMeasure(measureIndex);
+      setAbPickStep("end");
+      return;
+    }
+    if (abPickStep === "end") {
+      const start = abPickStartMeasure ?? abLoop.startMeasureIndex;
+      updateAbLoop({
+        ...abLoop,
+        startMeasureIndex: start,
+        endMeasureIndex: measureIndex,
+        enabled: true,
+      });
+      setAbPickStep("idle");
+      setAbPickStartMeasure(null);
+    }
   };
 
   const handleChangeAbLoopBounds = (bounds: AbLoopBounds) => {
@@ -1046,6 +1228,8 @@ export default function App({
   };
 
   const handleClearAbLoop = () => {
+    setAbPickStep("idle");
+    setAbPickStartMeasure(null);
     updateAbLoop({
       ...createDefaultAbLoopBounds(measureCount),
       loopGap: abLoop.loopGap,
@@ -1348,12 +1532,51 @@ export default function App({
               </div>
             )}
 
+            {visibleRepairSuggestions.length > 0 && (
+              <div className="relative">
+                <button
+                  type="button"
+                  data-testid="score-repair-toggle-btn"
+                  onClick={() => {
+                    setRepairPanelOpen((v) => !v);
+                    setDiffDropdownOpen(false);
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${
+                    hasHighRiskRepair
+                      ? "border-red-300 bg-red-50 text-red-700 hover:bg-red-100"
+                      : "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      hasHighRiskRepair ? "bg-red-500" : "bg-amber-500"
+                    }`}
+                  />
+                  乐谱修复建议 {visibleRepairSuggestions.length}
+                </button>
+                {repairPanelOpen && (
+                  <ScoreRepairPanel
+                    suggestions={visibleRepairSuggestions}
+                    isApplying={isApplyingRepair}
+                    onLocateSuggestion={handleLocateRepairSuggestion}
+                    onApplyOption={(s, opt) => void handleApplyRepairOption(s, opt)}
+                    onApplyAll={(items) => void handleApplyAllRepairs(items)}
+                    onDismissSuggestion={handleDismissRepair}
+                    onClose={() => setRepairPanelOpen(false)}
+                  />
+                )}
+              </div>
+            )}
+
             {lastDiff.length > 0 && (
               <div className="relative">
                 <button
                   type="button"
                   data-testid="diff-summary-pill"
-                  onClick={() => setDiffDropdownOpen((v) => !v)}
+                  onClick={() => {
+                    setDiffDropdownOpen((v) => !v);
+                    setRepairPanelOpen(false);
+                  }}
                   className="inline-flex items-center gap-1 rounded-full border border-violet-300 bg-violet-50 px-2.5 py-0.5 text-[11px] font-semibold text-violet-800 hover:bg-violet-100"
                 >
                   <span className="h-2 w-2 rounded-full bg-violet-600" />
@@ -1432,9 +1655,20 @@ export default function App({
             cursorTarget={cursorTarget}
             playbackFrame={playbackFrame}
             layoutMode={layoutMode}
+            abLoopRange={
+              abLoop.enabled
+                ? {
+                    startMeasureIndex: abLoop.startMeasureIndex,
+                    endMeasureIndex: abLoop.endMeasureIndex,
+                  }
+                : null
+            }
+            abPickStep={abPickStep}
             onLayoutModeChange={setLayoutMode}
             onSelectMeasure={handleSelectMeasure}
             onSelectNote={handleSelectNote}
+            onPickAbMeasure={handlePickAbMeasure}
+            onMeasureGeometryChange={setMeasureGeometry}
             rendererFactory={scoreRendererFactory}
           />
 
@@ -1468,6 +1702,9 @@ export default function App({
         pianoTimbre={pianoTimbre}
         measureCount={measureCount}
         measureTimelines={scoreDoc?.measureTimelines ?? []}
+        measureRisks={measureRisks}
+        measureGeometry={measureGeometry}
+        layoutMode={layoutMode}
         activeMeasureIndex={cursorTarget?.measureIndex ?? selectedMeasureIndex}
         midiStatusLabel={formatMidiStatusLabel(midiState)}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -1476,6 +1713,8 @@ export default function App({
         activeMetronomeBeat={activeMetronomeBeat}
         waitingModeEnabled={waitingModeEnabled}
         abLoop={abLoop}
+        abPickStep={abPickStep}
+        abPickStartMeasure={abPickStartMeasure}
         onPlay={handlePlay}
         onPlayFromSlice={handlePlayFromSlice}
         onPause={handlePause}
@@ -1486,6 +1725,7 @@ export default function App({
         onToggleMetronome={handleToggleMetronome}
         onToggleWaitingMode={handleToggleWaitingMode}
         onToggleAbLoop={handleToggleAbLoop}
+        onPickAbMeasure={handlePickAbMeasure}
         onChangeAbLoopBounds={handleChangeAbLoopBounds}
         onClearAbLoop={handleClearAbLoop}
       />

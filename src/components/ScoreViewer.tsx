@@ -33,6 +33,13 @@ export interface OsmdNoteHit {
   isTieContinuation?: boolean;
 }
 
+export interface AbLoopHighlightRange {
+  startMeasureIndex: number;
+  endMeasureIndex: number;
+}
+
+export type AbPickStep = "idle" | "start" | "end";
+
 export interface ScoreRendererHandle {
   render(
     xmlString: string,
@@ -43,10 +50,12 @@ export interface ScoreRendererHandle {
   }>;
   setNoteEvents?(noteEvents: NoteEvent[]): void;
   highlightMeasure(measureIndex: number | null): void;
+  highlightAbLoop?(range: AbLoopHighlightRange | null): void;
   markAnchoredNotes(anchors: AnchorMarkerInfo[]): void;
   markDiffNotes?(diffs: NoteDiffEntry[]): void;
   highlightSelectedNote?(note: NoteEvent | null): void;
   hitTestNoteAtClientPoint?(clientX: number, clientY: number): OsmdNoteHit | null;
+  hitTestMeasureAtClientPoint?(clientX: number, clientY: number): number | null;
   getCursorOffsetX?(): number | null;
   getSelectedNoteRect?(): PopoverAnchorRect | null;
   scrollToMeasure(measureIndex: number, scrollContainer: HTMLElement | null): void;
@@ -507,6 +516,38 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       }
     },
 
+    highlightAbLoop(range: AbLoopHighlightRange | null) {
+      clearElementsByAttr("data-studio-ab-loop", "data-ab-loop-measure");
+      if (!range) return;
+      const start = Math.max(0, Math.min(range.startMeasureIndex, range.endMeasureIndex));
+      const end = Math.max(start, Math.max(range.startMeasureIndex, range.endMeasureIndex));
+      for (let m = start; m <= end; m++) {
+        const els = getMeasureSvgElements(m);
+        for (const g of els) {
+          g.setAttribute("data-ab-loop-measure", "true");
+          if (typeof g.getBBox === "function") {
+            try {
+              const box = g.getBBox();
+              const svgNs = "http://www.w3.org/2000/svg";
+              const rect = container.ownerDocument.createElementNS(svgNs, "rect");
+              rect.setAttribute("data-studio-ab-loop", "true");
+              rect.setAttribute("x", String(box.x - 2));
+              rect.setAttribute("y", String(box.y - 4));
+              rect.setAttribute("width", String(Math.max(10, box.width + 4)));
+              rect.setAttribute("height", String(Math.max(20, box.height + 8)));
+              rect.setAttribute("rx", "4");
+              rect.setAttribute("fill", "rgba(79, 70, 229, 0.10)");
+              rect.setAttribute("stroke", "rgba(79, 70, 229, 0.45)");
+              rect.setAttribute("stroke-width", "1.2");
+              g.insertBefore(rect, g.firstChild);
+            } catch {
+              // SVG getBBox unavailable in non-layout environments
+            }
+          }
+        }
+      }
+    },
+
     markAnchoredNotes(anchors: AnchorMarkerInfo[]) {
       clearElementsByAttr("data-studio-anchor-marker", "data-anchor-note");
       iterateMeasureGraphicalNotes(anchors, false, (matched, noteSvg) => {
@@ -612,6 +653,31 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       } catch {
         return null;
       }
+    },
+
+    hitTestMeasureAtClientPoint(clientX: number, clientY: number): number | null {
+      const noteHit = this.hitTestNoteAtClientPoint?.(clientX, clientY);
+      if (noteHit) return noteHit.measureIndex;
+
+      const measureList = osmd.GraphicSheet?.MeasureList;
+      if (!measureList || measureList.length === 0) return null;
+      for (let m = 0; m < measureList.length; m++) {
+        const els = getMeasureSvgElements(m);
+        for (const el of els) {
+          const rect = el.getBoundingClientRect();
+          if (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            clientX >= rect.left - 4 &&
+            clientX <= rect.right + 4 &&
+            clientY >= rect.top - 8 &&
+            clientY <= rect.bottom + 8
+          ) {
+            return m;
+          }
+        }
+      }
+      return null;
     },
 
     scrollToMeasure(measureIndex: number, scrollContainer: HTMLElement | null) {
@@ -728,6 +794,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       osmd.cursor?.hide();
       lastCursorKey = null;
       clearElementsByAttr("data-studio-highlight", "data-active-measure");
+      clearElementsByAttr("data-studio-ab-loop", "data-ab-loop-measure");
       clearElementsByAttr("data-studio-anchor-marker", "data-anchor-note");
       clearElementsByAttr("data-studio-diff-marker", "data-diff-note");
       clearElementsByAttr("data-studio-selected-note", "data-selected-note");
@@ -749,9 +816,13 @@ export interface ScoreViewerProps {
   cursorTarget?: CursorSyncTarget | null;
   playbackFrame?: PlaybackFrame | null;
   layoutMode?: ScoreLayoutMode;
+  abLoopRange?: AbLoopHighlightRange | null;
+  abPickStep?: AbPickStep;
   onLayoutModeChange?: (mode: ScoreLayoutMode) => void;
   onSelectMeasure?: (measureIndex: number) => void;
   onSelectNote?: (noteUid: string, anchorRect?: PopoverAnchorRect) => void;
+  onPickAbMeasure?: (measureIndex: number) => void;
+  onMeasureGeometryChange?: (geometry: MeasureGeometry[]) => void;
   rendererFactory?: ScoreRendererFactory;
 }
 
@@ -772,9 +843,13 @@ export function ScoreViewer({
   cursorTarget = null,
   playbackFrame = null,
   layoutMode = "page",
+  abLoopRange = null,
+  abPickStep = "idle",
   onLayoutModeChange,
   onSelectMeasure,
   onSelectNote,
+  onPickAbMeasure,
+  onMeasureGeometryChange,
   rendererFactory = createOsmdScoreRenderer,
 }: ScoreViewerProps) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -821,6 +896,7 @@ export function ScoreViewer({
       rendererRef.current = null;
       if (container) container.innerHTML = "";
       setMeasureGeometry([]);
+      onMeasureGeometryChange?.([]);
       setIsRendered(false);
       lastScrolledMeasureRef.current = null;
       return;
@@ -841,6 +917,7 @@ export function ScoreViewer({
         });
         if (!cancelled) {
           setMeasureGeometry(info.measureGeometry);
+          onMeasureGeometryChange?.(info.measureGeometry);
           setIsRendered(true);
         }
       } catch (err) {
@@ -899,7 +976,23 @@ export function ScoreViewer({
     }
   }, [isRendered, selectedMeasureIndex, playbackFrame?.state]);
 
+  useEffect(() => {
+    if (!isRendered || !rendererRef.current) return;
+    rendererRef.current.highlightAbLoop?.(abLoopRange ?? null);
+  }, [isRendered, abLoopRange]);
+
   const handleSurfaceClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (abPickStep !== "idle" && onPickAbMeasure) {
+      const pickedMeasure =
+        rendererRef.current?.hitTestMeasureAtClientPoint?.(event.clientX, event.clientY) ??
+        rendererRef.current?.hitTestNoteAtClientPoint?.(event.clientX, event.clientY)?.measureIndex ??
+        null;
+      if (pickedMeasure !== null) {
+        onPickAbMeasure(pickedMeasure);
+      }
+      return;
+    }
+
     if (!onSelectNote || !rendererRef.current?.hitTestNoteAtClientPoint) return;
     const hit = rendererRef.current.hitTestNoteAtClientPoint(event.clientX, event.clientY);
     if (!hit) return;

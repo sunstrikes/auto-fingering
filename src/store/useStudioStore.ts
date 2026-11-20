@@ -28,11 +28,23 @@ export interface NoteDiffEntry {
 }
 
 export interface StudioSnapshot {
+  rawXmlText?: string;
+  scoreDoc?: ScoreDocument;
   anchors: Record<string, AnchorOverride>;
   removedRawAnchorUids: string[];
   solveResult: SolveResult;
   fingerByNoteUid: Record<string, Finger>;
   lastDiff: NoteDiffEntry[];
+}
+
+export interface ApplyScoreRepairPayload {
+  rawXmlText: string;
+  scoreDoc: ScoreDocument;
+  solveResult: SolveResult;
+  anchors?: Record<string, AnchorOverride>;
+  removedRawAnchorUids?: string[];
+  repairSummary?: string;
+  xmlDeps?: XmlDomDeps;
 }
 
 export interface SetSolvedScorePayload {
@@ -94,6 +106,7 @@ export interface StudioState {
   selectMeasure: (measureIndex: number, fallbackSliceId?: string | null) => void;
   selectWarning: (cue: TransitionCue) => void;
   commitAnchorResolution: (payload: CommitAnchorResolutionPayload) => void;
+  applyScoreRepair: (payload: ApplyScoreRepairPayload) => void;
   undo: (xmlDeps?: XmlDomDeps) => void;
   redo: (xmlDeps?: XmlDomDeps) => void;
   reset: () => void;
@@ -174,9 +187,15 @@ function syncXmlOutput(
   return serializeScoreDocument(scoreDoc, xmlDeps);
 }
 
-function createSnapshot(state: StudioState): StudioSnapshot | null {
+function createSnapshot(state: StudioState, includeScore = false): StudioSnapshot | null {
   if (!state.solveResult) return null;
   return {
+    ...(includeScore
+      ? {
+          rawXmlText: state.rawXmlText ?? undefined,
+          scoreDoc: state.scoreDoc ?? undefined,
+        }
+      : {}),
     anchors: { ...state.anchors },
     removedRawAnchorUids: [...state.removedRawAnchorUids],
     solveResult: state.solveResult,
@@ -418,16 +437,90 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
     });
   },
 
+  applyScoreRepair: ({
+    rawXmlText,
+    scoreDoc,
+    solveResult,
+    anchors,
+    removedRawAnchorUids,
+    repairSummary,
+    xmlDeps,
+  }) => {
+    const state = get();
+    if (!state.scoreDoc || !state.solveResult) return;
+
+    const snapshot = createSnapshot(state, true);
+    const sourceAnchors = anchors ?? state.anchors;
+    const nextAnchors: Record<string, AnchorOverride> = {};
+    for (const [uid, ov] of Object.entries(sourceAnchors)) {
+      if (scoreDoc.noteElementsByUid.has(uid)) {
+        nextAnchors[uid] = ov;
+      }
+    }
+    const nextRemoved = (removedRawAnchorUids ?? state.removedRawAnchorUids).filter((uid) =>
+      scoreDoc.noteElementsByUid.has(uid)
+    );
+
+    const exportedXml = syncXmlOutput(
+      scoreDoc,
+      solveResult.fingerByNoteUid,
+      nextAnchors,
+      nextRemoved,
+      state.ignoreExistingFingerings,
+      xmlDeps
+    );
+
+    const fallbackSlice =
+      (state.selectedMeasureIndex !== null
+        ? scoreDoc.onsetSlices.find((s) => s.measureIndex === state.selectedMeasureIndex)
+        : undefined) ??
+      scoreDoc.onsetSlices[0] ??
+      null;
+    const preservedNote =
+      state.selectedNoteUid !== null
+        ? scoreDoc.noteEvents.find((n) => n.noteUid === state.selectedNoteUid)
+        : undefined;
+    const nextNote = preservedNote ?? fallbackSlice?.notes[0] ?? null;
+
+    set({
+      rawXmlText,
+      scoreDoc,
+      scoreTitle: scoreDoc.title,
+      isSingleStaff: scoreDoc.isSingleStaff,
+      singleStaffHand: scoreDoc.defaultSingleStaffHand,
+      solveResult,
+      fingerByNoteUid: { ...solveResult.fingerByNoteUid },
+      anchors: nextAnchors,
+      removedRawAnchorUids: nextRemoved,
+      lastDiff: [],
+      history: {
+        past: snapshot ? [...state.history.past, snapshot] : state.history.past,
+        future: [],
+      },
+      selectedSliceId: fallbackSlice?.sliceId ?? null,
+      selectedMeasureIndex: fallbackSlice?.measureIndex ?? null,
+      selectedNoteUid: nextNote?.noteUid ?? null,
+      renderedXml: exportedXml,
+      status: repairSummary
+        ? `已应用乐谱修复（${repairSummary}）并重算指法（耗时 ${solveResult.solveTimeMs.toFixed(1)} ms）`
+        : `已应用乐谱修复并重算指法（耗时 ${solveResult.solveTimeMs.toFixed(1)} ms）`,
+      errorMsg: null,
+    });
+  },
+
   undo: (xmlDeps) => {
     const state = get();
     const { scoreDoc, history } = state;
     if (!scoreDoc || history.past.length === 0) return;
 
     const previous = history.past[history.past.length - 1];
-    const currentSnapshot = createSnapshot(state);
+    const includesScore = previous.scoreDoc !== undefined || previous.rawXmlText !== undefined;
+    const currentSnapshot = createSnapshot(state, includesScore);
+    const targetScoreDoc = previous.scoreDoc ?? scoreDoc;
+    const targetRawXml = previous.rawXmlText ?? state.rawXmlText;
 
     const exportedXml = syncXmlOutput(
-      scoreDoc,
+      targetScoreDoc,
       previous.fingerByNoteUid,
       previous.anchors,
       previous.removedRawAnchorUids,
@@ -435,7 +528,30 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
       xmlDeps
     );
 
+    const nextSelection = includesScore
+      ? (() => {
+          const fallbackSlice =
+            (state.selectedMeasureIndex !== null
+              ? targetScoreDoc.onsetSlices.find(
+                  (s) => s.measureIndex === state.selectedMeasureIndex
+                )
+              : undefined) ??
+            targetScoreDoc.onsetSlices[0] ??
+            null;
+          return {
+            selectedSliceId: fallbackSlice?.sliceId ?? null,
+            selectedMeasureIndex: fallbackSlice?.measureIndex ?? null,
+            selectedNoteUid: fallbackSlice?.notes[0]?.noteUid ?? null,
+          };
+        })()
+      : {};
+
     set({
+      scoreDoc: targetScoreDoc,
+      rawXmlText: targetRawXml,
+      scoreTitle: targetScoreDoc.title,
+      isSingleStaff: targetScoreDoc.isSingleStaff,
+      singleStaffHand: targetScoreDoc.defaultSingleStaffHand,
       anchors: { ...previous.anchors },
       removedRawAnchorUids: [...previous.removedRawAnchorUids],
       solveResult: previous.solveResult,
@@ -445,8 +561,9 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
         past: history.past.slice(0, -1),
         future: currentSnapshot ? [currentSnapshot, ...history.future] : history.future,
       },
+      ...nextSelection,
       renderedXml: exportedXml,
-      status: "已撤销上一次指法修改",
+      status: includesScore ? "已撤销乐谱修复" : "已撤销上一次指法修改",
     });
   },
 
@@ -456,10 +573,13 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
     if (!scoreDoc || history.future.length === 0) return;
 
     const next = history.future[0];
-    const currentSnapshot = createSnapshot(state);
+    const includesScore = next.scoreDoc !== undefined || next.rawXmlText !== undefined;
+    const currentSnapshot = createSnapshot(state, includesScore);
+    const targetScoreDoc = next.scoreDoc ?? scoreDoc;
+    const targetRawXml = next.rawXmlText ?? state.rawXmlText;
 
     const exportedXml = syncXmlOutput(
-      scoreDoc,
+      targetScoreDoc,
       next.fingerByNoteUid,
       next.anchors,
       next.removedRawAnchorUids,
@@ -467,7 +587,30 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
       xmlDeps
     );
 
+    const nextSelection = includesScore
+      ? (() => {
+          const fallbackSlice =
+            (state.selectedMeasureIndex !== null
+              ? targetScoreDoc.onsetSlices.find(
+                  (s) => s.measureIndex === state.selectedMeasureIndex
+                )
+              : undefined) ??
+            targetScoreDoc.onsetSlices[0] ??
+            null;
+          return {
+            selectedSliceId: fallbackSlice?.sliceId ?? null,
+            selectedMeasureIndex: fallbackSlice?.measureIndex ?? null,
+            selectedNoteUid: fallbackSlice?.notes[0]?.noteUid ?? null,
+          };
+        })()
+      : {};
+
     set({
+      scoreDoc: targetScoreDoc,
+      rawXmlText: targetRawXml,
+      scoreTitle: targetScoreDoc.title,
+      isSingleStaff: targetScoreDoc.isSingleStaff,
+      singleStaffHand: targetScoreDoc.defaultSingleStaffHand,
       anchors: { ...next.anchors },
       removedRawAnchorUids: [...next.removedRawAnchorUids],
       solveResult: next.solveResult,
@@ -477,8 +620,9 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
         past: currentSnapshot ? [...history.past, currentSnapshot] : history.past,
         future: history.future.slice(1),
       },
+      ...nextSelection,
       renderedXml: exportedXml,
-      status: "已重做指法修改",
+      status: includesScore ? "已重做乐谱修复" : "已重做指法修改",
     });
   },
 
