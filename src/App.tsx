@@ -204,6 +204,21 @@ export default function App({
   const status = useStudioStore((s) => s.status);
   const errorMsg = useStudioStore((s) => s.errorMsg);
 
+  const [library, setLibrary] = useState<string[]>([]);
+  const refreshLibrary = async () => {
+    try {
+      const res = await fetch("/api/scores");
+      if (!res.ok) return;
+      const items = (await res.json()) as { name: string }[];
+      setLibrary(items.map((i) => i.name));
+    } catch {
+      /* library API unavailable (e.g. static hosting/tests) */
+    }
+  };
+  useEffect(() => {
+    void refreshLibrary();
+  }, []);
+
   useEffect(() => {
     const client = solverClientFactory();
     solverClientRef.current = client;
@@ -400,9 +415,31 @@ export default function App({
     }
   };
 
+  const handleLibrarySelect = async (name: string) => {
+    if (!name) return;
+    try {
+      const res = await fetch(`/api/scores/${encodeURIComponent(name)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const file = new File([await res.arrayBuffer()], name);
+      await loadFile(file, false);
+    } catch (err) {
+      useStudioStore.getState().clearScoreErrorState(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file || !solverClientRef.current) return;
+    event.target.value = "";
+    if (file) await loadFile(file, true);
+  };
+
+  const loadFile = async (file: File, saveToLibrary: boolean) => {
+    if (!solverClientRef.current) return;
+    if (saveToLibrary) {
+      void fetch(`/api/scores/${encodeURIComponent(file.name)}`, { method: "PUT", body: file })
+        .then(() => refreshLibrary())
+        .catch(() => undefined);
+    }
 
     playbackEngineRef.current?.stop();
     const store = useStudioStore.getState();
@@ -1326,6 +1363,22 @@ export default function App({
                 onChange={handleFileChange}
               />
             </label>
+
+            {library.length > 0 && (
+              <select
+                aria-label="已上传乐谱"
+                className="max-w-[10rem] shrink-0 rounded-lg border border-slate-300 bg-white px-1.5 py-1 text-xs"
+                value=""
+                onChange={(e) => void handleLibrarySelect(e.target.value)}
+              >
+                <option value="">已上传乐谱…</option>
+                {library.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            )}
 
             <div
               data-testid="practice-mode-selector"

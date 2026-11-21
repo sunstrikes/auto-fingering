@@ -505,12 +505,19 @@ function enforceAnatomicalFingerOrder(
   }
 
   // Ensure fingers before the first pinned finger stay ordered with physical width clearance
+  // and never detach unreasonably far from their neighbor.
   const firstP = orderedPinned[0];
   for (let f = firstP - 1; f >= startFinger; f--) {
-    const minGap = minIdleFingerClearanceUnits(f as 1 | 2 | 3 | 4, handScale);
+    const adj = f as 1 | 2 | 3 | 4;
+    const minGap = minIdleFingerClearanceUnits(adj, handScale);
+    const rel =
+      (RELAXED_OFFSET_FROM_3[(f + 1) as Finger] - RELAXED_OFFSET_FROM_3[f as Finger]) *
+      handScale;
+    const maxGap = Math.max(minGap, (f === 1 ? 2.4 : MAX_IDLE_ADJ_GAP[adj]) * handScale);
     if (u[f] > u[f + 1] - minGap) {
-      const rel = (RELAXED_OFFSET_FROM_3[(f + 1) as Finger] - RELAXED_OFFSET_FROM_3[f as Finger]) * handScale;
       u[f] = u[f + 1] - Math.max(minGap, rel);
+    } else if (u[f] < u[f + 1] - maxGap) {
+      u[f] = u[f + 1] - Math.min(maxGap, Math.max(minGap, rel * 1.2));
     }
   }
 
@@ -561,12 +568,19 @@ function enforceAnatomicalFingerOrder(
   }
 
   // Ensure fingers after the last pinned finger stay ordered with physical width clearance
+  // and never detach unreasonably far from their neighbor.
   const lastP = orderedPinned[orderedPinned.length - 1];
   for (let f = lastP + 1; f <= 5; f++) {
-    const minGap = minIdleFingerClearanceUnits((f - 1) as 1 | 2 | 3 | 4, handScale);
+    const adj = (f - 1) as 1 | 2 | 3 | 4;
+    const minGap = minIdleFingerClearanceUnits(adj, handScale);
+    const rel =
+      (RELAXED_OFFSET_FROM_3[f as Finger] - RELAXED_OFFSET_FROM_3[adj as Finger]) *
+      handScale;
+    const maxGap = Math.max(minGap, (adj === 1 ? 2.4 : MAX_IDLE_ADJ_GAP[adj]) * handScale);
     if (u[f] < u[f - 1] + minGap) {
-      const rel = (RELAXED_OFFSET_FROM_3[f as Finger] - RELAXED_OFFSET_FROM_3[(f - 1) as Finger]) * handScale;
       u[f] = u[f - 1] + Math.max(minGap, rel);
+    } else if (u[f] > u[f - 1] + maxGap) {
+      u[f] = u[f - 1] + Math.min(maxGap, Math.max(minGap, rel * 1.2));
     }
   }
 
@@ -650,6 +664,56 @@ function computeBaseSlotsForSlice(
   enforceAnatomicalFingerOrder(slots as Record<Finger, number>, pinnedSet, dir, false, handScale);
 
   return slots as Record<Finger, number>;
+}
+
+function computePalmCenterFromSlots(
+  slots: Record<Finger, number>,
+  dir: 1 | -1,
+  handScale: number
+): number {
+  let weightedCenterU = 0;
+  for (const f of FINGERS) {
+    weightedCenterU += slots[f] * dir - RELAXED_OFFSET_FROM_3[f] * handScale;
+  }
+  return clamp((weightedCenterU / FINGERS.length) * dir, 0.8, PIANO_WHITE_KEY_COUNT - 0.8);
+}
+
+function areActiveFingersWithinReach(
+  activeEntries: ReadonlyArray<{
+    finger: Finger;
+    midi: number;
+    pressDepth: number;
+  }>,
+  palmCenterXUnit: number,
+  palmAngleDeg: number,
+  palmLiftY: number,
+  abductRatio: number,
+  handScale: number,
+  dir: 1 | -1,
+  spanPreset: SpanPreset,
+  reachFraction: number
+): boolean {
+  const angleRad = (palmAngleDeg * Math.PI) / 180;
+  const cosA = Math.cos(angleRad);
+  const sinA = Math.sin(angleRad);
+  const clampedLift = clamp(palmLiftY, -56, getMaxRestLiftY(handScale));
+  const knuckleY = getKnuckleBaseY(handScale, clampedLift);
+
+  for (const entry of activeEntries) {
+    const f = entry.finger;
+    const reach = getFingerReachPx(f, spanPreset) * reachFraction;
+    const keyX = midiToWhiteUnitX(entry.midi) * PIANO_WHITE_KEY_W;
+    const originLocal = getFingerOriginLocalPx(f, abductRatio, handScale, dir);
+    const originX = palmCenterXUnit * PIANO_WHITE_KEY_W + originLocal.x * cosA - originLocal.y * sinA;
+    const originY = knuckleY + originLocal.x * sinA + originLocal.y * cosA;
+    const targetY = isBlackKey(entry.midi)
+      ? BLACK_TIP_Y[f] + entry.pressDepth * 2
+      : WHITE_TIP_Y[f] + clampedLift * 0.45 + entry.pressDepth * 2.5;
+    if (Math.hypot(keyX - originX, targetY - originY) > reach) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function computePressDepth(scoreSec: number, onsetSec: number, endSec: number): number {
@@ -891,11 +955,12 @@ function projectSingleHandPosture(
 
   // Compute anticipatory shift blend before next slice (last ~150ms)
   let shiftBlend = 0;
+  let shiftWindow = MIN_SHIFT_WINDOW_SEC;
   if (nextSlice) {
     const dtToNext = nextSlice.onsetSec - scoreSec;
     const prevOnset = currSlice ? currSlice.onsetSec : 0;
     const spanSec = Math.max(0.05, nextSlice.onsetSec - prevOnset);
-    const shiftWindow = clamp(spanSec * 0.45, MIN_SHIFT_WINDOW_SEC, MAX_SHIFT_WINDOW_SEC);
+    shiftWindow = clamp(spanSec * 0.45, MIN_SHIFT_WINDOW_SEC, MAX_SHIFT_WINDOW_SEC);
     if (dtToNext >= 0 && dtToNext <= shiftWindow) {
       shiftBlend = smoothstep(1 - dtToNext / shiftWindow);
     }
@@ -927,58 +992,254 @@ function projectSingleHandPosture(
     crossingStyle = "cross-over";
   }
 
-  const fingers = {} as Record<Finger, FingerPosture>;
+  const toPalmXUnit = (palmXMm: number): number => {
+    const palmHandFramePos = palmXMm / REAL_WHITE_KEY_WIDTH_MM;
+    const palmKeyPos = hand === "RH" ? palmHandFramePos : 2 * D4_KEY_POS - palmHandFramePos;
+    return clamp(palmKeyPos - A0_WHITE_INDEX, 0.8, PIANO_WHITE_KEY_COUNT - 0.8);
+  };
 
-  for (const f of FINGERS) {
-    const sounding = activeByFinger.get(f);
-    let xUnit: number;
-    let isBlack = false;
-    let pressDepth = 0;
-    let isHeld = false;
-    let isStruck = false;
-    let targetMidi: number | null = null;
-    let noteUid: string | undefined;
-    let isAnchor = false;
-    let isRepairedAnchor = false;
+  const restLiftY = Math.min(10 * handScale, getMaxRestLiftY(handScale));
 
-    if (sounding) {
-      targetMidi = sounding.w.ev.midi;
-      noteUid = sounding.w.ev.noteUid;
-      isAnchor = sounding.w.ev.anchorFinger !== undefined;
-      isRepairedAnchor = repairedSet.has(noteUid);
-      isBlack = isBlackKey(targetMidi);
-      pressDepth = sounding.pressDepth;
-      isHeld = sounding.isHeld;
-      isStruck = sounding.isStruck;
-      xUnit = midiToWhiteUnitX(targetMidi);
-    } else {
-      xUnit = lerp(currSlots[f], nextSlots[f], shiftBlend);
+  const nextContacts: KinematicContact[] = [];
+  if (nextSlice) {
+    for (const n of nextSlice.notes) {
+      const f = solveResult.fingerByNoteUid[n.noteUid];
+      if (f) {
+        nextContacts.push({
+          finger: f,
+          handFramePos: toHandFramePos(n.midi, hand),
+          isBlack: isBlackKey(n.midi),
+          isHeld: false,
+        });
+      }
     }
+  }
+  const nextEval =
+    nextContacts.length > 0
+      ? evaluateHandKinematics2D(nextContacts, handScale, DEFAULT_COST_WEIGHTS.horizontal.crossMax)
+      : null;
+  const nextPalmXUnit = nextEval
+    ? toPalmXUnit(nextEval.pose.palmXMm)
+    : computePalmCenterFromSlots(nextSlots, dir, handScale);
+  const nextPalmAngleDeg = nextEval ? dir * nextEval.pose.palmAngleDeg : 0;
+  const nextPalmLiftY = nextEval
+    ? nextEval.pose.palmYMm * PIANO_MM_TO_PX + (1 - handScale) * 10
+    : restLiftY;
 
-    let layerOffset: -1 | 0 | 1 = 0;
-    if (crossingStyle === "thumb-under" && f === 1) {
-      layerOffset = -1;
-    } else if (crossingStyle === "cross-over" && (f === 2 || f === 3 || f === 4)) {
-      layerOffset = 1;
+  const evalActiveKinematics = () => {
+    const contacts: KinematicContact[] = [];
+    for (const [f, sounding] of activeByFinger.entries()) {
+      contacts.push({
+        finger: f,
+        handFramePos: toHandFramePos(sounding.w.ev.midi, hand),
+        isBlack: isBlackKey(sounding.w.ev.midi),
+        isHeld: sounding.isHeld,
+      });
     }
+    return evaluateHandKinematics2D(
+      contacts,
+      handScale,
+      DEFAULT_COST_WEIGHTS.horizontal.crossMax
+    );
+  };
 
-    fingers[f] = {
-      finger: f,
-      xUnit: clamp(xUnit, 0.35, PIANO_WHITE_KEY_COUNT - 0.35),
-      isBlack,
-      pressDepth,
-      isHeld,
-      isStruck,
-      targetMidi,
-      noteUid,
-      isAnchor,
-      isRepairedAnchor,
-      layerOffset,
-    };
+  let kinEval = activeByFinger.size > 0 ? evalActiveKinematics() : null;
+  let currPalmXUnit = kinEval
+    ? toPalmXUnit(kinEval.pose.palmXMm)
+    : computePalmCenterFromSlots(currSlots, dir, handScale);
+  let currPalmAngleDeg = kinEval ? dir * kinEval.pose.palmAngleDeg : 0;
+  let currPalmLiftY = kinEval
+    ? kinEval.pose.palmYMm * PIANO_MM_TO_PX + (1 - handScale) * 10
+    : restLiftY;
+
+  const deltaPalmUnits = nextSlice ? Math.abs(nextPalmXUnit - currPalmXUnit) : 0;
+  let isSameFingerJump = false;
+  if (nextSlice && activeByFinger.size > 0) {
+    for (const n of nextSlice.notes) {
+      const f = solveResult.fingerByNoteUid[n.noteUid];
+      const active = f ? activeByFinger.get(f) : undefined;
+      if (
+        active &&
+        Math.abs(midiToWhiteUnitX(n.midi) - midiToWhiteUnitX(active.w.ev.midi)) > 1.2 * handScale
+      ) {
+        isSameFingerJump = true;
+        break;
+      }
+    }
+  }
+  const hasNextCrossing = cuesNext.some(
+    (c) => c.cue.type === "thumb-under" || c.cue.type === "cross-over"
+  );
+  const isWholeHandShift =
+    nextSlice !== null &&
+    ((hasNextCrossing ? deltaPalmUnits > 3.2 * handScale : deltaPalmUnits > 1.5 * handScale) ||
+      isSameFingerJump);
+
+  // Release non-continuing keys once a whole-hand shift begins so the hand translates cleanly
+  // in normal anatomical shape instead of pinning one finger while flying others across keys.
+  if (isWholeHandShift && shiftBlend > 0 && activeByFinger.size > 0) {
+    let releasedAny = false;
+    for (const [f, sounding] of Array.from(activeByFinger.entries())) {
+      const isContinuingPastNext = sounding.w.endSec > nextSlice!.onsetSec + 1e-4;
+      if (isContinuingPastNext) continue;
+      if (shiftBlend > 0.08) {
+        activeByFinger.delete(f);
+        releasedAny = true;
+      } else {
+        sounding.pressDepth *= clamp(1 - shiftBlend / 0.08, 0, 1);
+      }
+    }
+    if (releasedAny) {
+      kinEval = activeByFinger.size > 0 ? evalActiveKinematics() : null;
+      if (kinEval) {
+        currPalmXUnit = toPalmXUnit(kinEval.pose.palmXMm);
+        currPalmAngleDeg = dir * kinEval.pose.palmAngleDeg;
+        currPalmLiftY = kinEval.pose.palmYMm * PIANO_MM_TO_PX + (1 - handScale) * 10;
+      }
+    }
   }
 
-  // Enforce anatomical ordering across all fingers (accounting for both struck & held active fingers)
-  if (activeByFinger.size > 0) {
+  // During a whole-hand jump without a crossing target, keep fingers uncrossed mid-flight
+  if (isWholeHandShift && shiftBlend > 0.08 && !hasNextCrossing) {
+    crossingStyle = "none";
+  }
+
+  const isBeforeStart = currIdx === -1 && shiftBlend === 0;
+  const isLongRest =
+    activeByFinger.size === 0 &&
+    (currSlice === null || scoreSec - latestWindowEnd > REST_GAP_SEC) &&
+    shiftBlend === 0;
+  const isResting = isBeforeStart || isLongRest;
+
+  let palmCenterXUnit: number;
+  let palmAngleDeg = 0;
+  let palmLiftY = 0;
+  const fingers = {} as Record<Finger, FingerPosture>;
+
+  if (activeByFinger.size > 0 && kinEval) {
+    palmCenterXUnit = currPalmXUnit;
+    palmAngleDeg = currPalmAngleDeg;
+    palmLiftY = currPalmLiftY;
+
+    let palmShiftFraction = 0;
+    if (nextSlice && shiftBlend > 0 && nextEval && (!isWholeHandShift || shiftBlend > 0.08)) {
+      const maxBlend = shiftBlend * 0.45;
+      const activeEntries = Array.from(activeByFinger.entries()).map(([f, s]) => ({
+        finger: f,
+        midi: s.w.ev.midi,
+        pressDepth: s.pressDepth,
+      }));
+      const activeSpanPx =
+        Math.abs(currSlots[5] - currSlots[1]) * PIANO_WHITE_KEY_W;
+      const activeAbduct = getAbductRatio(activeSpanPx, handScale);
+
+      // Binary-search largest anticipatory palm blend that keeps held/struck fingers comfortably reachable
+      let lo = 0;
+      let hi = maxBlend;
+      let bestBlend = 0;
+      if (
+        kinEval.feasible &&
+        areActiveFingersWithinReach(
+          activeEntries,
+          palmCenterXUnit,
+          palmAngleDeg,
+          palmLiftY,
+          activeAbduct,
+          handScale,
+          dir,
+          spanPreset,
+          0.92
+        )
+      ) {
+        for (let iter = 0; iter < 6; iter++) {
+          const mid = (lo + hi) * 0.5;
+          const testX = lerp(currPalmXUnit, nextPalmXUnit, mid);
+          const testAng = lerp(currPalmAngleDeg, nextPalmAngleDeg, mid);
+          const testLift = lerp(currPalmLiftY, nextPalmLiftY, mid);
+          if (
+            areActiveFingersWithinReach(
+              activeEntries,
+              testX,
+              testAng,
+              testLift,
+              activeAbduct,
+              handScale,
+              dir,
+              spanPreset,
+              0.92
+            )
+          ) {
+            bestBlend = mid;
+            lo = mid;
+          } else {
+            hi = mid;
+          }
+        }
+      }
+
+      palmCenterXUnit = lerp(currPalmXUnit, nextPalmXUnit, bestBlend);
+      palmAngleDeg = lerp(currPalmAngleDeg, nextPalmAngleDeg, bestBlend);
+      palmLiftY = lerp(currPalmLiftY, nextPalmLiftY, bestBlend);
+      if (crossingStyle === "none" && bestBlend > 0.03) {
+        palmLiftY += -Math.sin(shiftBlend * Math.PI) * 3.5;
+      }
+      const palmGap = nextPalmXUnit - currPalmXUnit;
+      palmShiftFraction =
+        Math.abs(palmGap) > 1e-4 ? clamp((palmCenterXUnit - currPalmXUnit) / palmGap, 0, 1) : 0;
+    }
+
+    for (const f of FINGERS) {
+      const sounding = activeByFinger.get(f);
+      let xUnit: number;
+      let isBlack = false;
+      let pressDepth = 0;
+      let isHeld = false;
+      let isStruck = false;
+      let targetMidi: number | null = null;
+      let noteUid: string | undefined;
+      let isAnchor = false;
+      let isRepairedAnchor = false;
+
+      if (sounding) {
+        targetMidi = sounding.w.ev.midi;
+        noteUid = sounding.w.ev.noteUid;
+        isAnchor = sounding.w.ev.anchorFinger !== undefined;
+        isRepairedAnchor = repairedSet.has(noteUid);
+        isBlack = isBlackKey(targetMidi);
+        pressDepth = sounding.pressDepth;
+        isHeld = sounding.isHeld;
+        isStruck = sounding.isStruck;
+        xUnit = midiToWhiteUnitX(targetMidi);
+      } else {
+        // Keep idle fingers anchored in the palm frame so they never detach across the keyboard
+        const currOff = currSlots[f] - currPalmXUnit;
+        const nextOff = nextSlots[f] - nextPalmXUnit;
+        xUnit = palmCenterXUnit + lerp(currOff, nextOff, palmShiftFraction);
+      }
+
+      let layerOffset: -1 | 0 | 1 = 0;
+      if (crossingStyle === "thumb-under" && f === 1) {
+        layerOffset = -1;
+      } else if (crossingStyle === "cross-over" && (f === 2 || f === 3 || f === 4)) {
+        layerOffset = 1;
+      }
+
+      fingers[f] = {
+        finger: f,
+        xUnit: clamp(xUnit, 0.35, PIANO_WHITE_KEY_COUNT - 0.35),
+        isBlack,
+        pressDepth,
+        isHeld,
+        isStruck,
+        targetMidi,
+        noteUid,
+        isAnchor,
+        isRepairedAnchor,
+        layerOffset,
+      };
+    }
+
+    // Enforce anatomical ordering & max gap across all fingers around pinned active fingers
     const orderedSlots: Record<Finger, number> = {
       1: fingers[1].xUnit,
       2: fingers[2].xUnit,
@@ -996,76 +1257,6 @@ function projectSingleHandPosture(
     for (const f of FINGERS) {
       if (!activeByFinger.has(f)) {
         fingers[f].xUnit = clamp(orderedSlots[f], 0.35, PIANO_WHITE_KEY_COUNT - 0.35);
-      }
-    }
-  }
-
-  const isBeforeStart = currIdx === -1 && shiftBlend === 0;
-  const isLongRest =
-    activeByFinger.size === 0 &&
-    (currSlice === null || scoreSec - latestWindowEnd > REST_GAP_SEC) &&
-    shiftBlend === 0;
-  const isResting = isBeforeStart || isLongRest;
-
-  const toPalmXUnit = (palmXMm: number): number => {
-    const palmHandFramePos = palmXMm / REAL_WHITE_KEY_WIDTH_MM;
-    const palmKeyPos = hand === "RH" ? palmHandFramePos : 2 * D4_KEY_POS - palmHandFramePos;
-    return clamp(palmKeyPos - A0_WHITE_INDEX, 0.8, PIANO_WHITE_KEY_COUNT - 0.8);
-  };
-
-  let palmCenterXUnit: number;
-  let palmAngleDeg = 0;
-  let palmLiftY = 0;
-
-  if (activeByFinger.size > 0) {
-    const contacts: KinematicContact[] = [];
-    for (const [f, sounding] of activeByFinger.entries()) {
-      contacts.push({
-        finger: f,
-        handFramePos: toHandFramePos(sounding.w.ev.midi, hand),
-        isBlack: isBlackKey(sounding.w.ev.midi),
-        isHeld: sounding.isHeld,
-      });
-    }
-    const kinEval = evaluateHandKinematics2D(
-      contacts,
-      handScale,
-      DEFAULT_COST_WEIGHTS.horizontal.crossMax
-    );
-    palmCenterXUnit = toPalmXUnit(kinEval.pose.palmXMm);
-    palmAngleDeg = dir * kinEval.pose.palmAngleDeg;
-    palmLiftY = kinEval.pose.palmYMm * PIANO_MM_TO_PX + (1 - handScale) * 10;
-
-    if (nextSlice && shiftBlend > 0) {
-      const nextContacts: KinematicContact[] = [];
-      for (const n of nextSlice.notes) {
-        const f = solveResult.fingerByNoteUid[n.noteUid];
-        if (f) {
-          nextContacts.push({
-            finger: f,
-            handFramePos: toHandFramePos(n.midi, hand),
-            isBlack: isBlackKey(n.midi),
-            isHeld: false,
-          });
-        }
-      }
-      if (nextContacts.length > 0) {
-        const nextEval = evaluateHandKinematics2D(
-          nextContacts,
-          handScale,
-          DEFAULT_COST_WEIGHTS.horizontal.crossMax
-        );
-        const blend = shiftBlend * 0.45;
-        palmCenterXUnit = lerp(palmCenterXUnit, toPalmXUnit(nextEval.pose.palmXMm), blend);
-        palmAngleDeg = lerp(palmAngleDeg, dir * nextEval.pose.palmAngleDeg, blend);
-        palmLiftY = lerp(
-          palmLiftY,
-          nextEval.pose.palmYMm * PIANO_MM_TO_PX + (1 - handScale) * 10,
-          blend
-        );
-      }
-      if (crossingStyle === "none" && shiftBlend > 0.05 && shiftBlend < 0.95) {
-        palmLiftY += -Math.sin(shiftBlend * Math.PI) * 5;
       }
     }
 
@@ -1124,19 +1315,28 @@ function projectSingleHandPosture(
       }
     }
   } else {
-    let totalWeight = 0;
-    let weightedCenterU = 0;
-    for (const f of FINGERS) {
-      const w = 0.55;
-      const idealCenterU = fingers[f].xUnit * dir - RELAXED_OFFSET_FROM_3[f] * handScale;
-      totalWeight += w;
-      weightedCenterU += idealCenterU * w;
-    }
-    const palmU = totalWeight > 0 ? weightedCenterU / totalWeight : fingers[3].xUnit * dir;
-    palmCenterXUnit = clamp(palmU * dir, 0.8, PIANO_WHITE_KEY_COUNT - 0.8);
+    // Whole-hand translation / rest posture: palm and all 5 fingers move cohesively as a unit
+    const hadActiveBeforeShift =
+      isWholeHandShift &&
+      nextSlice !== null &&
+      currSlice !== null &&
+      windows.some(
+        (w) =>
+          w.sliceId === currSlice.sliceId &&
+          w.fingerEndSec > nextSlice.onsetSec - shiftWindow + 1e-4
+      );
+    const travelBlend = hadActiveBeforeShift
+      ? smoothstep((shiftBlend - 0.08) / 0.92)
+      : shiftBlend;
+
+    palmCenterXUnit = clamp(
+      lerp(currPalmXUnit, nextPalmXUnit, travelBlend),
+      0.8,
+      PIANO_WHITE_KEY_COUNT - 0.8
+    );
 
     let nextBlackShift = 0;
-    if (nextSlice && shiftBlend > 0) {
+    if (nextSlice && travelBlend > 0 && !nextEval) {
       for (const n of nextSlice.notes) {
         const f = solveResult.fingerByNoteUid[n.noteUid];
         if (f && isBlackKey(n.midi)) {
@@ -1144,16 +1344,51 @@ function projectSingleHandPosture(
         }
       }
     }
-    const restLiftY = Math.min(10 * handScale, getMaxRestLiftY(handScale));
-    palmLiftY = lerp(restLiftY, nextBlackShift, shiftBlend);
+    const targetLift = nextEval ? nextPalmLiftY : nextBlackShift;
+    const baseLift = hadActiveBeforeShift ? currPalmLiftY : restLiftY;
+    palmLiftY = lerp(baseLift, targetLift, travelBlend);
+    palmAngleDeg = lerp(hadActiveBeforeShift ? currPalmAngleDeg : 0, nextPalmAngleDeg, travelBlend);
+
     if (crossingStyle === "thumb-under") {
-      palmAngleDeg = dir * 10;
+      palmAngleDeg = lerp(palmAngleDeg, dir * 10, 0.5);
       palmLiftY += -4;
     } else if (crossingStyle === "cross-over") {
-      palmAngleDeg = dir * -11;
+      palmAngleDeg = lerp(palmAngleDeg, dir * -11, 0.5);
       palmLiftY += -6;
-    } else if (shiftBlend > 0.05 && shiftBlend < 0.95) {
-      palmLiftY += -Math.sin(shiftBlend * Math.PI) * 5;
+    } else if (travelBlend > 0.03 && travelBlend < 0.97) {
+      const jumpArc = isWholeHandShift
+        ? clamp(deltaPalmUnits * 1.1, 4, 11) * handScale
+        : 5;
+      palmLiftY += -Math.sin(travelBlend * Math.PI) * jumpArc;
+    }
+
+    const midRelax =
+      deltaPalmUnits > 2.5 * handScale ? Math.sin(travelBlend * Math.PI) * 0.45 : 0;
+
+    for (const f of FINGERS) {
+      const currOff = currSlots[f] - currPalmXUnit;
+      const nextOff = nextSlots[f] - nextPalmXUnit;
+      const blendedOff = lerp(currOff, nextOff, travelBlend);
+      const relaxedOff = RELAXED_OFFSET_FROM_3[f] * handScale * dir;
+      const finalOff = lerp(blendedOff, relaxedOff, midRelax);
+
+      let layerOffset: -1 | 0 | 1 = 0;
+      if (crossingStyle === "thumb-under" && f === 1) {
+        layerOffset = -1;
+      } else if (crossingStyle === "cross-over" && (f === 2 || f === 3 || f === 4)) {
+        layerOffset = 1;
+      }
+
+      fingers[f] = {
+        finger: f,
+        xUnit: clamp(palmCenterXUnit + finalOff, 0.35, PIANO_WHITE_KEY_COUNT - 0.35),
+        isBlack: false,
+        pressDepth: 0,
+        isHeld: false,
+        isStruck: false,
+        targetMidi: null,
+        layerOffset,
+      };
     }
   }
 
@@ -1309,5 +1544,108 @@ function buildEmptyHandPosture(hand: Hand, spanPreset: SpanPreset = "M"): HandPo
     fingers,
     handPosition: null,
     transitionCues: [],
+  };
+}
+
+/**
+ * Interpolates between two discrete `HandPosture` snapshots while keeping the hand
+ * translating as a cohesive, anatomically normal shape across large keyboard jumps.
+ */
+export function tweenHandPosture(
+  from: HandPosture,
+  to: HandPosture,
+  t: number
+): HandPosture {
+  if (t <= 0) return from;
+  if (t >= 1) return to;
+
+  const handScale = SPAN_PRESET_SCALE[to.spanPreset ?? from.spanPreset ?? "M"];
+  const dir = to.hand === "RH" ? 1 : -1;
+  const deltaPalm = Math.abs(to.palmCenterXUnit - from.palmCenterXUnit);
+  const isLargeMove = deltaPalm > 1.8 * handScale;
+
+  const palmCenterXUnit = clamp(
+    lerp(from.palmCenterXUnit, to.palmCenterXUnit, t),
+    0.8,
+    PIANO_WHITE_KEY_COUNT - 0.8
+  );
+  const palmAngleDeg = lerp(from.palmAngleDeg, to.palmAngleDeg, t);
+  const jumpArc = isLargeMove
+    ? Math.sin(t * Math.PI) * clamp(deltaPalm * 0.9, 4, 12) * handScale
+    : 0;
+  const palmLiftY = clamp(
+    lerp(from.palmLiftY, to.palmLiftY, t) - jumpArc,
+    -56,
+    getMaxRestLiftY(handScale)
+  );
+  const midRelax = isLargeMove ? Math.sin(t * Math.PI) * 0.45 : 0;
+  const midFlightUncrossed = isLargeMove && t > 0.1 && t < 0.9;
+
+  const fingers = {} as Record<Finger, FingerPosture>;
+  for (const f of FINGERS) {
+    const a = from.fingers[f];
+    const b = to.fingers[f];
+    const fromOff = a.xUnit - from.palmCenterXUnit;
+    const toOff = b.xUnit - to.palmCenterXUnit;
+    const relaxedOff = RELAXED_OFFSET_FROM_3[f] * handScale * dir;
+    const off = lerp(lerp(fromOff, toOff, t), relaxedOff, midRelax);
+    const xUnit = clamp(palmCenterXUnit + off, 0.35, PIANO_WHITE_KEY_COUNT - 0.35);
+
+    const sameHeldKey = !isLargeMove && a.targetMidi !== null && a.targetMidi === b.targetMidi;
+    const layerOffset = midFlightUncrossed ? 0 : t >= 0.5 ? b.layerOffset : a.layerOffset;
+
+    if (!isLargeMove) {
+      fingers[f] = {
+        ...b,
+        xUnit,
+        pressDepth: sameHeldKey ? lerp(a.pressDepth, b.pressDepth, t) : b.pressDepth,
+        layerOffset,
+      };
+    } else if (t < 0.78) {
+      fingers[f] = {
+        ...b,
+        xUnit,
+        isBlack: false,
+        pressDepth: 0,
+        isHeld: false,
+        isStruck: false,
+        targetMidi: null,
+        layerOffset,
+      };
+    } else {
+      const landBlend = smoothstep((t - 0.78) / 0.22);
+      fingers[f] = {
+        ...b,
+        xUnit,
+        pressDepth: b.pressDepth * landBlend,
+        layerOffset,
+      };
+    }
+  }
+
+  if (midFlightUncrossed) {
+    for (let f = 2; f <= 5; f++) {
+      const prevF = (f - 1) as 1 | 2 | 3 | 4;
+      const currF = f as Finger;
+      const minGap = minIdleFingerClearanceUnits(prevF, handScale);
+      const prevU = fingers[prevF].xUnit * dir;
+      const currU = fingers[currF].xUnit * dir;
+      if (currU < prevU + minGap) {
+        fingers[currF].xUnit = clamp(
+          (prevU + minGap) * dir,
+          0.35,
+          PIANO_WHITE_KEY_COUNT - 0.35
+        );
+      }
+    }
+  }
+
+  return {
+    ...to,
+    crossingStyle: midFlightUncrossed ? "none" : to.crossingStyle,
+    palmCenterXUnit,
+    palmLiftY,
+    palmAngleDeg,
+    fingers,
   };
 }

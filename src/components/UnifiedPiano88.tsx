@@ -20,8 +20,8 @@ import {
   computeDualHandPostureFrameAtTime,
   midiToWhiteUnitX,
   projectDualHandPostureAtSlice,
+  tweenHandPosture,
   type DualHandPostureFrame,
-  type FingerPosture,
   type HandPosture,
 } from "./handPostureModel";
 
@@ -109,29 +109,6 @@ function handPalette(hand: Hand) {
     stroke: "#4338ca",
     badgeBg: "#e0e7ff",
     posBg: "rgba(67, 56, 202, 0.16)",
-  };
-}
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-
-function tweenHandPosture(from: HandPosture, to: HandPosture, t: number): HandPosture {
-  const fingers = {} as Record<Finger, FingerPosture>;
-  for (const f of FINGERS) {
-    const a = from.fingers[f];
-    const b = to.fingers[f];
-    fingers[f] = {
-      ...b,
-      xUnit: lerp(a.xUnit, b.xUnit, t),
-    };
-  }
-  return {
-    ...to,
-    palmCenterXUnit: lerp(from.palmCenterXUnit, to.palmCenterXUnit, t),
-    palmLiftY: lerp(from.palmLiftY, to.palmLiftY, t),
-    palmAngleDeg: lerp(from.palmAngleDeg, to.palmAngleDeg, t),
-    fingers,
   };
 }
 

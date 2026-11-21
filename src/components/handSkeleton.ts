@@ -304,8 +304,9 @@ function computeFingerTargetXY(
     rawY = WHITE_TIP_Y[fp.finger] - 2 + palmLiftY * 0.78;
   }
 
+  const isForwardPalm = hasActiveBlackKey || palmLiftY < -25;
   const minY =
-    fp.targetMidi === null && !hasActiveBlackKey
+    fp.targetMidi === null && !isForwardPalm
       ? IDLE_WHITE_MIN_Y[fp.finger]
       : PIANO_KEYS_Y + 4;
   const maxY = isPlayingBlack ? PIANO_KEYS_Y + PIANO_BLACK_KEY_H - 6 : PIANO_KEYBED_BOTTOM_Y - 8;

@@ -33,6 +33,7 @@ import {
   computeDualHandPostureFrameAtTime,
   midiToWhiteUnitX,
   projectDualHandPostureAtSlice,
+  tweenHandPosture,
 } from "../src/components/handPostureModel";
 import { computeHandSkeleton } from "../src/components/handSkeleton";
 import { UnifiedPiano88 } from "../src/components/UnifiedPiano88";
@@ -1214,5 +1215,127 @@ describe("handPostureModel continuous 88-key kinematics", () => {
     const slowFrame = computeDualHandPostureFrameAtTime(index, slice2.onsetSec + 0.01);
     expect(slowFrame.rh.fingers[2].targetMidi).toBeNull();
     expect(slowFrame.activeKeyHighlights.get(67)?.rhPedalSustained).toBe(true);
+  });
+
+  it("translates the whole hand in normal anatomical shape across large keyboard jumps during continuous playback and discrete tweening", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>2</divisions>
+        <staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef>
+        <clef number="2"><sign>F</sign><line>4</line></clef>
+      </attributes>
+      <direction><sound tempo="60"/></direction>
+      <!-- RH jumps from C4 white key to F#5+C#6 black-key sixth -->
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff>
+        <notations><technical><fingering>1</fingering></technical></notations>
+      </note>
+      <note>
+        <pitch><step>F</step><alter>1</alter><octave>5</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff>
+        <notations><technical><fingering>2</fingering></technical></notations>
+      </note>
+      <note>
+        <chord/><pitch><step>C</step><alter>1</alter><octave>6</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff>
+        <notations><technical><fingering>5</fingering></technical></notations>
+      </note>
+      <backup><duration>4</duration></backup>
+      <!-- LH jumps from G4 (finger 1) down to D3 (finger 5) -->
+      <note>
+        <pitch><step>G</step><octave>4</octave></pitch><duration>2</duration><voice>2</voice><staff>2</staff>
+        <notations><technical><fingering>1</fingering></technical></notations>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>3</octave></pitch><duration>2</duration><voice>2</voice><staff>2</staff>
+        <notations><technical><fingering>5</fingering></technical></notations>
+      </note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml, { DOMParser });
+    const solveResult = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const index = buildHandPostureIndex(scoreDoc, solveResult, DEFAULT_HAND_SPAN_PROFILE);
+
+    // Sweep continuous playback across the jump transition (0.80s .. 1.05s at 5ms steps)
+    let prevLhPalmX = Infinity;
+    for (let t = 0.8; t <= 1.05; t += 0.005) {
+      const frame = computeDualHandPostureFrameAtTime(index, t);
+      for (const posture of [frame.rh, frame.lh]) {
+        const spanUnits = Math.abs(posture.fingers[5].xUnit - posture.fingers[1].xUnit);
+        expect(spanUnits).toBeLessThanOrEqual(6.5);
+
+        const dir = posture.hand === "RH" ? 1 : -1;
+        for (const f of [1, 2, 3, 4] as const) {
+          const nextF = (f + 1) as 2 | 3 | 4 | 5;
+          expect((posture.fingers[nextF].xUnit - posture.fingers[f].xUnit) * dir).toBeGreaterThan(0.3);
+        }
+
+        const sk = computeHandSkeleton(posture);
+        expect(sk.unifiedHandPath).not.toContain("NaN");
+        for (const f of [1, 2, 3, 4, 5] as const) {
+          const fixedLen = getFixedFingerLengthPx(f, "M");
+          expect(sk.fingers[f].phalanxSpanLength).toBeLessThanOrEqual(fixedLen + 1e-3);
+          if (posture.fingers[f].targetMidi === null) {
+            const dx = sk.fingers[f].tip.x - sk.fingers[f].mcp.x;
+            const dy = -(sk.fingers[f].tip.y - sk.fingers[f].mcp.y);
+            const rayAngleDeg = Math.abs((Math.atan2(dx, dy) * 180) / Math.PI);
+            expect(rayAngleDeg).toBeLessThanOrEqual(52);
+          }
+        }
+      }
+
+      // LH palm translates monotonically leftward from G4 toward D3
+      expect(frame.lh.palmCenterXUnit).toBeLessThanOrEqual(prevLhPalmX + 1e-4);
+      prevLhPalmX = frame.lh.palmCenterXUnit;
+    }
+
+    // Discrete slice-to-slice tweenHandPosture also preserves normal shape mid-flight
+    const rhSlices = scoreDoc.onsetSlices.filter((s) => s.hand === "RH");
+    const lhSlices = scoreDoc.onsetSlices.filter((s) => s.hand === "LH");
+    const rhSlice0 = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveResult,
+      rhSlices[0].sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    const rhSlice1 = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveResult,
+      rhSlices[1].sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    const lhSlice0 = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveResult,
+      lhSlices[0].sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    const lhSlice1 = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveResult,
+      lhSlices[1].sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+
+    for (const alpha of [0.2, 0.5, 0.7]) {
+      const midRh = tweenHandPosture(rhSlice0.rh, rhSlice1.rh, alpha);
+      const midLh = tweenHandPosture(lhSlice0.lh, lhSlice1.lh, alpha);
+      for (const mid of [midRh, midLh]) {
+        expect(Math.abs(mid.fingers[5].xUnit - mid.fingers[1].xUnit)).toBeLessThanOrEqual(6.5);
+        const sk = computeHandSkeleton(mid);
+        for (const f of [1, 2, 3, 4, 5] as const) {
+          expect(mid.fingers[f].targetMidi).toBeNull();
+          const dx = sk.fingers[f].tip.x - sk.fingers[f].mcp.x;
+          const dy = -(sk.fingers[f].tip.y - sk.fingers[f].mcp.y);
+          const rayAngleDeg = Math.abs((Math.atan2(dx, dy) * 180) / Math.PI);
+          expect(rayAngleDeg).toBeLessThanOrEqual(52);
+        }
+      }
+    }
   });
 });
