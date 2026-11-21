@@ -92,10 +92,11 @@ function renderDynamicDirection(kind: DynamicMarking, staff: 1 | 2): string[] {
 }
 
 function renderWedgeDirection(w: BuildWedgeEvent, defaultStaff: 1 | 2): string[] {
+  const numAttr = w.number !== undefined ? ` number="${w.number}"` : "";
   return [
     '      <direction placement="below">',
     "        <direction-type>",
-    `          <wedge type="${w.type}" number="${w.number ?? 1}"/>`,
+    `          <wedge type="${w.type}"${numAttr}/>`,
     "        </direction-type>",
     `        <staff>${w.staff ?? defaultStaff}</staff>`,
     "      </direction>",
