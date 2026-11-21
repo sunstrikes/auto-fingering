@@ -51,7 +51,7 @@
   "horizontal": {
     "crossBase": 3.2,
     "cross2Extra": 0.3,
-    "cross4Extra": 3.2,
+    "cross4Extra": 2.0,
     "crossWideThreshold": 2.8,
     "crossWideSlope": 1.6,
     "crossMax": 3.5,

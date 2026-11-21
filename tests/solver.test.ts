@@ -1559,4 +1559,277 @@ describe("solver seam: solveFingering", () => {
       }
     }
   });
+
+  const STEP_NAMES: Array<{ step: string; alter?: number }> = [
+    { step: "C" },
+    { step: "D", alter: -1 },
+    { step: "D" },
+    { step: "E", alter: -1 },
+    { step: "E" },
+    { step: "F" },
+    { step: "F", alter: 1 },
+    { step: "G" },
+    { step: "A", alter: -1 },
+    { step: "A" },
+    { step: "B", alter: -1 },
+    { step: "B" },
+  ];
+
+  const solveSyntheticNotes = (
+    midis: number[],
+    hand: "RH" | "LH",
+    asChord: boolean,
+    dur = 1,
+    tempo = 120
+  ): Finger[] => {
+    const { DOMParser } = new JSDOM("").window;
+    const clef =
+      hand === "RH"
+        ? `<clef><sign>G</sign><line>2</line></clef>`
+        : `<clef><sign>F</sign><line>4</line></clef>`;
+    const voice = hand === "RH" ? 1 : 5;
+    const notesXml = midis
+      .map((midi, idx) => {
+        const oct = Math.floor(midi / 12) - 1;
+        const { step, alter } = STEP_NAMES[((midi % 12) + 12) % 12];
+        const alterTag = alter !== undefined ? `<alter>${alter}</alter>` : "";
+        const chordTag = asChord && idx > 0 ? "<chord/>" : "";
+        return `<note>${chordTag}<pitch><step>${step}</step>${alterTag}<octave>${oct}</octave></pitch><duration>${dur}</duration><voice>${voice}</voice></note>`;
+      })
+      .join("\n");
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions>${clef}</attributes>
+      <direction><sound tempo="${tempo}"/></direction>
+      ${notesXml}
+    </measure>
+  </part>
+</score-partwise>`;
+    const doc = parseMusicXml(xml, { DOMParser });
+    const res = solveFingering(doc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    return asChord
+      ? doc.onsetSlices[0].notes.map((n) => res.fingerByNoteUid[n.noteUid])
+      : doc.noteEvents.map((n) => res.fingerByNoteUid[n.noteUid]);
+  };
+
+  it("solves 12-key major/minor triads (root, 1st, 2nd inv) and 4-note octave/7th chords with idiomatic outer frames and voicing geometry", () => {
+    const solveChord = (midis: number[], hand: "RH" | "LH"): Finger[] =>
+      solveSyntheticNotes(midis, hand, true, 4);
+
+    // 1. All 12 major and minor triads (root, 1st inv, 2nd inv) for RH & LH
+    for (let pc = 0; pc < 12; pc++) {
+      const rhRoot = 60 + pc; // C4..B4
+      const lhRoot = 48 + pc; // C3..B3
+
+      for (const third of [4, 3]) {
+        // Root position: RH [1, 3, 5], LH [5, 3, 1]
+        expect({ pc, third, f: solveChord([rhRoot, rhRoot + third, rhRoot + 7], "RH") }).toEqual({
+          pc,
+          third,
+          f: [1, 3, 5],
+        });
+        expect({ pc, third, f: solveChord([lhRoot, lhRoot + third, lhRoot + 7], "LH") }).toEqual({
+          pc,
+          third,
+          f: [5, 3, 1],
+        });
+
+        // 1st inversion: RH [1, 2, 5], LH [5, 3, 1] (or [5, 2, 1] when bottom is black & upper two are white)
+        expect({ pc, third, f: solveChord([rhRoot + third, rhRoot + 7, rhRoot + 12], "RH") }).toEqual({
+          pc,
+          third,
+          f: [1, 2, 5],
+        });
+        const lh1st = solveChord([lhRoot + third, lhRoot + 7, lhRoot + 12], "LH");
+        expect([[5, 3, 1], [5, 2, 1]]).toContainEqual(lh1st);
+
+        // 2nd inversion: RH [1, 3, 5], LH [5, 2, 1]
+        expect({ pc, third, f: solveChord([rhRoot + 7, rhRoot + 12, rhRoot + 12 + third], "RH") }).toEqual({
+          pc,
+          third,
+          f: [1, 3, 5],
+        });
+        expect({ pc, third, f: solveChord([lhRoot + 7, lhRoot + 12, lhRoot + 12 + third], "LH") }).toEqual({
+          pc,
+          third,
+          f: [5, 2, 1],
+        });
+      }
+    }
+
+    // 2. 4-note octave triads (root, 1st inv, 2nd inv) & dominant 7th chords
+    expect(solveChord([60, 64, 67, 72], "RH")).toEqual([1, 2, 3, 5]);
+    expect(solveChord([64, 67, 72, 76], "RH")).toEqual([1, 2, 4, 5]);
+    expect(solveChord([67, 72, 76, 79], "RH")).toEqual([1, 2, 4, 5]);
+    expect([[5, 3, 2, 1], [5, 4, 2, 1]]).toContainEqual(solveChord([48, 52, 55, 60], "LH"));
+    expect(solveChord([52, 55, 60, 64], "LH")).toEqual([5, 4, 2, 1]);
+    expect(solveChord([55, 60, 64, 67], "LH")).toEqual([5, 3, 2, 1]);
+
+    // Db major 2nd inv with black 2nd note (Ab4-Db5-F5-Ab5)
+    expect([[1, 2, 4, 5], [1, 3, 4, 5]]).toContainEqual(solveChord([68, 73, 77, 80], "RH"));
+    // Ab major root octave LH (black-key voicing prefers [5, 3, 2, 1])
+    expect(solveChord([44, 48, 51, 56], "LH")).toEqual([5, 3, 2, 1]);
+
+    // Dominant 7th root position (G7: G-B-D-F, C7: C-E-G-Bb) keeps 1..5 outer frame
+    const g7Rh = solveChord([67, 71, 74, 77], "RH");
+    expect([g7Rh[0], g7Rh[3]]).toEqual([1, 5]);
+    const c7Rh = solveChord([60, 64, 67, 70], "RH");
+    expect([c7Rh[0], c7Rh[3]]).toEqual([1, 5]);
+    const c7Lh = solveChord([48, 52, 55, 58], "LH");
+    expect([c7Lh[0], c7Lh[3]]).toEqual([5, 1]);
+  });
+
+  it("retains Top-3 candidates for block chords with active held notes so outer voices yield without stealing held fingers", () => {
+    const { DOMParser } = new JSDOM("").window;
+
+    // 1. Held thumb A3 (1) while striking C4-E4-G4 -> switches from [1, 3, 5] to [2, 3, 5]
+    const heldThumbXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>A</step><octave>3</octave></pitch><duration>2</duration><voice>2</voice></note>
+      <backup><duration>2</duration></backup>
+      <note><rest/><duration>1</duration><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const thumbDoc = parseMusicXml(heldThumbXml, { DOMParser });
+    const thumbChordSlice = thumbDoc.onsetSlices[1];
+    expect(thumbChordSlice.heldNotes).toHaveLength(1);
+    const { candidates: thumbCands } = generateSliceCandidates(
+      thumbChordSlice,
+      false,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    expect(thumbCands).toHaveLength(3);
+
+    const thumbRes = solveFingering(thumbDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const a3 = thumbDoc.noteEvents.find((n) => n.midi === 57)!;
+    expect(thumbRes.fingerByNoteUid[a3.noteUid]).toBe(1);
+    expect(thumbChordSlice.notes.map((n) => thumbRes.fingerByNoteUid[n.noteUid])).toEqual([2, 3, 5]);
+    expect(thumbRes.earlyReleasesByNoteUid?.[a3.noteUid]).toBeUndefined();
+
+    // 2. Held pinky B4 (5) while striking C4-E4-G4 -> switches to pinky-free shape ([1, 2, 4] or [1, 3, 4])
+    const heldPinkyXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note>
+        <pitch><step>B</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice>
+        <notations><technical><fingering>5</fingering></technical></notations>
+      </note>
+      <backup><duration>2</duration></backup>
+      <note><rest/><duration>1</duration><voice>2</voice></note>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration><voice>2</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const pinkyDoc = parseMusicXml(heldPinkyXml, { DOMParser });
+    const pinkyChordSlice = pinkyDoc.onsetSlices[1];
+    expect(pinkyChordSlice.heldNotes).toHaveLength(1);
+    const { candidates: pinkyCands } = generateSliceCandidates(
+      pinkyChordSlice,
+      false,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    expect(pinkyCands).toHaveLength(3);
+
+    const pinkyRes = solveFingering(pinkyDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const b4 = pinkyDoc.noteEvents.find((n) => n.midi === 71)!;
+    const pinkyChordFingers = pinkyChordSlice.notes.map((n) => pinkyRes.fingerByNoteUid[n.noteUid]);
+    expect(pinkyRes.fingerByNoteUid[b4.noteUid]).toBe(5);
+    expect(pinkyChordFingers).not.toContain(5);
+    expect([[1, 2, 4], [1, 3, 4]]).toContainEqual(pinkyChordFingers);
+    expect(pinkyRes.earlyReleasesByNoteUid?.[b4.noteUid]).toBeUndefined();
+  });
+
+  it("solves 12-key major scales with 3+4 periodic crossings and black-key arpeggios with thumb-on-white anchors", () => {
+    const MAJOR_INTERVALS = [0, 2, 4, 5, 7, 9, 11, 12];
+    const solveMonophonicLine = (
+      midis: number[],
+      hand: "RH" | "LH",
+      dur = 1,
+      tempo = 120
+    ): Finger[] => solveSyntheticNotes(midis, hand, false, dur, tempo);
+
+    // 1. White-key starting scales: C, G, D, A, E major (plus B major RH)
+    for (const root of [60, 67, 62, 69, 64]) {
+      const rhScale = MAJOR_INTERVALS.map((iv) => root + iv);
+      const lhScale = MAJOR_INTERVALS.map((iv) => root - 12 + iv);
+      expect(solveMonophonicLine(rhScale, "RH")).toEqual([1, 2, 3, 1, 2, 3, 4, 5]);
+      expect(solveMonophonicLine(lhScale, "LH")).toEqual([5, 4, 3, 2, 1, 3, 2, 1]);
+    }
+    expect(solveMonophonicLine(MAJOR_INTERVALS.map((iv) => 71 + iv), "RH")).toEqual([
+      1, 2, 3, 1, 2, 3, 4, 5,
+    ]);
+    // B major LH lands thumb cleanly on white E4 and B4 ([4, 3, 2, 1, 4, 3, 2, 1])
+    const bLh = solveMonophonicLine(MAJOR_INTERVALS.map((iv) => 59 + iv), "LH");
+    expect(bLh[3]).toBe(1);
+    expect(bLh[7]).toBe(1);
+    expect(bLh).toEqual([4, 3, 2, 1, 4, 3, 2, 1]);
+
+    // 2. F major (1-2-3-4-1-2-3-4 in RH, 5-4-3-2-1-3-2-1 in LH)
+    const fRh = MAJOR_INTERVALS.map((iv) => 65 + iv);
+    const fLh = MAJOR_INTERVALS.map((iv) => 53 + iv);
+    expect(solveMonophonicLine(fRh, "RH")).toEqual([1, 2, 3, 4, 1, 2, 3, 4]);
+    expect(solveMonophonicLine(fLh, "LH")).toEqual([5, 4, 3, 2, 1, 3, 2, 1]);
+
+    // 3. Db & F# major RH/LH (no 5->5 slide, thumb strictly on white keys)
+    const dbRh = MAJOR_INTERVALS.map((iv) => 61 + iv);
+    expect(solveMonophonicLine(dbRh, "RH", 1, 120)).toEqual([2, 3, 1, 2, 3, 4, 1, 2]);
+    expect(solveMonophonicLine(dbRh, "RH", 2, 120)).toEqual([2, 3, 1, 2, 3, 4, 1, 2]);
+    const dbLh = solveMonophonicLine(MAJOR_INTERVALS.map((iv) => 49 + iv), "LH");
+    expect(dbLh[2]).toBe(1);
+    expect(dbLh[6]).toBe(1);
+    const fsRh = solveMonophonicLine(MAJOR_INTERVALS.map((iv) => 66 + iv), "RH");
+    expect([
+      [2, 3, 4, 1, 2, 3, 4, 5],
+      [2, 3, 4, 1, 2, 3, 1, 2],
+    ]).toContainEqual(fsRh);
+
+    // 4. Eb, Ab, Bb major LH use 3+4 period [3, 2, 1, 4, 3, 2, 1, 3] (1->4 crossing onto black key)
+    for (const root of [51, 56, 58]) {
+      const lhScale = MAJOR_INTERVALS.map((iv) => root + iv);
+      expect(solveMonophonicLine(lhScale, "LH")).toEqual([3, 2, 1, 4, 3, 2, 1, 3]);
+    }
+
+    // 5. Eb, Ab, Bb major RH place thumb strictly on white scale degrees (never on black keys)
+    const ebRh = solveMonophonicLine(MAJOR_INTERVALS.map((iv) => 63 + iv), "RH");
+    expect(ebRh[1] === 1 || ebRh[2] === 1).toBe(true);
+    expect(ebRh[5]).toBe(1);
+    expect(ebRh[0]).not.toBe(1);
+    expect(ebRh[3]).not.toBe(1);
+    expect(ebRh[4]).not.toBe(1);
+    expect(ebRh[7]).not.toBe(1);
+    const abRh = solveMonophonicLine(MAJOR_INTERVALS.map((iv) => 68 + iv), "RH");
+    expect(abRh[2]).toBe(1);
+    expect(abRh[5]).toBe(1);
+    const bbRhFingers = solveMonophonicLine(MAJOR_INTERVALS.map((iv) => 70 + iv), "RH");
+    expect([
+      [2, 1, 2, 3, 1, 2, 3, 4],
+      [3, 1, 2, 3, 1, 2, 3, 4],
+      [4, 1, 2, 3, 1, 2, 3, 4],
+    ]).toContainEqual(bbRhFingers);
+
+    // 6. Black-key broken chord / long arpeggio (Eb4-G4-Bb4-Eb5 & 2-octave) anchors thumb on white G4 / G5
+    expect([[2, 1, 2, 4], [2, 1, 2, 5]]).toContainEqual(
+      solveMonophonicLine([63, 67, 70, 75], "RH")
+    );
+    const ebArp2Oct = solveMonophonicLine([63, 67, 70, 75, 79, 82, 87], "RH");
+    expect(ebArp2Oct[1]).toBe(1);
+    expect(ebArp2Oct[4]).toBe(1);
+    expect(ebArp2Oct.slice(0, 5)).toEqual([2, 1, 2, 4, 1]);
+  });
 });

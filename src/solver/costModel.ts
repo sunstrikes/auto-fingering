@@ -119,26 +119,44 @@ function isBlockChordSlice(slice: OnsetSlice): boolean {
 }
 
 /**
- * Selects the single fixed optimal chord fingering (3+ notes) based on vertical chord
- * ergonomics, without searching over alternative chord shapes during horizontal DP.
+ * Selects optimal chord fingering candidates (3+ notes) based on vertical chord
+ * ergonomics. Returns a single fixed shape when no held notes are active, or
+ * up to Top-3 diverse shapes (including best thumb-free and pinky-free alternatives)
+ * when cross-slice held notes are present so DP/A* can avoid finger stealing.
  */
-function selectFixedOptimalChordTuple(
+function selectOptimalChordTuples(
   slice: OnsetSlice,
   candidates: Finger[][],
   profile: HandSpanProfile
-): Finger[] {
-  if (candidates.length <= 1) return candidates[0];
-  let bestTuple = candidates[0];
-  let bestCost = Infinity;
+): Finger[][] {
+  if (candidates.length <= 1) return candidates;
+  const scored = candidates.map((tuple) => ({
+    tuple,
+    cost: computeVerticalCost(slice, tuple, EMPTY_HELD_FINGERS, profile).cost,
+  }));
+  scored.sort((a, b) => a.cost - b.cost);
 
-  for (const tuple of candidates) {
-    const { cost } = computeVerticalCost(slice, tuple, EMPTY_HELD_FINGERS, profile);
-    if (cost < bestCost - 1e-6) {
-      bestCost = cost;
-      bestTuple = tuple;
+  if (slice.heldNotes.length === 0) {
+    return [scored[0].tuple];
+  }
+
+  const selected: Finger[][] = [scored[0].tuple];
+  const addFirstMatching = (pred: (t: Finger[]) => boolean): void => {
+    const found = scored.find(
+      (item) => !selected.includes(item.tuple) && pred(item.tuple)
+    );
+    if (found) selected.push(found.tuple);
+  };
+
+  addFirstMatching((t) => !t.includes(1));
+  addFirstMatching((t) => !t.includes(5));
+  for (const item of scored) {
+    if (selected.length >= 3) break;
+    if (!selected.includes(item.tuple)) {
+      selected.push(item.tuple);
     }
   }
-  return bestTuple;
+  return selected;
 }
 
 /**
@@ -199,7 +217,7 @@ export function generateSliceCandidates(
   if (ignoreAnchors) {
     return {
       candidates: isChord
-        ? [selectFixedOptimalChordTuple(slice, allCandidates, profile)]
+        ? selectOptimalChordTuples(slice, allCandidates, profile)
         : allCandidates,
       hadAnchorConflict: false,
     };
@@ -216,7 +234,7 @@ export function generateSliceCandidates(
   if (anchoredIndices.length === 0) {
     return {
       candidates: isChord
-        ? [selectFixedOptimalChordTuple(slice, allCandidates, profile)]
+        ? selectOptimalChordTuples(slice, allCandidates, profile)
         : allCandidates,
       hadAnchorConflict: false,
     };
@@ -383,6 +401,118 @@ function evaluateHeldInversionCost(
   return { cost: weights.vertical.heldInversionThumb, hasUnreachableSpan: false };
 }
 
+function matchesFingerTuple(fingers: Finger[], target: readonly Finger[]): boolean {
+  if (fingers.length !== target.length) return false;
+  for (let i = 0; i < target.length; i++) {
+    if (fingers[i] !== target[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Soft voicing geometry prior for 3-note and 4-note chords based on root/inversion
+ * interval gaps, complementing pure 2D kinematics on black-key and inner-finger choices.
+ */
+function computeChordVoicingPrior(
+  slice: OnsetSlice,
+  fingers: Finger[],
+  _weights: CostWeights = DEFAULT_COST_WEIGHTS
+): number {
+  const notes = slice.notes;
+  const k = notes.length;
+  if (k !== 3 && k !== 4) return 0;
+  const isRH = slice.hand === "RH";
+
+  if (k === 3) {
+    const m0 = notes[0].midi;
+    const m1 = notes[1].midi;
+    const m2 = notes[2].midi;
+    const outerSemitones = m2 - m0;
+    if (outerSemitones < 6 || outerSemitones > 9) return 0;
+
+    const dLow = m1 - m0;
+    const dHigh = m2 - m1;
+    const outerOk = isRH
+      ? fingers[0] === 1 && fingers[2] === 5
+      : fingers[0] === 5 && fingers[2] === 1;
+
+    // Root position triad (3rd + 3rd)
+    if (dLow >= 3 && dLow <= 4 && dHigh >= 3 && dHigh <= 4) {
+      if (!outerOk) return 2.6;
+      return fingers[1] === 3 ? 0 : 1.8;
+    }
+    // 1st inversion triad (3rd + 4th)
+    if (dLow >= 3 && dLow <= 4 && dHigh >= 5 && dHigh <= 6) {
+      if (isRH) {
+        if (matchesFingerTuple(fingers, [1, 2, 5])) return 0;
+        return outerOk ? 1.8 : 1.8 + 1.5;
+      }
+      const blackBottomWhiteTop =
+        isBlackKey(m0) && !isBlackKey(m1) && !isBlackKey(m2);
+      if (
+        matchesFingerTuple(fingers, [5, 3, 1]) ||
+        (blackBottomWhiteTop && matchesFingerTuple(fingers, [5, 2, 1]))
+      ) {
+        return 0;
+      }
+      return 1.6;
+    }
+    // 2nd inversion triad (4th + 3rd)
+    if (dLow >= 5 && dLow <= 6 && dHigh >= 3 && dHigh <= 4) {
+      const target = isRH ? ([1, 3, 5] as const) : ([5, 2, 1] as const);
+      return matchesFingerTuple(fingers, target) ? 0 : 1.8;
+    }
+    return 0;
+  }
+
+  // 4-note chord (octave triad inversions & 7th chords)
+  const m0 = notes[0].midi;
+  const m1 = notes[1].midi;
+  const m2 = notes[2].midi;
+  const m3 = notes[3].midi;
+  const outerSemitones = m3 - m0;
+  if (outerSemitones < 9 || outerSemitones > 12) return 0;
+
+  const outerOk = isRH
+    ? fingers[0] === 1 && fingers[3] === 5
+    : fingers[0] === 5 && fingers[3] === 1;
+  let prior = outerOk ? 0 : 2.8;
+
+  const d0 = m1 - m0;
+  const d1 = m2 - m1;
+  const d2 = m3 - m2;
+  if (Math.max(d0, d1, d2) >= 5) {
+    if (d2 >= 5 && d2 > d1 && d2 > d0) {
+      // Top 4th gap (e.g. root-position octave triad)
+      if (isRH) {
+        if (!matchesFingerTuple(fingers, [1, 2, 3, 5])) prior += 1.6;
+      } else {
+        const hasBlack = notes.some((n) => isBlackKey(n.midi));
+        const ok =
+          matchesFingerTuple(fingers, [5, 3, 2, 1]) ||
+          (!hasBlack && matchesFingerTuple(fingers, [5, 4, 2, 1]));
+        if (!ok) prior += 1.6;
+      }
+    } else if (d1 >= 5 && d1 > d0 && d1 > d2) {
+      // Middle 4th gap (e.g. 1st-inversion octave triad)
+      const target = isRH ? ([1, 2, 4, 5] as const) : ([5, 4, 2, 1] as const);
+      if (!matchesFingerTuple(fingers, target)) prior += 1.6;
+    } else if (d0 >= 5 && d0 > d1 && d0 > d2) {
+      // Bottom 4th gap (e.g. 2nd-inversion octave triad)
+      if (isRH) {
+        const ok =
+          matchesFingerTuple(fingers, [1, 2, 4, 5]) ||
+          (isBlackKey(m1) && matchesFingerTuple(fingers, [1, 3, 4, 5]));
+        if (!ok) prior += 1.6;
+      } else {
+        if (!matchesFingerTuple(fingers, [5, 3, 2, 1])) prior += 1.6;
+      }
+    }
+  }
+
+  return prior;
+}
+
 export function computeVerticalCost(
   slice: OnsetSlice,
   fingers: Finger[],
@@ -402,6 +532,11 @@ export function computeVerticalCost(
   let hasWideStretch = false;
 
   const notes = slice.notes;
+  const k = notes.length;
+  const outerSemitones = k >= 2 ? notes[k - 1].midi - notes[0].midi : 0;
+  const isOuterChordFrame = k >= 3 && outerSemitones >= 5;
+  const thumbSideIdx = slice.hand === "RH" ? 0 : k - 1;
+  const pinkySideIdx = slice.hand === "RH" ? k - 1 : 0;
   const contacts: KinematicContact[] = [];
   const activeNoteMidisByFinger = new Map<Finger, number>();
   for (let i = 0; i < notes.length; i++) {
@@ -450,10 +585,20 @@ export function computeVerticalCost(
     if (f === 4) cost += vw.finger4 * weakMultiplier;
     if (f === 5) cost += vw.finger5 * weakMultiplier;
 
-    // Black key thumb / pinky penalties
+    // Black key thumb / pinky penalties (exempt outer 1/5 frame on 3+ note chords)
     if (isBlackKey(n.midi)) {
-      if (f === 1) cost += thumbBlackCost;
-      if (f === 5) cost += vw.pinkyBlack;
+      if (f === 1) {
+        cost +=
+          isOuterChordFrame && i === thumbSideIdx
+            ? vw.thumbBlackLearned
+            : thumbBlackCost;
+      }
+      if (f === 5) {
+        cost +=
+          isOuterChordFrame && i === pinkySideIdx
+            ? vw.pinkyBlack * 0.15
+            : vw.pinkyBlack;
+      }
     }
 
     // Pairwise chord ergonomics
@@ -528,6 +673,7 @@ export function computeVerticalCost(
     cost += kin2d.crowdingEnergy + poseComfort * 0.15;
   }
 
+  cost += computeChordVoicingPrior(slice, fingers, weights);
   cost += softPriorBias;
 
   return { cost, hasUnreachableSpan, hasWideStretch };
@@ -558,6 +704,39 @@ export function resolveDepartureFingers(
   return changed ? resolved : fingers;
 }
 
+function computeCrossingExtra(
+  isThumbUnder: boolean,
+  nonThumbFinger: Finger,
+  prevIsBlack: boolean,
+  currIsBlack: boolean,
+  absD: number,
+  hw: CostWeights["horizontal"]
+): number {
+  if (isThumbUnder && prevIsBlack && !currIsBlack) {
+    // Black-key pivot to white-key thumb: 4->1 and 3->1 feel natural; short <1.0 2->1 is discouraged
+    return nonThumbFinger === 4
+      ? 0.45
+      : nonThumbFinger === 3
+        ? -0.35
+        : absD >= 1.0
+          ? hw.cross2Extra
+          : hw.cross2Extra + 1.4;
+  }
+  if (!isThumbUnder && !prevIsBlack && currIsBlack) {
+    // White-key thumb crossing onto raised black key (e.g. LH 1->4, 1->3)
+    return nonThumbFinger === 4
+      ? -1.1
+      : nonThumbFinger === 3
+        ? -0.25
+        : hw.cross2Extra;
+  }
+  if (!prevIsBlack && !currIsBlack && nonThumbFinger === 2 && absD <= 1.25) {
+    // Suppress pure white-key stepwise 2<->1 chopping
+    return hw.cross2Extra + 2.4;
+  }
+  return nonThumbFinger === 2 ? hw.cross2Extra : nonThumbFinger === 4 ? hw.cross4Extra : 0;
+}
+
 function evaluateDirectedNoteTransition(
   prevMidi: number,
   prevFinger: Finger,
@@ -582,6 +761,8 @@ function evaluateDirectedNoteTransition(
   const posCurr = toHandFramePos(currMidi, hand);
   const d = posCurr - posPrev;
   const absD = Math.abs(d);
+  const prevIsBlack = isBlackKey(prevMidi);
+  const currIsBlack = isBlackKey(currMidi);
 
   const isThumbUnder =
     d > 0.2 && absD <= hw.crossMax * scale && currFinger === 1 && prevFinger >= 2 && prevFinger <= 4;
@@ -611,22 +792,24 @@ function evaluateDirectedNoteTransition(
     }
   }
 
-  if (isThumbUnder) {
-    const extra = prevFinger === 2 ? hw.cross2Extra : prevFinger === 4 ? hw.cross4Extra : 0;
+  if (isThumbUnder || isCrossOver) {
+    const nonThumbFinger = isThumbUnder ? prevFinger : currFinger;
+    const extra = computeCrossingExtra(
+      isThumbUnder,
+      nonThumbFinger,
+      prevIsBlack,
+      currIsBlack,
+      absD,
+      hw
+    );
     cost += hw.crossBase + extra;
     if (absD > hw.crossWideThreshold * scale) {
       cost += (absD - hw.crossWideThreshold * scale) * hw.crossWideSlope;
     }
-    if (isBlackKey(currMidi)) {
+    if (isThumbUnder && currIsBlack) {
       cost += profile.avoidThumbOnBlack
         ? hw.crossThumbBlackAvoid
         : hw.crossThumbBlackLearned;
-    }
-  } else if (isCrossOver) {
-    const extra = currFinger === 2 ? hw.cross2Extra : currFinger === 4 ? hw.cross4Extra : 0;
-    cost += hw.crossBase + extra;
-    if (absD > hw.crossWideThreshold * scale) {
-      cost += (absD - hw.crossWideThreshold * scale) * hw.crossWideSlope;
     }
   } else if (
     absD <= hw.crossMax * scale &&
@@ -691,10 +874,12 @@ export function computeHorizontalCost(
   const isMonoPair = prevSlice.notes.length === 1 && currSlice.notes.length === 1;
 
   if (isMonoPair) {
+    const prevMidi = prevSlice.notes[0].midi;
+    const currMidi = currSlice.notes[0].midi;
     const res = evaluateDirectedNoteTransition(
-      prevSlice.notes[0].midi,
+      prevMidi,
       effectivePrevFingers[0],
-      currSlice.notes[0].midi,
+      currMidi,
       currFingers[0],
       hand,
       scale,
@@ -704,6 +889,16 @@ export function computeHorizontalCost(
       true
     );
     cost += res.cost;
+    // Suppress same-finger stepwise slides (e.g. 5->5 / 1->1) in monophonic scale passages
+    const semitoneDiff = Math.abs(currMidi - prevMidi);
+    if (
+      effectivePrevFingers[0] === currFingers[0] &&
+      semitoneDiff >= 1 &&
+      semitoneDiff <= 2 &&
+      dt <= 0.35
+    ) {
+      cost += 2.5;
+    }
     hasCrossing = res.isThumbUnder || res.isCrossOver;
     if (res.hasWideStretch) hasWideStretch = true;
     if (res.hasUnreachableSpan) hasUnreachableSpan = true;
@@ -808,7 +1003,16 @@ export function computeHorizontalCost(
   const currRoot = computeHandRoot(currSlice.notes, currFingers, hand);
   const rootShift = Math.abs(currRoot - prevRoot);
 
-  const freeShift = hasCrossing ? hw.shiftFreeCross : hw.shiftFreeBase;
+  const is41Crossing =
+    isMonoPair &&
+    hasCrossing &&
+    ((effectivePrevFingers[0] === 4 && currFingers[0] === 1) ||
+      (effectivePrevFingers[0] === 1 && currFingers[0] === 4));
+  const freeShift = hasCrossing
+    ? is41Crossing
+      ? Math.max(hw.shiftFreeCross, 4.5)
+      : hw.shiftFreeCross
+    : hw.shiftFreeBase;
   if (rootShift > freeShift) {
     const shiftWeight = profile.preferStablePosition
       ? hw.shiftCost * hw.shiftCostStableMultiplier
@@ -834,8 +1038,9 @@ export function computeHorizontalCost(
   }
   cost += (hw.ergonomicVelocityWeight * fingerVelSum) / Math.max(1, currSlice.notes.length);
 
-  // High-speed hand leap penalty
-  const velocity = rootShift / (dt + 0.1);
+  // High-speed hand leap penalty (for crossings, only excess shift beyond freeShift counts as a leap)
+  const leapShift = hasCrossing ? Math.max(0, rootShift - freeShift) : rootShift;
+  const velocity = leapShift / (dt + 0.1);
   if (velocity > hw.velocityThreshold) {
     cost += hw.velocitySlope * (velocity - hw.velocityThreshold);
   }

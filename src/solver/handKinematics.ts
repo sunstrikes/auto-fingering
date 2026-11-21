@@ -302,10 +302,9 @@ function evaluatePoseObjective(
       obj += 200 * ((4 * handScale - forward) / (10 * handScale)) ** 2;
     }
     const [minAng, maxAng] = FINGER_RAY_ANGLE_BOUNDS[c.finger];
-    if (rayAngle < minAng) {
-      obj += 400 * (minAng - rayAngle) ** 2;
-    } else if (rayAngle > maxAng) {
-      obj += 400 * (rayAngle - maxAng) ** 2;
+    if (rayAngle < minAng || rayAngle > maxAng) {
+      const excess = rayAngle < minAng ? minAng - rayAngle : rayAngle - maxAng;
+      obj += 15 * excess + 400 * excess ** 2;
     } else {
       const rest = FINGER_REST_ANGLE_RAD[c.finger];
       obj += 0.15 * (rayAngle - rest) ** 2;
