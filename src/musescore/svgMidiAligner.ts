@@ -5,10 +5,17 @@ import {
   durationToTypeAndDots,
   type MeasureSpan,
 } from "./midiToScoreModel";
-import type { ParsedSvgPage, SvgArc, SvgNotehead } from "./svgParser";
+import type {
+  ParsedSvgPage,
+  SvgArc,
+  SvgNavMarker,
+  SvgNotehead,
+  SvgVolta,
+} from "./svgParser";
 import type {
   BuildAttributes,
   BuildMeasure,
+  BuildNavMarker,
   BuildNote,
   BuildPitch,
   ConversionDiagnostic,
@@ -38,6 +45,10 @@ interface SvgMeasureData {
   stavesCount: 1 | 2;
   noteheads: SvgNotehead[];
   arcs: SvgArc[];
+  repeatStart?: boolean;
+  repeatStop?: boolean;
+  volta?: SvgVolta;
+  navMarkers?: SvgNavMarker[];
 }
 
 interface VisualColumn {
@@ -80,6 +91,10 @@ function collectSvgMeasures(pages: ParsedSvgPage[]): {
           stavesCount: sys.staves.length >= 2 ? 2 : 1,
           noteheads: mNotes,
           arcs: mArcs,
+          repeatStart: m.repeatStart,
+          repeatStop: m.repeatStop,
+          volta: m.volta,
+          navMarkers: m.navMarkers,
         });
       }
     }
@@ -257,6 +272,116 @@ function pairColumnWithSlice(
 }
 
 /**
+ * Computes the unfolded playback order of printed measure indices (0-based)
+ * by executing repeat barlines, volta brackets, and D.C./D.S./Coda/Fine jumps.
+ */
+export function computeUnfoldedPlaybackOrder(svgMeasures: SvgMeasureData[]): number[] {
+  const n = svgMeasures.length;
+  if (n === 0) return [];
+
+  const segnoIdx = svgMeasures.findIndex((m) =>
+    m.navMarkers?.some((nm) => nm.kind === "segno")
+  );
+  const codaIdx = svgMeasures.findIndex((m) =>
+    m.navMarkers?.some((nm) => nm.kind === "coda")
+  );
+
+  const order: number[] = [];
+  const maxSteps = n * 8 + 16;
+  let i = 0;
+  let repeatStartIdx = 0;
+  let pass = 1;
+  let hasTakenJump = false;
+  let ignoreRepeats = false;
+
+  while (i >= 0 && i < n && order.length < maxSteps) {
+    const m = svgMeasures[i];
+
+    if (!ignoreRepeats && m.repeatStart && pass === 1) {
+      repeatStartIdx = i;
+    }
+
+    if (!ignoreRepeats && m.volta && !m.volta.numbers.includes(pass)) {
+      // Skip forward to the first measure matching the current pass
+      let nextMatch = -1;
+      for (let j = i + 1; j < n; j++) {
+        if (svgMeasures[j].volta?.numbers.includes(pass)) {
+          nextMatch = j;
+          break;
+        }
+        if (!svgMeasures[j].volta && j > i + 1) {
+          break;
+        }
+      }
+      if (nextMatch !== -1) {
+        i = nextMatch;
+        continue;
+      }
+    }
+
+    order.push(i);
+
+    const markers = m.navMarkers ?? [];
+    if (hasTakenJump && markers.some((nm) => nm.kind === "fine")) {
+      break;
+    }
+    if (hasTakenJump && markers.some((nm) => nm.kind === "to-coda") && codaIdx >= 0) {
+      i = codaIdx;
+      continue;
+    }
+
+    if (!hasTakenJump) {
+      const dc = markers.find(
+        (nm) => nm.kind === "dc" || nm.kind === "dc-al-fine" || nm.kind === "dc-al-coda"
+      );
+      if (dc) {
+        hasTakenJump = true;
+        ignoreRepeats = true;
+        i = 0;
+        continue;
+      }
+      const ds = markers.find(
+        (nm) => nm.kind === "ds" || nm.kind === "ds-al-fine" || nm.kind === "ds-al-coda"
+      );
+      if (ds) {
+        hasTakenJump = true;
+        ignoreRepeats = true;
+        i = segnoIdx >= 0 ? segnoIdx : 0;
+        continue;
+      }
+    }
+
+    if (!ignoreRepeats && m.repeatStop) {
+      // Determine max passes in this repeat section
+      let maxPass = 2;
+      for (let j = repeatStartIdx; j < n; j++) {
+        const v = svgMeasures[j].volta;
+        if (v) {
+          for (const num of v.numbers) {
+            if (num > maxPass) maxPass = num;
+          }
+        } else if (j > i) {
+          break;
+        }
+      }
+
+      if (pass < maxPass) {
+        pass += 1;
+        i = repeatStartIdx;
+        continue;
+      } else {
+        pass = 1;
+        repeatStartIdx = i + 1;
+      }
+    }
+
+    i += 1;
+  }
+
+  return order;
+}
+
+/**
  * Aligns parsed MS4 SVG pages with raw MIDI truth events to produce a unified ScoreBuildModel.
  */
 export function alignSvgsAndMidi(
@@ -269,54 +394,63 @@ export function alignSvgsAndMidi(
   const spans: MeasureSpan[] = buildMeasureSpans(rawMidi, options);
   const { measures: svgMeasures, maxStaves } = collectSvgMeasures(pages);
 
-  if (svgMeasures.length !== spans.length) {
+  const unfoldedOrder = computeUnfoldedPlaybackOrder(svgMeasures);
+  const hasFoldedStructure = unfoldedOrder.length !== svgMeasures.length;
+
+  let alignmentPairs: Array<{ spanIdx: number; printedIdx: number }>;
+  if (hasFoldedStructure && unfoldedOrder.length === spans.length) {
+    alignmentPairs = unfoldedOrder.map((printedIdx, spanIdx) => ({
+      spanIdx,
+      printedIdx,
+    }));
+  } else if (svgMeasures.length === spans.length) {
+    if (hasFoldedStructure) {
+      diagnostics.push({
+        level: "info",
+        code: "REPEAT_NOT_UNFOLDED_IN_MIDI",
+        message: `SVG has repeat/navigation structure (${unfoldedOrder.length} unfolded measures) but MIDI has ${spans.length} measures matching printed count; aligning 1:1.`,
+      });
+    }
+    alignmentPairs = spans.map((_, idx) => ({ spanIdx: idx, printedIdx: idx }));
+  } else if (hasFoldedStructure) {
+    const count = Math.min(unfoldedOrder.length, spans.length);
     diagnostics.push({
       level: "warning",
       code: "MEASURE_COUNT_MISMATCH",
-      message: `SVG measure count (${svgMeasures.length}) differs from MIDI measure count (${spans.length}); aligning linearly over ${Math.min(svgMeasures.length, spans.length)} measures.`,
+      message: `Unfolded SVG measure count (${unfoldedOrder.length}) differs from MIDI measure count (${spans.length}); aligning over ${count} unfolded measures.`,
     });
+    alignmentPairs = Array.from({ length: count }, (_, idx) => ({
+      spanIdx: idx,
+      printedIdx: unfoldedOrder[idx],
+    }));
+  } else {
+    const count = Math.min(svgMeasures.length, spans.length);
+    diagnostics.push({
+      level: "warning",
+      code: "MEASURE_COUNT_MISMATCH",
+      message: `SVG measure count (${svgMeasures.length}) differs from MIDI measure count (${spans.length}); aligning linearly over ${count} measures.`,
+    });
+    alignmentPairs = Array.from({ length: count }, (_, idx) => ({
+      spanIdx: idx,
+      printedIdx: idx,
+    }));
   }
 
-  const measureCount = Math.min(svgMeasures.length, spans.length);
-  const buildMeasures: BuildMeasure[] = [];
-  let prevKeyFifths: number | undefined;
-  let prevBeats: number | undefined;
-  let prevBeatType: number | undefined;
+  const builtByPrintedIdx = new Map<
+    number,
+    { measure: BuildMeasure; keyFifths: number; mode: "major" | "minor"; beats: number; beatType: number }
+  >();
 
-  // Track active MIDI notes crossing measure boundaries: key = `${pitch}:${voice}` -> last BuildNote
+  // Track active MIDI notes crossing measure boundaries
   const activeTieOutByNote = new Map<RawMidiNote, BuildNote>();
 
-  for (let mIdx = 0; mIdx < measureCount; mIdx++) {
-    const span = spans[mIdx];
-    const svgM = svgMeasures[mIdx];
-    const measureNumber = Number.parseInt(span.number, 10) || mIdx + 1;
+  for (const { spanIdx, printedIdx } of alignmentPairs) {
+    const span = spans[spanIdx];
+    const svgM = svgMeasures[printedIdx];
+    const measureNumber = printedIdx + 1;
 
     const ks = activeKeySigAt(rawMidi.keySigs, span.startTick);
     const ts = activeTimeSigAt(rawMidi.timeSigs, span.startTick);
-    let attrs: BuildAttributes | undefined;
-    if (
-      mIdx === 0 ||
-      ks.fifths !== prevKeyFifths ||
-      ts.numerator !== prevBeats ||
-      ts.denominator !== prevBeatType
-    ) {
-      attrs = {};
-      if (mIdx === 0) {
-        attrs.divisions = ppq;
-        attrs.staves = maxStaves;
-      }
-      if (mIdx === 0 || ks.fifths !== prevKeyFifths) {
-        attrs.fifths = ks.fifths;
-        attrs.mode = ks.mode;
-      }
-      if (mIdx === 0 || ts.numerator !== prevBeats || ts.denominator !== prevBeatType) {
-        attrs.beats = ts.numerator;
-        attrs.beatType = ts.denominator;
-      }
-    }
-    prevKeyFifths = ks.fifths;
-    prevBeats = ts.numerator;
-    prevBeatType = ts.denominator;
 
     const handVoiceMap = computeHandAndVoiceMap(svgM.noteheads, svgM.staffSpace);
     const visualCols = groupVisualColumns(svgM.noteheads, svgM.staffSpace);
@@ -530,14 +664,79 @@ export function alignSvgsAndMidi(
         staff: maxStaves,
       }));
 
+    if (!builtByPrintedIdx.has(printedIdx)) {
+      const endingNum = svgM.volta?.numbers.join(",");
+      const navMarkers: BuildNavMarker[] | undefined = svgM.navMarkers?.map((nm) => ({
+        kind: nm.kind,
+        text: nm.text,
+      }));
+
+      builtByPrintedIdx.set(printedIdx, {
+        measure: {
+          number: span.implicit && printedIdx === 0 ? "0" : String(printedIdx + 1),
+          implicit: (span.implicit && printedIdx === 0) || undefined,
+          duration: span.duration,
+          tempos: tempos.length > 0 ? tempos : undefined,
+          pedals: pedals.length > 0 ? pedals : undefined,
+          notes: buildNotes,
+          repeatStart: svgM.repeatStart || undefined,
+          repeatStop: svgM.repeatStop || undefined,
+          endingStart: svgM.volta?.isStart && endingNum ? endingNum : undefined,
+          endingStop:
+            svgM.volta?.isStop && endingNum
+              ? {
+                  number: endingNum,
+                  type: svgM.repeatStop ? "stop" : "stop",
+                }
+              : undefined,
+          navMarkers: navMarkers && navMarkers.length > 0 ? navMarkers : undefined,
+        },
+        keyFifths: ks.fifths,
+        mode: ks.mode,
+        beats: ts.numerator,
+        beatType: ts.denominator,
+      });
+    }
+  }
+
+  // Emit printed measures in score order with attributes assigned cleanly
+  const buildMeasures: BuildMeasure[] = [];
+  let prevKeyFifths: number | undefined;
+  let prevBeats: number | undefined;
+  let prevBeatType: number | undefined;
+  const sortedPrintedIndices = Array.from(builtByPrintedIdx.keys()).sort((a, b) => a - b);
+
+  for (let idx = 0; idx < sortedPrintedIndices.length; idx++) {
+    const pIdx = sortedPrintedIndices[idx];
+    const entry = builtByPrintedIdx.get(pIdx)!;
+    let attrs: BuildAttributes | undefined;
+    if (
+      idx === 0 ||
+      entry.keyFifths !== prevKeyFifths ||
+      entry.beats !== prevBeats ||
+      entry.beatType !== prevBeatType
+    ) {
+      attrs = {};
+      if (idx === 0) {
+        attrs.divisions = ppq;
+        attrs.staves = maxStaves;
+      }
+      if (idx === 0 || entry.keyFifths !== prevKeyFifths) {
+        attrs.fifths = entry.keyFifths;
+        attrs.mode = entry.mode;
+      }
+      if (idx === 0 || entry.beats !== prevBeats || entry.beatType !== prevBeatType) {
+        attrs.beats = entry.beats;
+        attrs.beatType = entry.beatType;
+      }
+    }
+    prevKeyFifths = entry.keyFifths;
+    prevBeats = entry.beats;
+    prevBeatType = entry.beatType;
+
     buildMeasures.push({
-      number: span.number,
-      implicit: span.implicit || undefined,
-      duration: span.duration,
+      ...entry.measure,
       attributes: attrs,
-      tempos: tempos.length > 0 ? tempos : undefined,
-      pedals: pedals.length > 0 ? pedals : undefined,
-      notes: buildNotes,
     });
   }
 
