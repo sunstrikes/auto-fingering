@@ -261,7 +261,7 @@ async function resolveAuthSuffix(
 
 async function fetchJmuseAssetUrl(params: {
   id: number;
-  type: "img" | "midi";
+  type: "img" | "midi" | "pdf";
   index: number;
   scoreOrigin: string;
   scoreUrl: string;
@@ -400,13 +400,16 @@ async function fetchPageAssets(params: {
   return pages;
 }
 
-/**
- * Fetch MuseScore page metadata, SVG/PNG page assets, and MIDI buffer using pure Node.js fetch.
- */
-export async function downloadMuseScoreAssets(
+async function fetchScoreMetaAndSuffix(
   input: string | number,
   options?: MuseScoreDownloadOptions
-): Promise<DownloadedMuseScoreAssets> {
+): Promise<{
+  fetchFn: typeof fetch;
+  target: MuseScoreInputTarget;
+  scoreOrigin: string;
+  meta: MuseScorePageMetadata;
+  suffix?: string;
+}> {
   const fetchFn = options?.fetchImpl ?? globalThis.fetch;
   if (!fetchFn) {
     throw new Error("Global fetch is not available in this environment.");
@@ -427,8 +430,21 @@ export async function downloadMuseScoreAssets(
   }
   const html = await pageRes.text();
   const meta = parseMuseScoreHtmlMetadata(html, target.scoreId, scoreOrigin);
-
   const suffix = await resolveAuthSuffix(meta.jsBundleUrls, scoreOrigin, fetchFn, options);
+  return { fetchFn, target, scoreOrigin, meta, suffix };
+}
+
+/**
+ * Fetch MuseScore page metadata, SVG/PNG page assets, and MIDI buffer using pure Node.js fetch.
+ */
+export async function downloadMuseScoreAssets(
+  input: string | number,
+  options?: MuseScoreDownloadOptions
+): Promise<DownloadedMuseScoreAssets> {
+  const { fetchFn, target, scoreOrigin, meta, suffix } = await fetchScoreMetaAndSuffix(
+    input,
+    options
+  );
   const maxPages = options?.maxPages ?? DEFAULT_MAX_PAGES;
 
   const pages = await fetchPageAssets({
@@ -463,6 +479,30 @@ export async function downloadMuseScoreAssets(
     pages,
     midiBuffer,
   };
+}
+
+/**
+ * Fetch optional PDF asset for a MuseScore score via /api/jmuse (type=pdf, index=0).
+ */
+export async function downloadMuseScorePdf(
+  input: string | number,
+  options?: MuseScoreDownloadOptions
+): Promise<Uint8Array> {
+  const { fetchFn, target, scoreOrigin, meta, suffix } = await fetchScoreMetaAndSuffix(
+    input,
+    options
+  );
+  const pdfUrl = await fetchJmuseAssetUrl({
+    id: meta.id,
+    type: "pdf",
+    index: 0,
+    scoreOrigin,
+    scoreUrl: target.scoreUrl,
+    suffix,
+    fetchFn,
+    options,
+  });
+  return fetchBinaryAsset(pdfUrl, scoreOrigin, fetchFn, options);
 }
 
 /**

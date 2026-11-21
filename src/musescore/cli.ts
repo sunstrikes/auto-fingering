@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, extname, resolve } from "node:path";
 import { exportMxlContainer } from "../musicxml/mxl";
-import { downloadAndConvertMuseScore } from "./downloader";
+import { downloadAndConvertMuseScore, downloadMuseScorePdf } from "./downloader";
 import type { ConversionDiagnostics } from "./types";
 
 export interface CliIo {
@@ -14,6 +14,7 @@ interface ParsedArgs {
   help: boolean;
   target?: string;
   outPath?: string;
+  pdfPath?: string;
   format?: "musicxml" | "mxl";
   cookie?: string;
   headers: Record<string, string>;
@@ -28,6 +29,7 @@ Fetch MuseScore 4 SVG/PNG pages + MIDI and convert to MusicXML 4.0 (.musicxml / 
 
 Options:
   -o, --out <path>          Output file path (.musicxml or .mxl)
+  --pdf <path>              Also download MuseScore PDF to <path>
   --format <musicxml|mxl>   Output format (inferred from -o extension if omitted)
   --cookie <cookie>         Browser session Cookie header (or MUSESCORE_COOKIE env)
   --header <Key: Value>     Extra HTTP header for MuseScore origin (repeatable)
@@ -58,6 +60,12 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       const val = argv[++i];
       if (!val) throw new Error(`Missing value for ${arg}`);
       parsed.outPath = val;
+      continue;
+    }
+    if (arg === "--pdf") {
+      const val = argv[++i];
+      if (!val) throw new Error("Missing value for --pdf");
+      parsed.pdfPath = val;
       continue;
     }
     if (arg === "--format") {
@@ -121,10 +129,12 @@ function sanitizeFilename(name: string): string {
 function buildDiagnosticSummary(
   diagnostics: ConversionDiagnostics,
   outPath: string,
-  format: "musicxml" | "mxl"
+  format: "musicxml" | "mxl",
+  pdfPath?: string
 ) {
   return {
     outputPath: outPath,
+    ...(pdfPath !== undefined ? { pdfPath } : {}),
     format,
     totalPages: diagnostics.totalPages,
     svgPagesParsed: diagnostics.svgPagesParsed,
@@ -144,6 +154,7 @@ function buildDiagnosticSummary(
 function formatTextSummary(summary: ReturnType<typeof buildDiagnosticSummary>): string {
   const lines = [
     `Wrote ${summary.format.toUpperCase()} to ${summary.outputPath}`,
+    ...(summary.pdfPath ? [`Wrote PDF to ${summary.pdfPath}`] : []),
     `svgPagesParsed: ${summary.svgPagesParsed}`,
     `pngPagesSkipped: ${summary.pngPagesSkipped}`,
     `measuresAligned: ${summary.measuresAligned}`,
@@ -212,7 +223,19 @@ export async function runCli(
       writeFileSync(outPath, result.xml, "utf8");
     }
 
-    const summary = buildDiagnosticSummary(result.diagnostics, outPath, inferredFormat);
+    let pdfOutPath: string | undefined;
+    if (args.pdfPath) {
+      const pdfBytes = await downloadMuseScorePdf(args.target, {
+        baseOrigin: args.baseOrigin,
+        cookie,
+        headers: Object.keys(args.headers).length > 0 ? args.headers : undefined,
+      });
+      pdfOutPath = resolve(args.pdfPath);
+      mkdirSync(dirname(pdfOutPath), { recursive: true });
+      writeFileSync(pdfOutPath, pdfBytes);
+    }
+
+    const summary = buildDiagnosticSummary(result.diagnostics, outPath, inferredFormat, pdfOutPath);
     if (args.json) {
       io.stdout(JSON.stringify(summary, null, 2) + "\n");
     } else {

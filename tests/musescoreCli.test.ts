@@ -238,4 +238,101 @@ describe("MuseScore CLI entry point", () => {
     const xml = readFileSync(outPath, "utf8");
     expect(xml).toContain("<score-partwise");
   });
+
+  it("downloads optional PDF when --pdf <path> is provided", async () => {
+    const pdfPayload = new TextEncoder().encode("%PDF-1.4\n%%EOF\n");
+    const svg0 = readFileSync(resolve(FIXTURE_DIR, "04-partial-preview-p1.svg"));
+    const midiBuf = readFileSync(resolve(FIXTURE_DIR, "04-partial-preview.mid"));
+    const scoreId = 246810;
+    const suffix = "cli_pdf";
+
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (url.pathname === `/scores/${scoreId}`) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(`<html><head>
+<meta property="og:title" content="CLI PDF">
+<link rel="preload" href="/static/public/build/musescore_es6/202601.js">
+</head><body><img src="/scoredata/g/1234/score_0.svg" alt="Page 1 of 1 pages"></body></html>`);
+        return;
+      }
+      if (url.pathname === "/static/public/build/musescore_es6/202601.js") {
+        res.writeHead(200, { "content-type": "application/javascript" });
+        res.end(`("${suffix}").substr(0,4)`);
+        return;
+      }
+      if (url.pathname === "/api/jmuse") {
+        const type = url.searchParams.get("type");
+        const index = url.searchParams.get("index") ?? "0";
+        if (req.headers.authorization !== md5Prefix4(`${scoreId}${type}${index}${suffix}`)) {
+          res.writeHead(403);
+          res.end("forbidden");
+          return;
+        }
+        if (type === "img" && index === "0") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ info: { url: "/cdn/p0.svg" } }));
+          return;
+        }
+        if (type === "midi" && index === "0") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ info: { url: "/cdn/score.mid" } }));
+          return;
+        }
+        if (type === "pdf" && index === "0") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ info: { url: "/cdn/score.pdf" } }));
+          return;
+        }
+      }
+      if (url.pathname === "/cdn/p0.svg") {
+        res.writeHead(200, { "content-type": "image/svg+xml" });
+        res.end(svg0);
+        return;
+      }
+      if (url.pathname === "/cdn/score.mid") {
+        res.writeHead(200, { "content-type": "audio/midi" });
+        res.end(midiBuf);
+        return;
+      }
+      if (url.pathname === "/cdn/score.pdf") {
+        res.writeHead(200, { "content-type": "application/pdf" });
+        res.end(pdfPayload);
+        return;
+      }
+      res.writeHead(404);
+      res.end("not found");
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("Expected numeric port");
+    const origin = `http://127.0.0.1:${addr.port}`;
+    servers.push({
+      origin,
+      close: () => new Promise<void>((r, j) => server.close((e) => (e ? j(e) : r()))),
+    });
+
+    const dir = mkdtempSync(resolve(tmpdir(), "ms-cli-pdf-"));
+    tempDirs.push(dir);
+    const outPath = resolve(dir, "out.musicxml");
+    const pdfPath = resolve(dir, "out.pdf");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    const code = await runCli(
+      [`${origin}/scores/${scoreId}`, "-o", outPath, "--pdf", pdfPath, "--json"],
+      {
+        stdout: (m) => stdout.push(m),
+        stderr: (m) => stderr.push(m),
+      }
+    );
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(readFileSync(outPath, "utf8")).toContain("<score-partwise");
+    expect(readFileSync(pdfPath, "utf8")).toContain("%PDF-1.4");
+    const summary = JSON.parse(stdout.join(""));
+    expect(summary.pdfPath).toBe(pdfPath);
+  });
 });

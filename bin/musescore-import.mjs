@@ -6,38 +6,29 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Resolve extensionless relative imports (e.g. "./assetValidation" -> "./assetValidation.ts")
 // so Node.js >=22.12 can execute src/musescore/*.ts directly without a separate build step.
+function resolveExtensionlessTs(specifier, context, nextResolve) {
+  if (
+    (specifier.startsWith("./") || specifier.startsWith("../")) &&
+    !path.extname(specifier) &&
+    context.parentURL?.startsWith("file:")
+  ) {
+    const parentDir = path.dirname(fileURLToPath(context.parentURL));
+    const tsPath = path.resolve(parentDir, `${specifier}.ts`);
+    if (fs.existsSync(tsPath)) {
+      return nextResolve(pathToFileURL(tsPath).href, context);
+    }
+  }
+  return nextResolve(specifier, context);
+}
+
 if (typeof moduleApi.registerHooks === "function") {
-  moduleApi.registerHooks({
-    resolve(specifier, context, nextResolve) {
-      if (
-        (specifier.startsWith("./") || specifier.startsWith("../")) &&
-        !path.extname(specifier) &&
-        context.parentURL?.startsWith("file:")
-      ) {
-        const parentDir = path.dirname(fileURLToPath(context.parentURL));
-        const tsPath = path.resolve(parentDir, `${specifier}.ts`);
-        if (fs.existsSync(tsPath)) {
-          return nextResolve(pathToFileURL(tsPath).href, context);
-        }
-      }
-      return nextResolve(specifier, context);
-    },
-  });
+  moduleApi.registerHooks({ resolve: resolveExtensionlessTs });
 } else if (typeof moduleApi.register === "function") {
   const loaderSource = `
     import fs from "node:fs";
     import path from "node:path";
     import { fileURLToPath, pathToFileURL } from "node:url";
-    export function resolve(specifier, context, nextResolve) {
-      if ((specifier.startsWith("./") || specifier.startsWith("../")) && !path.extname(specifier) && context.parentURL?.startsWith("file:")) {
-        const parentDir = path.dirname(fileURLToPath(context.parentURL));
-        const tsPath = path.resolve(parentDir, specifier + ".ts");
-        if (fs.existsSync(tsPath)) {
-          return nextResolve(pathToFileURL(tsPath).href, context);
-        }
-      }
-      return nextResolve(specifier, context);
-    }
+    export const resolve = ${resolveExtensionlessTs.toString()};
   `;
   moduleApi.register(
     `data:text/javascript,${encodeURIComponent(loaderSource)}`,

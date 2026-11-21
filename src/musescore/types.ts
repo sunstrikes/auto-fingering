@@ -136,9 +136,6 @@ export interface BuildNote {
   tieStop?: boolean;
   slurStarts?: number[];
   slurStops?: number[];
-  slurStart?: boolean;
-  slurStop?: boolean;
-  slurNumber?: number;
   articulations?: ArticulationType[];
   stem?: "up" | "down";
   fingering?: number | string;

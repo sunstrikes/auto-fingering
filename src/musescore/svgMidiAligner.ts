@@ -626,11 +626,14 @@ export function closeBoundarySpanners(
   // 2. <slur> closure at SVG/fallback boundaries & end of score
   const openSlurs = new Map<number, { startNote: BuildNote; lastNote: BuildNote }>();
   const closeAllSlurs = () => {
-    for (const [, state] of openSlurs.entries()) {
+    for (const [num, state] of openSlurs.entries()) {
       if (state.lastNote === state.startNote) {
-        state.startNote.slurStart = undefined;
+        if (state.startNote.slurStarts) {
+          state.startNote.slurStarts = state.startNote.slurStarts.filter((n) => n !== num);
+          if (state.startNote.slurStarts.length === 0) state.startNote.slurStarts = undefined;
+        }
       } else {
-        state.lastNote.slurStop = true;
+        state.lastNote.slurStops = [...(state.lastNote.slurStops ?? []), num];
       }
     }
     openSlurs.clear();
@@ -642,19 +645,23 @@ export function closeBoundarySpanners(
     }
     for (const n of measures[mIdx].notes) {
       if (n.kind !== "note") continue;
-      const num = n.slurNumber ?? 1;
       for (const state of openSlurs.values()) {
         state.lastNote = n;
       }
-      if (n.slurStop) {
-        if (openSlurs.has(num)) {
-          openSlurs.delete(num);
-        } else {
-          n.slurStop = undefined;
+      if (n.slurStops && n.slurStops.length > 0) {
+        const keptStops: number[] = [];
+        for (const num of n.slurStops) {
+          if (openSlurs.has(num)) {
+            openSlurs.delete(num);
+            keptStops.push(num);
+          }
         }
+        n.slurStops = keptStops.length > 0 ? keptStops : undefined;
       }
-      if (n.slurStart) {
-        openSlurs.set(num, { startNote: n, lastNote: n });
+      if (n.slurStarts && n.slurStarts.length > 0) {
+        for (const num of n.slurStarts) {
+          openSlurs.set(num, { startNote: n, lastNote: n });
+        }
       }
     }
   }
@@ -1196,7 +1203,7 @@ export function alignSvgsAndMidi(
             pitch: {
               step: svg.step,
               alter: alter !== 0 ? alter : undefined,
-              octave: svg.octave,
+              octave: sOct,
             },
             duration: 0,
             voice: hv.voice,

@@ -187,8 +187,6 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
   const hasNotations =
     note.tieStop ||
     note.tieStart ||
-    note.slurStop ||
-    note.slurStart ||
     (note.slurStops?.length ?? 0) > 0 ||
     (note.slurStarts?.length ?? 0) > 0 ||
     (note.articulations?.length ?? 0) > 0 ||
@@ -202,12 +200,6 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
     }
     if (note.tieStart) {
       lines.push('          <tied type="start"/>');
-    }
-    if (note.slurStop) {
-      lines.push(`          <slur type="stop" number="${note.slurNumber ?? 1}"/>`);
-    }
-    if (note.slurStart) {
-      lines.push(`          <slur type="start" number="${note.slurNumber ?? 1}"/>`);
     }
     for (const num of note.slurStops ?? []) {
       lines.push(`          <slur type="stop" number="${num}"/>`);

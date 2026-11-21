@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import {
   downloadAndConvertMuseScore,
   downloadMuseScoreAssets,
+  downloadMuseScorePdf,
   parseMuseScoreInput,
 } from "../src/musescore";
 import { parseMusicXml } from "../src/musicxml/parser";
@@ -271,5 +272,70 @@ describe("MuseScore downloader & converter seam", () => {
     expect(result.diagnostics.svgPagesParsed).toBe(1);
     expect(result.diagnostics.pngPagesSkipped).toBe(0);
     expect(result.diagnostics.measuresAligned).toBeGreaterThan(0);
+  });
+
+  it("downloads optional PDF asset via /api/jmuse type=pdf without leaking cookies to CDN", async () => {
+    const pdfPayload = new TextEncoder().encode("%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n");
+    const scoreId = 334455;
+    const suffix = "pdf_suf";
+    const cdnCookies: Array<string | undefined> = [];
+    const msCookies: Array<string | undefined> = [];
+
+    const cdn = await startServer((req, res) => {
+      cdnCookies.push(req.headers.cookie);
+      if (req.url === "/assets/score.pdf") {
+        res.writeHead(200, { "content-type": "application/pdf" });
+        res.end(pdfPayload);
+        return;
+      }
+      res.writeHead(404);
+      res.end("Not Found");
+    });
+    servers.push(cdn);
+
+    const ms = await startServer((req, res) => {
+      msCookies.push(req.headers.cookie);
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (url.pathname === `/scores/${scoreId}`) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(`<html><head>
+<meta property="og:title" content="PDF Test">
+<link rel="preload" href="/static/public/build/musescore_es6/pdf.js">
+</head><body></body></html>`);
+        return;
+      }
+      if (url.pathname === "/static/public/build/musescore_es6/pdf.js") {
+        res.writeHead(200, { "content-type": "application/javascript" });
+        res.end(`("${suffix}").substr(0,4)`);
+        return;
+      }
+      if (url.pathname === "/api/jmuse") {
+        const type = url.searchParams.get("type");
+        const index = url.searchParams.get("index") ?? "0";
+        if (type === "pdf" && index === "0") {
+          const expected = md5Prefix4(`${scoreId}pdf0${suffix}`);
+          if (req.headers.authorization !== expected) {
+            res.writeHead(403);
+            res.end("bad auth");
+            return;
+          }
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ info: { url: `${cdn.origin}/assets/score.pdf` } }));
+          return;
+        }
+      }
+      res.writeHead(404);
+      res.end("Not Found");
+    });
+    servers.push(ms);
+
+    const bytes = await downloadMuseScorePdf(scoreId, {
+      baseOrigin: ms.origin,
+      cookie: "session=secret_pdf",
+    });
+
+    expect(new TextDecoder().decode(bytes)).toContain("%PDF-1.4");
+    expect(msCookies.every((c) => c === "session=secret_pdf")).toBe(true);
+    expect(cdnCookies).toEqual([undefined]);
   });
 });

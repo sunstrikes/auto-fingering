@@ -113,6 +113,7 @@ describe("PNG Page Guard, Preview Truncation & Boundary-Safe Partial Fallback (#
     expect(diagnostics.fallbackMeasures).toBe(2);
     expect(diagnostics.alignmentConfidence).toBe(0);
     expect(diagnostics.some((d) => d.level === "warning" && d.code === "PNG_PAGE_SKIPPED")).toBe(true);
+    expect(diagnostics.some((d) => d.code === "PREVIEW_TRUNCATED")).toBe(false);
     expect(diagnostics.some((d) => d.level === "error")).toBe(false);
 
     const score = parseMusicXml(xml, domDeps);
@@ -320,8 +321,7 @@ describe("PNG Page Guard, Preview Truncation & Boundary-Safe Partial Fallback (#
               voice: "1",
               staff: 1,
               type: "half",
-              slurStart: true,
-              slurNumber: 1,
+              slurStarts: [1],
             },
             {
               kind: "note",
@@ -371,5 +371,68 @@ describe("PNG Page Guard, Preview Truncation & Boundary-Safe Partial Fallback (#
     expect(score.noteEvents).toHaveLength(3);
     expect(score.pedalIntervals).toHaveLength(1);
     expect(score.pedalIntervals![0]).toMatchObject({ startTick: 0, endTick: 1920 });
+  });
+
+  it("closes multiple slurStarts across boundaries and strips unmatched slurStops", () => {
+    const model: ScoreBuildModel = {
+      title: "Test",
+      divisions: 480,
+      staves: 1,
+      measures: [
+        {
+          number: "1",
+          duration: 1920,
+          attributes: { divisions: 480, fifths: 0, mode: "major", beats: 4, beatType: 4, staves: 1 },
+          notes: [
+            {
+              kind: "note",
+              onsetOffset: 0,
+              pitch: { step: "C", octave: 4 },
+              duration: 960,
+              voice: "1",
+              staff: 1,
+              type: "half",
+              slurStarts: [1, 2],
+            },
+            {
+              kind: "note",
+              onsetOffset: 960,
+              pitch: { step: "D", octave: 4 },
+              duration: 960,
+              voice: "1",
+              staff: 1,
+              type: "half",
+              slurStops: [2],
+            },
+          ],
+        },
+        {
+          number: "2",
+          duration: 1920,
+          notes: [
+            {
+              kind: "note",
+              onsetOffset: 0,
+              pitch: { step: "E", octave: 4 },
+              duration: 1920,
+              voice: "1",
+              staff: 1,
+              type: "whole",
+              slurStops: [1],
+            },
+          ],
+        },
+      ],
+    };
+
+    closeBoundarySpanners(model.measures, [false, true]);
+    const xml = buildMusicXml(model);
+    const m1Match = xml.match(/<measure number="1">[\s\S]*?<\/measure>/);
+    const m2Match = xml.match(/<measure number="2">[\s\S]*?<\/measure>/);
+    expect(m1Match![0]).toContain('<slur type="start" number="1"/>');
+    expect(m1Match![0]).toContain('<slur type="start" number="2"/>');
+    expect(m1Match![0]).toContain('<slur type="stop" number="2"/>');
+    expect(m1Match![0]).toContain('<slur type="stop" number="1"/>');
+    expect(m2Match![0]).not.toContain("<slur");
   });
 });

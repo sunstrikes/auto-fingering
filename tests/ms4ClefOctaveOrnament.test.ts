@@ -304,4 +304,40 @@ describe("MS4 mid-measure clefs, octave shifts (8va/8vb/15ma/15mb), and ornament
       48,
     ]);
   });
+
+  it("emits sounding octave for grace notes under 8va octave shifts", () => {
+    // Staff 1: topY=100, bottomY=180, ss=20. Written C5 (y=130) under 8va -> sounding C6 (MIDI 84).
+    const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 600 300" xmlns="http://www.w3.org/2000/svg">
+  ${[100, 120, 140, 160, 180].map((y) => `<polyline class="StaffLines" points="50,${y} 550,${y}" />`).join("\n  ")}
+  <polyline class="BarLine" points="50,100 50,180" />
+  <polyline class="BarLine" points="550,100 550,180" />
+  <path class="Clef" d="M60,75 L90,75 L90,205 L60,205 Z"/>
+  <path class="OttavaSegment" d="M180,48 L205,48 L205,80 L180,80 Z"/>
+  <polyline class="OttavaSegment" points="210,52 350,52" />
+  <path class="Note" d="M194,125 L206,125 L206,135 L194,135 Z"/>
+  <path class="Note" d="M250,122 L270,122 L270,138 L250,138 Z"/>
+</svg>`;
+
+    const ppq = 480;
+    const track = [
+      ...encodeVlq(0), 0xff, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08,
+      ...encodeVlq(0), 0x90, 84, 80,
+      ...encodeVlq(60), 0x80, 84, 0,
+      ...encodeVlq(0), 0x90, 84, 80,
+      ...encodeVlq(420), 0x80, 84, 0,
+      ...encodeVlq(0), 0xff, 0x2f, 0x00,
+    ];
+
+    const { xml, diagnostics } = svgsAndMidiToMusicXml([svg], buildSmf(ppq, [track]));
+    expect(diagnostics.some((d) => d.code === "ALIGNMENT_ALTER_OUT_OF_RANGE")).toBe(false);
+
+    const docXml = new domDeps.DOMParser().parseFromString(xml, "application/xml");
+    const graceNotes = Array.from(docXml.querySelectorAll("note")).filter(
+      (n) => n.querySelector("grace") !== null
+    );
+    expect(graceNotes).toHaveLength(1);
+    expect(graceNotes[0].querySelector("pitch > step")?.textContent).toBe("C");
+    expect(graceNotes[0].querySelector("pitch > octave")?.textContent).toBe("6");
+  });
 });

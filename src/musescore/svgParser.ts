@@ -1,16 +1,14 @@
 import type { ArticulationType, BuildOrnament, BuildPitch, DynamicMarking } from "./types";
 import { classifyFingeringPath, parseFingeringText } from "./fingeringClassifier";
+import {
+  applyMatrix,
+  computeBBox,
+  extractPathPoints,
+  type BBox,
+  type Matrix2D,
+} from "./svgPath";
 
-export interface BBox {
-  minX: number;
-  minY: number;
-  maxX: number;
-  maxY: number;
-  cx: number;
-  cy: number;
-  width: number;
-  height: number;
-}
+export type { BBox } from "./svgPath";
 
 export interface SvgStaff {
   staffNumber: 1 | 2;
@@ -218,8 +216,6 @@ export interface ParsedSvgPage {
   timeSigCount: number;
 }
 
-type Matrix2D = [number, number, number, number, number, number];
-
 const IDENTITY_MATRIX: Matrix2D = [1, 0, 0, 1, 0, 0];
 
 function multiplyMatrix(m1: Matrix2D, m2: Matrix2D): Matrix2D {
@@ -231,10 +227,6 @@ function multiplyMatrix(m1: Matrix2D, m2: Matrix2D): Matrix2D {
     m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
     m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
   ];
-}
-
-function applyMatrix(m: Matrix2D, x: number, y: number): [number, number] {
-  return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
 }
 
 function parseTransformAttr(attr: string | undefined): Matrix2D {
@@ -297,197 +289,6 @@ function parseAttributes(attrStr: string): Record<string, string> {
     attrs[m[1]] = m[2] ?? m[3] ?? "";
   }
   return attrs;
-}
-
-function extractPathPoints(d: string, matrix: Matrix2D): Array<[number, number]> {
-  const pts: Array<[number, number]> = [];
-  const cmds = d.match(/[a-zA-Z][^a-zA-Z]*/g);
-  if (!cmds) return pts;
-
-  let cx = 0;
-  let cy = 0;
-  let startX = 0;
-  let startY = 0;
-
-  const push = (x: number, y: number) => {
-    pts.push(applyMatrix(matrix, x, y));
-  };
-
-  for (const cmd of cmds) {
-    const op = cmd[0];
-    const args = (cmd.slice(1).match(/-?\d*\.?\d+(?:e[-+]?\d+)?/gi) ?? []).map(Number);
-
-    switch (op) {
-      case "M":
-        for (let i = 0; i + 1 < args.length; i += 2) {
-          cx = args[i];
-          cy = args[i + 1];
-          if (i === 0) {
-            startX = cx;
-            startY = cy;
-          }
-          push(cx, cy);
-        }
-        break;
-      case "m":
-        for (let i = 0; i + 1 < args.length; i += 2) {
-          cx += args[i];
-          cy += args[i + 1];
-          if (i === 0) {
-            startX = cx;
-            startY = cy;
-          }
-          push(cx, cy);
-        }
-        break;
-      case "L":
-        for (let i = 0; i + 1 < args.length; i += 2) {
-          cx = args[i];
-          cy = args[i + 1];
-          push(cx, cy);
-        }
-        break;
-      case "l":
-        for (let i = 0; i + 1 < args.length; i += 2) {
-          cx += args[i];
-          cy += args[i + 1];
-          push(cx, cy);
-        }
-        break;
-      case "H":
-        for (const x of args) {
-          cx = x;
-          push(cx, cy);
-        }
-        break;
-      case "h":
-        for (const dx of args) {
-          cx += dx;
-          push(cx, cy);
-        }
-        break;
-      case "V":
-        for (const y of args) {
-          cy = y;
-          push(cx, cy);
-        }
-        break;
-      case "v":
-        for (const dy of args) {
-          cy += dy;
-          push(cx, cy);
-        }
-        break;
-      case "C":
-        for (let i = 0; i + 5 < args.length; i += 6) {
-          push(args[i], args[i + 1]);
-          push(args[i + 2], args[i + 3]);
-          cx = args[i + 4];
-          cy = args[i + 5];
-          push(cx, cy);
-        }
-        break;
-      case "c":
-        for (let i = 0; i + 5 < args.length; i += 6) {
-          push(cx + args[i], cy + args[i + 1]);
-          push(cx + args[i + 2], cy + args[i + 3]);
-          cx += args[i + 4];
-          cy += args[i + 5];
-          push(cx, cy);
-        }
-        break;
-      case "S":
-        for (let i = 0; i + 3 < args.length; i += 4) {
-          push(args[i], args[i + 1]);
-          cx = args[i + 2];
-          cy = args[i + 3];
-          push(cx, cy);
-        }
-        break;
-      case "s":
-        for (let i = 0; i + 3 < args.length; i += 4) {
-          push(cx + args[i], cy + args[i + 1]);
-          cx += args[i + 2];
-          cy += args[i + 3];
-          push(cx, cy);
-        }
-        break;
-      case "Q":
-        for (let i = 0; i + 3 < args.length; i += 4) {
-          push(args[i], args[i + 1]);
-          cx = args[i + 2];
-          cy = args[i + 3];
-          push(cx, cy);
-        }
-        break;
-      case "q":
-        for (let i = 0; i + 3 < args.length; i += 4) {
-          push(cx + args[i], cy + args[i + 1]);
-          cx += args[i + 2];
-          cy += args[i + 3];
-          push(cx, cy);
-        }
-        break;
-      case "T":
-        for (let i = 0; i + 1 < args.length; i += 2) {
-          cx = args[i];
-          cy = args[i + 1];
-          push(cx, cy);
-        }
-        break;
-      case "t":
-        for (let i = 0; i + 1 < args.length; i += 2) {
-          cx += args[i];
-          cy += args[i + 1];
-          push(cx, cy);
-        }
-        break;
-      case "A":
-        for (let i = 0; i + 6 < args.length; i += 7) {
-          cx = args[i + 5];
-          cy = args[i + 6];
-          push(cx, cy);
-        }
-        break;
-      case "a":
-        for (let i = 0; i + 6 < args.length; i += 7) {
-          cx += args[i + 5];
-          cy += args[i + 6];
-          push(cx, cy);
-        }
-        break;
-      case "Z":
-      case "z":
-        cx = startX;
-        cy = startY;
-        break;
-    }
-  }
-  return pts;
-}
-
-function computeBBox(pts: Array<[number, number]>): BBox | null {
-  if (pts.length === 0) return null;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const [x, y] of pts) {
-    if (x < minX) minX = x;
-    if (y < minY) minY = y;
-    if (x > maxX) maxX = x;
-    if (y > maxY) maxY = y;
-  }
-  return {
-    minX,
-    minY,
-    maxX,
-    maxY,
-    cx: (minX + maxX) / 2,
-    cy: (minY + maxY) / 2,
-    width: maxX - minX,
-    height: maxY - minY,
-  };
 }
 
 function scanSvgShapes(svgText: string): {
@@ -1768,30 +1569,6 @@ const VALID_DYNAMICS = new Set<string>([
   "fp", "sf", "sfp", "sfpp", "sfz", "sffz", "fz", "rf", "rfz",
 ]);
 
-function computeBBoxFromPts(pts: Array<[number, number]>): BBox | null {
-  if (pts.length === 0) return null;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const [x, y] of pts) {
-    if (x < minX) minX = x;
-    if (y < minY) minY = y;
-    if (x > maxX) maxX = x;
-    if (y > maxY) maxY = y;
-  }
-  return {
-    minX,
-    minY,
-    maxX,
-    maxY,
-    cx: (minX + maxX) / 2,
-    cy: (minY + maxY) / 2,
-    width: maxX - minX,
-    height: maxY - minY,
-  };
-}
-
 function classifyDynamic(shape: RawSvgShape, staffSpace: number): DynamicMarking | null {
   const attrDyn = shape.attrs["data-dynamic"]?.trim().toLowerCase();
   if (attrDyn && VALID_DYNAMICS.has(attrDyn)) {
@@ -1803,7 +1580,7 @@ function classifyDynamic(shape: RawSvgShape, staffSpace: number): DynamicMarking
   const subBoxes: BBox[] = [];
   for (const part of subParts) {
     const pts = extractPathPoints(part, shape.matrix);
-    const b = computeBBoxFromPts(pts);
+    const b = computeBBox(pts);
     if (b && b.width > 0 && b.height > 0) subBoxes.push(b);
   }
   if (subBoxes.length === 0) return null;
