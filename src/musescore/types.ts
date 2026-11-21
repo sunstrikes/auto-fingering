@@ -83,6 +83,11 @@ export interface BuildPitch {
   octave: number;
 }
 
+export type BuildOrnament =
+  | { kind: "trill" }
+  | { kind: "turn" }
+  | { kind: "tremolo"; marks: number };
+
 export interface BuildNote {
   kind: "note" | "rest";
   onsetOffset?: number; // offset from measure start in divisions
@@ -99,6 +104,7 @@ export interface BuildNote {
   stem?: "up" | "down";
   fingering?: number;
   arpeggiate?: boolean;
+  ornament?: BuildOrnament;
   measureRest?: boolean;
 }
 
@@ -111,6 +117,20 @@ export interface BuildPedalEvent {
 export interface BuildTempoEvent {
   tickOffset: number; // offset from measure start in divisions
   bpm: number;
+}
+
+export interface BuildClefEvent {
+  tickOffset: number; // offset from measure start in divisions
+  staff: 1 | 2;
+  sign: "G" | "F";
+  line: number;
+}
+
+export interface BuildOctaveShiftEvent {
+  tickOffset: number; // offset from measure start in divisions
+  type: "down" | "up" | "stop";
+  size: 8 | 15;
+  staff: 1 | 2;
 }
 
 export interface BuildAttributes {
@@ -127,6 +147,8 @@ export interface BuildMeasure {
   implicit?: boolean;
   duration: number; // total measure duration in divisions
   attributes?: BuildAttributes;
+  clefs?: BuildClefEvent[];
+  octaveShifts?: BuildOctaveShiftEvent[];
   tempos?: BuildTempoEvent[];
   pedals?: BuildPedalEvent[];
   notes: BuildNote[];
