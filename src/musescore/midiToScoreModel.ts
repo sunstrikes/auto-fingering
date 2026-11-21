@@ -23,7 +23,7 @@ export interface MeasureSpan {
   denominator: number;
 }
 
-interface NoteSegment {
+export interface NoteSegment {
   pitch: number;
   startTick: number;
   endTick: number;
@@ -201,7 +201,7 @@ export function buildMeasureSpans(
   return spans;
 }
 
-function assignStaffByTrack(rawMidi: RawMidiData, splitPitch: number): (note: RawMidiNote) => 1 | 2 {
+export function assignStaffByTrack(rawMidi: RawMidiData, splitPitch: number): (note: RawMidiNote) => 1 | 2 {
   const tracksWithNotes = new Set(rawMidi.notes.map((n) => n.track));
   if (tracksWithNotes.size >= 2) {
     const staffByTrack = new Map<number, 1 | 2>();
@@ -232,7 +232,7 @@ function assignStaffByTrack(rawMidi: RawMidiData, splitPitch: number): (note: Ra
   return (note) => (note.pitch >= splitPitch ? 1 : 2);
 }
 
-function buildStaffVoicesForMeasure(
+export function buildStaffVoicesForMeasure(
   segments: NoteSegment[],
   measureStart: number,
   measureDuration: number,

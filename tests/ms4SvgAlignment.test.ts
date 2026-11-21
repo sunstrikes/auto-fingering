@@ -287,4 +287,127 @@ describe("alignSvgsAndMidi (linear alignment, enharmonic solver, hand assignment
         .sort();
     expect(normalizeNotes(converted.noteEvents)).toEqual(normalizeNotes(oracle.noteEvents));
   });
+
+  it("aligns unfolded MIDI onto folded printed measures for 03-repeats-span and emits valid folded MusicXML 4.0", () => {
+    const svg = readFileSync(resolve(FIXTURE_DIR, "03-repeats-span-p1.svg"), "utf8");
+    const midi = readFileSync(resolve(FIXTURE_DIR, "03-repeats-span.mid"));
+
+    const { xml, diagnostics } = svgsAndMidiToMusicXml([svg], midi, {
+      title: "03-repeats-span",
+    });
+
+    expect(diagnostics.some((d) => d.level === "error")).toBe(false);
+    expect(diagnostics.some((d) => d.code === "MEASURE_COUNT_MISMATCH")).toBe(false);
+
+    // Folded MusicXML preserves 3 printed measures with repeat & ending elements
+    expect(xml).toContain('<repeat direction="forward"/>');
+    expect(xml).toContain('<repeat direction="backward"/>');
+    expect(xml).toContain('<ending number="1" type="start"/>');
+    expect(xml).toContain('<ending number="1" type="stop"/>');
+    expect(xml).toContain('<ending number="2" type="start"/>');
+    expect(xml).toContain('<ending number="2" type="stop"/>');
+
+    const score = parseMusicXml(xml, domDeps);
+    expect(score.measureCount).toBe(3);
+    expect(score.measureTimelines).toHaveLength(3);
+    for (let i = 0; i < 3; i++) {
+      expect(score.measureTimelines[i].endTick).toBeGreaterThan(
+        score.measureTimelines[i].startTick
+      );
+    }
+
+    // Measure 0: D3(50), D4(62), E4(64), F#4(66), G4(67)
+    const m0Pitches = score.noteEvents
+      .filter((n) => n.measureIndex === 0)
+      .map((n) => n.midi)
+      .sort((a, b) => a - b);
+    expect(m0Pitches).toEqual([50, 62, 64, 66, 67]);
+
+    // Measure 1 (Volta 1): A2(45)
+    const m1Pitches = score.noteEvents
+      .filter((n) => n.measureIndex === 1)
+      .map((n) => n.midi);
+    expect(m1Pitches).toContain(45);
+
+    // Measure 2 (Volta 2): D3(50), D5(74) (plus rolled arpeggio F#5(78) in MIDI) - aligned without post-repeat drift
+    const m2Pitches = score.noteEvents
+      .filter((n) => n.measureIndex === 2)
+      .map((n) => n.midi)
+      .sort((a, b) => a - b);
+    expect(m2Pitches).toContain(50);
+    expect(m2Pitches).toContain(74);
+    expect(m2Pitches).not.toContain(62);
+  });
+
+  it("extracts D.S. al Coda / Segno / Coda markers, aligns unfolded MIDI onto folded printed measures without drift, and emits valid MusicXML 4.0", () => {
+    const ppq = 480;
+    // 5 printed measures in 4/4 (x ranges: [50..230], [230..410], [410..590], [590..770], [770..950])
+    // M0: C4 (60, y=200)
+    // M1 (Segno): D4 (62, y=190)
+    // M2 (To Coda): E4 (64, y=180)
+    // M3 (D.S. al Coda): F4 (65, y=170)
+    // M4 (Coda): G4 (67, y=160)
+    const lines = [100, 120, 140, 160, 180]
+      .map((y) => `<polyline class="StaffLines" points="50,${y} 950,${y}" />`)
+      .join("\n");
+    const barXs = [50, 230, 410, 590, 770, 950];
+    const bars = barXs
+      .map((x) => `<polyline class="BarLine" points="${x},100 ${x},180" />`)
+      .join("\n");
+    const noteXs = [140, 320, 500, 680, 860];
+    const noteYs = [200, 190, 180, 170, 160];
+    const notes = noteXs
+      .map(
+        (x, i) =>
+          `<path class="Note" d="M${x - 10},${noteYs[i] - 8} L${x + 10},${noteYs[i] - 8} L${x + 10},${noteYs[i] + 8} L${x - 10},${noteYs[i] + 8} Z" />`
+      )
+      .join("\n");
+    const navSvg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1000 400" xmlns="http://www.w3.org/2000/svg">
+  ${lines}
+  ${bars}
+  ${notes}
+  <text class="Marker" x="260" y="70">Segno</text>
+  <text class="Jump" x="520" y="70">To Coda</text>
+  <text class="Jump" x="700" y="70">D.S. al Coda</text>
+  <text class="Marker" x="800" y="70">Coda</text>
+</svg>`;
+
+    // Unfolded MIDI: 7 measures -> M0(C4), M1(D4), M2(E4), M3(F4), M1(D4), M2(E4), M4(G4)
+    const unfoldedPitches = [60, 62, 64, 65, 62, 64, 67];
+    const track: number[] = [
+      ...encodeVlq(0), 0xff, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08, // 4/4
+    ];
+    for (const pitch of unfoldedPitches) {
+      track.push(
+        ...encodeVlq(0), 0x90, pitch, 80,
+        ...encodeVlq(1920), 0x80, pitch, 0
+      );
+    }
+    track.push(...encodeVlq(0), 0xff, 0x2f, 0x00);
+
+    const { xml, diagnostics } = svgsAndMidiToMusicXml(
+      [navSvg],
+      buildSmf(ppq, [track]),
+      { title: "D.S. al Coda Test" }
+    );
+
+    expect(diagnostics.some((d) => d.level === "error")).toBe(false);
+    expect(diagnostics.some((d) => d.code === "MEASURE_COUNT_MISMATCH")).toBe(false);
+    expect(xml).toContain("<segno/>");
+    expect(xml).toContain("<coda/>");
+    expect(xml).toContain("D.S. al Coda");
+    expect(xml).toContain("To Coda");
+
+    const score = parseMusicXml(xml, domDeps);
+    expect(score.measureCount).toBe(5);
+    expect(score.measureTimelines).toHaveLength(5);
+    expect(score.noteEvents.map((n) => `${n.measureIndex}:${n.midi}`)).toEqual([
+      "0:60",
+      "1:62",
+      "2:64",
+      "3:65",
+      "4:67",
+    ]);
+  });
 });

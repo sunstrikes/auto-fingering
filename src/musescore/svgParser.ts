@@ -28,11 +28,40 @@ export interface SvgClef {
   bbox: BBox;
 }
 
+export interface SvgVolta {
+  numbers: number[];
+  isStart: boolean;
+  isStop: boolean;
+}
+
+export type SvgNavMarkerKind =
+  | "segno"
+  | "coda"
+  | "fine"
+  | "to-coda"
+  | "dc"
+  | "dc-al-fine"
+  | "dc-al-coda"
+  | "ds"
+  | "ds-al-fine"
+  | "ds-al-coda";
+
+export interface SvgNavMarker {
+  kind: SvgNavMarkerKind;
+  text: string;
+  x: number;
+  y: number;
+}
+
 export interface SvgMeasureRegion {
   measureIndex: number;
   systemIndex: number;
   minX: number;
   maxX: number;
+  repeatStart?: boolean;
+  repeatStop?: boolean;
+  volta?: SvgVolta;
+  navMarkers?: SvgNavMarker[];
 }
 
 export interface SvgSystem {
@@ -195,7 +224,8 @@ interface RawSvgShape {
   attrs: Record<string, string>;
   points: Array<[number, number]>;
   bbox: BBox;
-  subpathCount: number;
+  subpathCount?: number;
+  textContent?: string;
 }
 
 function parseAttributes(attrStr: string): Record<string, string> {
@@ -444,6 +474,35 @@ function scanSvgShapes(svgText: string): {
       matrixStack.push(currentMatrix);
     }
 
+    if (tag === "text" && !isSelfClosing) {
+      const closeIdx = cleaned.indexOf("</text>", tagRegex.lastIndex);
+      if (closeIdx !== -1) {
+        const inner = cleaned
+          .slice(tagRegex.lastIndex, closeIdx)
+          .replace(/<[^>]+>/g, "")
+          .trim();
+        const x = Number(attrs.x ?? 0);
+        const y = Number(attrs.y ?? 0);
+        const pt = applyMatrix(currentMatrix, x, y);
+        const classes = new Set(
+          (attrs.class ?? "")
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean)
+        );
+        shapes.push({
+          tag,
+          classes,
+          matrix: currentMatrix,
+          attrs,
+          points: [pt],
+          bbox: computeBBox([pt])!,
+          textContent: inner,
+        });
+      }
+      continue;
+    }
+
     if (tag === "polyline" || tag === "polygon" || tag === "line" || tag === "rect" || tag === "path") {
       let pts: Array<[number, number]> = [];
       if (tag === "polyline" || tag === "polygon") {
@@ -651,9 +710,23 @@ function findNearestStaff(cy: number, sys: SvgSystem): SvgStaff {
   return best;
 }
 
+interface BarlineCluster {
+  minX: number;
+  maxX: number;
+  cx: number;
+  hasForwardRepeat: boolean;
+  hasBackwardRepeat: boolean;
+}
+
 function assignMeasuresFromBarlines(shapes: RawSvgShape[], systems: SvgSystem[]): Set<RawSvgShape> {
   const usedBarlines = new Set<RawSvgShape>();
   const semanticBars = shapes.filter((s) => s.classes.has("BarLine") && s.tag === "polyline");
+  const semanticDots = shapes.filter((s) => s.classes.has("BarLine") && s.tag === "path");
+
+  // Pre-collect note/rest shapes to detect empty clef/key/time header regions before a forward repeat
+  const noteOrRestShapes = shapes.filter(
+    (s) => s.classes.has("Note") || s.classes.has("Rest")
+  );
 
   for (const sys of systems) {
     const ss = sys.staves[0]?.staffSpace ?? 80;
@@ -685,43 +758,129 @@ function assignMeasuresFromBarlines(shapes: RawSvgShape[], systems: SvgSystem[])
 
     for (const b of sysBars) usedBarlines.add(b);
 
-    const xs = sysBars.map((b) => b.bbox.cx).sort((a, b) => a - b);
-    // Deduplicate double/repeat barline strokes within 0.8 * staffSpace
-    const dedupXs: number[] = [];
-    for (const x of xs) {
-      if (dedupXs.length === 0 || x - dedupXs[dedupXs.length - 1] > ss * 0.8) {
-        dedupXs.push(x);
+    // Repeat dots (semantic .BarLine path or small circular path inside staff)
+    let sysDots = semanticDots.filter(
+      (d) =>
+        d.bbox.maxY >= sys.minY - ss &&
+        d.bbox.minY <= sys.maxY + ss &&
+        d.bbox.width <= ss * 0.75 &&
+        d.bbox.height <= ss * 0.75
+    );
+    if (sysDots.length === 0 && semanticBars.length === 0) {
+      sysDots = shapes.filter(
+        (s) =>
+          s.tag === "path" &&
+          s.bbox.width >= ss * 0.2 &&
+          s.bbox.width <= ss * 0.65 &&
+          s.bbox.height >= ss * 0.2 &&
+          s.bbox.height <= ss * 0.65 &&
+          Math.abs(s.bbox.width - s.bbox.height) <= ss * 0.15 &&
+          sys.staves.some((st) => s.bbox.cy >= st.topY + ss && s.bbox.cy <= st.bottomY - ss)
+      );
+    }
+    for (const d of sysDots) usedBarlines.add(d);
+
+    const sortedBars = [...sysBars].sort((a, b) => a.bbox.cx - b.bbox.cx);
+    // Cluster double/repeat barline strokes within 0.85 * staffSpace
+    const clusters: BarlineCluster[] = [];
+    for (const b of sortedBars) {
+      const last = clusters[clusters.length - 1];
+      if (last && b.bbox.cx - last.maxX <= ss * 0.85) {
+        last.minX = Math.min(last.minX, b.bbox.cx);
+        last.maxX = Math.max(last.maxX, b.bbox.cx);
+        last.cx = (last.minX + last.maxX) / 2;
+      } else {
+        clusters.push({
+          minX: b.bbox.cx,
+          maxX: b.bbox.cx,
+          cx: b.bbox.cx,
+          hasForwardRepeat: false,
+          hasBackwardRepeat: false,
+        });
       }
     }
 
-    // Filter out system start barline near minStaffX
-    const dividerXs = dedupXs.filter((x) => x - minStaffX > ss * 0.6);
-    if (dividerXs.length === 0) {
+    // Associate repeat dots with nearest barline cluster
+    for (const dot of sysDots) {
+      let nearest: BarlineCluster | null = null;
+      let bestDist = Infinity;
+      for (const cl of clusters) {
+        const dist =
+          dot.bbox.cx < cl.minX
+            ? cl.minX - dot.bbox.cx
+            : dot.bbox.cx > cl.maxX
+              ? dot.bbox.cx - cl.maxX
+              : 0;
+        if (dist <= ss * 1.5 && dist < bestDist) {
+          bestDist = dist;
+          nearest = cl;
+        }
+      }
+      if (nearest) {
+        if (dot.bbox.cx > nearest.maxX) {
+          nearest.hasForwardRepeat = true;
+        } else if (dot.bbox.cx < nearest.minX) {
+          nearest.hasBackwardRepeat = true;
+        }
+      }
+    }
+
+    const systemStartCluster = clusters.find((c) => c.cx - minStaffX <= ss * 0.6);
+    const dividers = clusters.filter((c) => c.cx - minStaffX > ss * 0.6);
+
+    if (dividers.length === 0) {
       sys.measures.push({
         measureIndex: 0,
         systemIndex: sys.systemIndex,
         minX: minStaffX,
         maxX: maxStaffX,
+        ...(systemStartCluster?.hasForwardRepeat ? { repeatStart: true } : {}),
       });
-    } else {
-      let prevX = minStaffX;
-      for (const barX of dividerXs) {
-        sys.measures.push({
-          measureIndex: sys.measures.length,
-          systemIndex: sys.systemIndex,
-          minX: prevX,
-          maxX: barX,
-        });
-        prevX = barX;
+      continue;
+    }
+
+    // Check if the first divider is a forward repeat after an empty clef/key/time header
+    let startIdx = 0;
+    let prevX = minStaffX;
+    let prevCluster: BarlineCluster | undefined = systemStartCluster;
+
+    if (dividers[0].hasForwardRepeat) {
+      const hasNotesBeforeFirst = noteOrRestShapes.some(
+        (s) =>
+          s.bbox.cy >= sys.minY - ss * 3 &&
+          s.bbox.cy <= sys.maxY + ss * 3 &&
+          s.bbox.cx > minStaffX + ss * 0.5 &&
+          s.bbox.cx < dividers[0].minX - ss * 0.2
+      );
+      if (!hasNotesBeforeFirst) {
+        prevX = dividers[0].cx;
+        prevCluster = dividers[0];
+        startIdx = 1;
       }
-      if (maxStaffX - prevX > ss * 2) {
-        sys.measures.push({
-          measureIndex: sys.measures.length,
-          systemIndex: sys.systemIndex,
-          minX: prevX,
-          maxX: maxStaffX,
-        });
-      }
+    }
+
+    for (let i = startIdx; i < dividers.length; i++) {
+      const bar = dividers[i];
+      sys.measures.push({
+        measureIndex: sys.measures.length,
+        systemIndex: sys.systemIndex,
+        minX: prevX,
+        maxX: bar.cx,
+        ...(prevCluster?.hasForwardRepeat ? { repeatStart: true } : {}),
+        ...(bar.hasBackwardRepeat ? { repeatStop: true } : {}),
+      });
+      prevX = bar.cx;
+      prevCluster = bar;
+    }
+
+    if (maxStaffX - prevX > ss * 2) {
+      sys.measures.push({
+        measureIndex: sys.measures.length,
+        systemIndex: sys.systemIndex,
+        minX: prevX,
+        maxX: maxStaffX,
+        ...(prevCluster?.hasForwardRepeat ? { repeatStart: true } : {}),
+      });
     }
   }
 
@@ -731,6 +890,145 @@ function assignMeasuresFromBarlines(shapes: RawSvgShape[], systems: SvgSystem[])
 function classifyClefSign(clefShape: RawSvgShape, staffSpace: number): "G" | "F" {
   const heightRatio = clefShape.bbox.height / staffSpace;
   return heightRatio >= 4.2 ? "G" : "F";
+}
+
+function parseVoltaNumbersFromText(text: string): number[] {
+  const nums = (text.match(/\d+/g) ?? []).map(Number).filter((n) => n >= 1 && n <= 16);
+  return Array.from(new Set(nums));
+}
+
+function classifyVoltaPathDigit(shape: RawSvgShape, fallbackIndex: number): number[] {
+  const label = shape.textContent ?? shape.attrs["data-text"] ?? shape.attrs["aria-label"];
+  if (label) {
+    const parsed = parseVoltaNumbersFromText(label);
+    if (parsed.length > 0) return parsed;
+  }
+  const aspect = shape.bbox.height > 0 ? shape.bbox.width / shape.bbox.height : 1;
+  if (aspect <= 0.65) return [1];
+  if (fallbackIndex === 1) return [2];
+  return [fallbackIndex + 1];
+}
+
+function classifyNavText(text: string): SvgNavMarkerKind | null {
+  const t = text.trim();
+  if (!t) return null;
+  if (/d\.?\s*c\.?\s*al\s*coda/i.test(t)) return "dc-al-coda";
+  if (/d\.?\s*c\.?\s*al\s*fine/i.test(t)) return "dc-al-fine";
+  if (/^d\.?\s*c\.?$/i.test(t) || /da\s+capo/i.test(t)) return "dc";
+  if (/d\.?\s*s\.?\s*al\s*coda/i.test(t)) return "ds-al-coda";
+  if (/d\.?\s*s\.?\s*al\s*fine/i.test(t)) return "ds-al-fine";
+  if (/^d\.?\s*s\.?$/i.test(t) || /dal\s+segno/i.test(t)) return "ds";
+  if (/to\s+coda/i.test(t)) return "to-coda";
+  if (/^fine$/i.test(t)) return "fine";
+  if (/^segno$/i.test(t)) return "segno";
+  if (/^coda$/i.test(t)) return "coda";
+  return null;
+}
+
+const DEFAULT_NAV_TEXT: Record<SvgNavMarkerKind, string> = {
+  segno: "Segno",
+  coda: "Coda",
+  fine: "Fine",
+  "to-coda": "To Coda",
+  dc: "D.C.",
+  "dc-al-fine": "D.C. al Fine",
+  "dc-al-coda": "D.C. al Coda",
+  ds: "D.S.",
+  "ds-al-fine": "D.S. al Fine",
+  "ds-al-coda": "D.S. al Coda",
+};
+
+function assignVoltasAndNavMarkers(shapes: RawSvgShape[], systems: SvgSystem[]): void {
+  const voltaLines = shapes.filter(
+    (s) => s.classes.has("VoltaSegment") && (s.tag === "polyline" || s.tag === "line")
+  );
+  const voltaLabels = shapes.filter(
+    (s) => s.classes.has("VoltaSegment") && (s.tag === "path" || s.tag === "text")
+  );
+
+  for (const sys of systems) {
+    const ss = sys.staves[0]?.staffSpace ?? 80;
+    const sysBrackets = voltaLines
+      .filter(
+        (b) =>
+          b.bbox.width >= ss * 2 &&
+          b.bbox.cy >= sys.minY - ss * 6 &&
+          b.bbox.cy <= sys.minY + ss
+      )
+      .sort((a, b) => a.bbox.minX - b.bbox.minX);
+
+    sysBrackets.forEach((bracket, bIdx) => {
+      const matchingLabels = voltaLabels.filter(
+        (l) =>
+          l.bbox.cx >= bracket.bbox.minX - ss &&
+          l.bbox.cx <= bracket.bbox.maxX + ss &&
+          Math.abs(l.bbox.cy - bracket.bbox.cy) <= ss * 3
+      );
+
+      let numbers: number[] = [];
+      if (matchingLabels.length > 0) {
+        for (const lbl of matchingLabels) {
+          numbers.push(...classifyVoltaPathDigit(lbl, bIdx));
+        }
+        numbers = Array.from(new Set(numbers)).sort((a, b) => a - b);
+      }
+      if (numbers.length === 0) {
+        numbers = [bIdx + 1];
+      }
+
+      const overlapping = sys.measures.filter(
+        (m) => Math.min(m.maxX, bracket.bbox.maxX) - Math.max(m.minX, bracket.bbox.minX) > ss * 1.5
+      );
+      overlapping.forEach((m, idx) => {
+        m.volta = {
+          numbers,
+          isStart: idx === 0,
+          isStop: idx === overlapping.length - 1,
+        };
+      });
+    });
+
+    // Navigation markers: Jump, Marker, SystemText, StaffText, Text
+    const navCandidates = shapes.filter(
+      (s) =>
+        (s.classes.has("Jump") ||
+          s.classes.has("Marker") ||
+          s.classes.has("SystemText") ||
+          s.classes.has("StaffText") ||
+          s.classes.has("Text")) &&
+        s.bbox.cy >= sys.minY - ss * 8 &&
+        s.bbox.cy <= sys.maxY + ss * 5
+    );
+
+    for (const cand of navCandidates) {
+      const rawText =
+        cand.textContent ?? cand.attrs["data-text"] ?? cand.attrs["aria-label"] ?? "";
+      let kind = classifyNavText(rawText);
+
+      if (!kind && cand.classes.has("Marker") && cand.tag === "path") {
+        // Geometric Segno vs Coda fallback for outlined MS4 Marker path
+        const aspect = cand.bbox.width > 0 ? cand.bbox.height / cand.bbox.width : 1;
+        kind = aspect >= 1.25 ? "segno" : "coda";
+      }
+
+      if (!kind) continue;
+
+      const mIdx = findMeasureIndex(cand.bbox.cx, sys);
+      const targetMeasure = sys.measures[mIdx];
+      if (!targetMeasure) continue;
+
+      const marker: SvgNavMarker = {
+        kind,
+        text: rawText.trim() || DEFAULT_NAV_TEXT[kind],
+        x: cand.bbox.cx,
+        y: cand.bbox.cy,
+      };
+      if (!targetMeasure.navMarkers) {
+        targetMeasure.navMarkers = [];
+      }
+      targetMeasure.navMarkers.push(marker);
+    }
+  }
 }
 
 function assignClefs(shapes: RawSvgShape[], systems: SvgSystem[]): void {
@@ -1002,6 +1300,7 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
   const usedBarlines = assignMeasuresFromBarlines(shapes, systems);
   assignClefs(shapes, systems);
   const octaveShifts = extractOctaveShifts(shapes, systems);
+  assignVoltasAndNavMarkers(shapes, systems);
 
   const keySigCount = shapes.filter((s) => s.classes.has("KeySig")).length;
   const timeSigCount = shapes.filter((s) => s.classes.has("TimeSig")).length;

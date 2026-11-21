@@ -116,4 +116,33 @@ describe("parseMs4Svg (MS4 semantic-first SVG parser)", () => {
     expect(page4.systems).toHaveLength(6);
     expect(page4.noteheads).toHaveLength(175);
   });
+
+  it("extracts repeat barlines and volta brackets (1./2.) from 03-repeats-span-p1.svg without phantom header measures or transform leaks", () => {
+    const svg = readFileSync(resolve(FIXTURE_DIR, "03-repeats-span-p1.svg"), "utf8");
+    const page = parseMs4Svg(svg, 0);
+
+    expect(page.systems).toHaveLength(1);
+    const measures = page.systems[0].measures;
+    // 3 printed measures: m0 (forward repeat), m1 (volta 1 + backward repeat), m2 (volta 2)
+    expect(measures).toHaveLength(3);
+
+    expect(measures[0].repeatStart).toBe(true);
+    expect(measures[0].repeatStop).toBeFalsy();
+    expect(measures[0].volta).toBeUndefined();
+
+    expect(measures[1].repeatStop).toBe(true);
+    expect(measures[1].volta).toEqual({ numbers: [1], isStart: true, isStop: true });
+
+    expect(measures[2].repeatStart).toBeFalsy();
+    expect(measures[2].repeatStop).toBeFalsy();
+    expect(measures[2].volta).toEqual({ numbers: [2], isStart: true, isStop: true });
+
+    // Noteheads should have valid diatonic octaves (not corrupted by leaked Arpeggio matrix)
+    expect(page.noteheads).toHaveLength(10);
+    expect(page.noteheads.every((n) => n.octave >= 2 && n.octave <= 6)).toBe(true);
+    // Measure 0 has 5 noteheads (D3, D4, E4, F4, G4), Measure 1 has 2 (A2, D4? or E4?), Measure 2 has 3 (D3, D5, F5)
+    expect(page.noteheads.filter((n) => n.measureIndex === 0)).toHaveLength(5);
+    expect(page.noteheads.filter((n) => n.measureIndex === 1)).toHaveLength(2);
+    expect(page.noteheads.filter((n) => n.measureIndex === 2)).toHaveLength(3);
+  });
 });
