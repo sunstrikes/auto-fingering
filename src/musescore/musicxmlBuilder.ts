@@ -170,7 +170,7 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
     }
     if (note.fingering !== undefined) {
       lines.push("          <technical>");
-      lines.push(`            <fingering>${note.fingering}</fingering>`);
+      lines.push(`            <fingering>${escapeXml(String(note.fingering))}</fingering>`);
       lines.push("          </technical>");
     }
     lines.push("        </notations>");

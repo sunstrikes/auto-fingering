@@ -125,7 +125,7 @@ export interface BuildNote {
   slurStop?: boolean;
   slurNumber?: number;
   stem?: "up" | "down";
-  fingering?: number;
+  fingering?: number | string;
   arpeggiate?: boolean;
   measureRest?: boolean;
 }

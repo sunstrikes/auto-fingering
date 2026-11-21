@@ -1,4 +1,5 @@
 import type { BuildPitch } from "./types";
+import { classifyFingeringPath, parseFingeringText } from "./fingeringClassifier";
 
 export interface BBox {
   minX: number;
@@ -86,6 +87,7 @@ export interface SvgNotehead {
   stemId: number | null;
   stemDir: "up" | "down" | null;
   beamGroupId: number | null;
+  isGrace: boolean;
 }
 
 export interface SvgStem {
@@ -128,6 +130,27 @@ export interface SvgArc {
   bbox: BBox;
 }
 
+export interface SvgFingering {
+  id: number;
+  systemIndex: number;
+  measureIndex: number;
+  staff: 1 | 2;
+  cx: number;
+  cy: number;
+  bbox: BBox;
+  value: string;
+}
+
+export interface SvgArpeggio {
+  id: number;
+  systemIndex: number;
+  measureIndex: number;
+  cx: number;
+  minY: number;
+  maxY: number;
+  bbox: BBox;
+}
+
 export interface ParsedSvgPage {
   pageIndex: number;
   viewBox: { x: number; y: number; width: number; height: number };
@@ -137,6 +160,8 @@ export interface ParsedSvgPage {
   beams: SvgBeam[];
   rests: SvgRest[];
   arcs: SvgArc[];
+  fingerings: SvgFingering[];
+  arpeggios: SvgArpeggio[];
   keySigCount: number;
   timeSigCount: number;
 }
@@ -459,14 +484,17 @@ function scanSvgShapes(svgText: string): {
 
     if (tag === "text" && !isSelfClosing) {
       const closeIdx = cleaned.indexOf("</text>", tagRegex.lastIndex);
-      if (closeIdx !== -1) {
-        const inner = cleaned
-          .slice(tagRegex.lastIndex, closeIdx)
-          .replace(/<[^>]+>/g, "")
-          .trim();
-        const x = Number(attrs.x ?? 0);
-        const y = Number(attrs.y ?? 0);
-        const pt = applyMatrix(currentMatrix, x, y);
+      const rawInner = closeIdx !== -1 ? cleaned.slice(tagRegex.lastIndex, closeIdx) : "";
+      const textContent = rawInner.replace(/<[^>]*>/g, "").trim();
+      const x = Number(attrs.x ?? 0);
+      const y = Number(attrs.y ?? 0);
+      const fontSize = Number(attrs["font-size"] ?? 14) || 14;
+      const pts: Array<[number, number]> = [
+        applyMatrix(currentMatrix, x, y - fontSize),
+        applyMatrix(currentMatrix, x + fontSize * Math.max(0.6, textContent.length * 0.55), y),
+      ];
+      const bbox = computeBBox(pts);
+      if (closeIdx !== -1 && bbox) {
         const classes = new Set(
           (attrs.class ?? "")
             .trim()
@@ -478,9 +506,9 @@ function scanSvgShapes(svgText: string): {
           classes,
           matrix: currentMatrix,
           attrs,
-          points: [pt],
-          bbox: computeBBox([pt])!,
-          textContent: inner,
+          points: pts,
+          bbox,
+          textContent: textContent || undefined,
         });
       }
       continue;
@@ -1099,6 +1127,8 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
       beams: [],
       rests: [],
       arcs: [],
+      fingerings: [],
+      arpeggios: [],
       keySigCount: 0,
       timeSigCount: 0,
     };
@@ -1121,9 +1151,9 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
       const staff = findNearestStaff(s.bbox.cy, sys);
       const ss = staff.staffSpace;
       return (
-        s.bbox.width >= ss * 0.8 &&
+        s.bbox.width >= ss * 0.55 &&
         s.bbox.width <= ss * 2.1 &&
-        s.bbox.height >= ss * 0.65 &&
+        s.bbox.height >= ss * 0.45 &&
         s.bbox.height <= ss * 1.45 &&
         s.bbox.cx >= staff.minX + ss * 2 &&
         s.bbox.cx <= staff.maxX
@@ -1224,6 +1254,13 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
   }
 
   // Build noteheads and associate with stems
+  const stemSlashShapes = shapes.filter((s) => s.classes.has("StemSlash"));
+  const sortedWidths = noteShapes.map((s) => s.bbox.width).sort((a, b) => a - b);
+  const sortedHeights = noteShapes.map((s) => s.bbox.height).sort((a, b) => a - b);
+  const refIdx = Math.min(sortedWidths.length - 1, Math.floor(sortedWidths.length * 0.75));
+  const refWidth = sortedWidths.length > 0 ? sortedWidths[refIdx] : 0;
+  const refHeight = sortedHeights.length > 0 ? sortedHeights[refIdx] : 0;
+
   const noteheads: SvgNotehead[] = noteShapes.map((s, id) => {
     const sysIdx = findNearestSystemIndex(s.bbox.cy, systems);
     const sys = systems[sysIdx];
@@ -1252,6 +1289,20 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
       matchedStem.direction = stemDir;
     }
 
+    const hasStemSlash =
+      matchedStem !== null &&
+      stemSlashShapes.some(
+        (sl) =>
+          Math.abs(sl.bbox.cx - matchedStem!.x) <= ss * 0.8 &&
+          sl.bbox.maxY >= matchedStem!.minY - ss * 0.4 &&
+          sl.bbox.minY <= matchedStem!.maxY + ss * 0.4
+      );
+    const isSmallScale =
+      refWidth > 0 &&
+      refHeight > 0 &&
+      s.bbox.width <= refWidth * 0.82 &&
+      s.bbox.height <= refHeight * 0.85;
+
     return {
       id,
       systemIndex: sysIdx,
@@ -1265,6 +1316,7 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
       stemId: matchedStem ? matchedStem.id : null,
       stemDir,
       beamGroupId: matchedStem ? matchedStem.beamGroupId : null,
+      isGrace: isSmallScale || hasStemSlash,
     };
   });
 
@@ -1311,6 +1363,62 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
     ...slurShapes.map((s, i) => toArc(s, tieShapes.length + i, "slur")),
   ];
 
+  const EXCLUDED_FINGERING_CLASSES = [
+    "TimeSig",
+    "Tuplet",
+    "TupletNumber",
+    "MeasureNumber",
+    "VoltaSegment",
+    "PageNumber",
+    "Header",
+    "Footer",
+    "Dynamic",
+    "Lyrics",
+  ];
+  const fingerings: SvgFingering[] = [];
+  for (const s of shapes) {
+    if (!s.classes.has("Fingering")) continue;
+    if (EXCLUDED_FINGERING_CLASSES.some((c) => s.classes.has(c))) continue;
+
+    let value: string | null = null;
+    if (s.tag === "text" && s.textContent !== undefined) {
+      value = parseFingeringText(s.textContent);
+    } else if (s.tag === "path" && s.attrs.d) {
+      value = classifyFingeringPath(s.attrs.d, s.matrix);
+    }
+    if (!value) continue;
+
+    const sysIdx = findNearestSystemIndex(s.bbox.cy, systems);
+    const sys = systems[sysIdx];
+    const staff = findNearestStaff(s.bbox.cy, sys);
+    fingerings.push({
+      id: fingerings.length,
+      systemIndex: sysIdx,
+      measureIndex: findMeasureIndex(s.bbox.cx, sys),
+      staff: staff.staffNumber,
+      cx: s.bbox.cx,
+      cy: s.bbox.cy,
+      bbox: s.bbox,
+      value,
+    });
+  }
+
+  const arpeggios: SvgArpeggio[] = shapes
+    .filter((s) => s.classes.has("Arpeggio"))
+    .map((s, id) => {
+      const sysIdx = findNearestSystemIndex(s.bbox.cy, systems);
+      const sys = systems[sysIdx];
+      return {
+        id,
+        systemIndex: sysIdx,
+        measureIndex: findMeasureIndex(s.bbox.cx, sys),
+        cx: s.bbox.cx,
+        minY: s.bbox.minY,
+        maxY: s.bbox.maxY,
+        bbox: s.bbox,
+      };
+    });
+
   return {
     pageIndex,
     viewBox,
@@ -1320,6 +1428,8 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
     beams,
     rests,
     arcs,
+    fingerings,
+    arpeggios,
     keySigCount,
     timeSigCount,
   };

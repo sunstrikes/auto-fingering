@@ -11,6 +11,8 @@ import {
 import type {
   ParsedSvgPage,
   SvgArc,
+  SvgArpeggio,
+  SvgFingering,
   SvgNavMarker,
   SvgNotehead,
   SvgVolta,
@@ -52,6 +54,8 @@ interface SvgMeasureData {
   repeatStop?: boolean;
   volta?: SvgVolta;
   navMarkers?: SvgNavMarker[];
+  fingerings: SvgFingering[];
+  arpeggios: SvgArpeggio[];
 }
 
 interface VisualColumn {
@@ -82,12 +86,16 @@ function collectSvgMeasures(pages: ParsedSvgPage[]): {
       const ss = sys.staves[0]?.staffSpace ?? 80;
       const sysNotes = page.noteheads.filter((n) => n.systemIndex === sys.systemIndex);
       const sysArcs = page.arcs.filter((a) => a.systemIndex === sys.systemIndex);
+      const sysFingerings = page.fingerings.filter((f) => f.systemIndex === sys.systemIndex);
+      const sysArpeggios = page.arpeggios.filter((a) => a.systemIndex === sys.systemIndex);
 
       for (const m of sys.measures) {
         const mNotes = sysNotes.filter((n) => n.measureIndex === m.measureIndex);
         const mArcs = sysArcs.filter(
           (a) => a.endX >= m.minX - ss && a.startX <= m.maxX + ss
         );
+        const mFingerings = sysFingerings.filter((f) => f.measureIndex === m.measureIndex);
+        const mArpeggios = sysArpeggios.filter((a) => a.measureIndex === m.measureIndex);
         measures.push({
           globalMeasureIndex: measures.length,
           staffSpace: ss,
@@ -98,6 +106,8 @@ function collectSvgMeasures(pages: ParsedSvgPage[]): {
           repeatStop: m.repeatStop,
           volta: m.volta,
           navMarkers: m.navMarkers,
+          fingerings: mFingerings,
+          arpeggios: mArpeggios,
         });
       }
     }
@@ -188,9 +198,10 @@ function groupVisualColumns(noteheads: SvgNotehead[], staffSpace: number): Visua
   const cols: VisualColumn[] = [];
   for (const n of sorted) {
     const prev = cols[cols.length - 1];
+    const sameGrace = prev && prev.noteheads[0].isGrace === n.isGrace;
     const sameStem =
-      prev && n.stemId !== null && prev.noteheads.some((p) => p.stemId === n.stemId);
-    const closeX = prev && Math.abs(n.cx - prev.cx) <= staffSpace * 0.65;
+      prev && sameGrace && n.stemId !== null && prev.noteheads.some((p) => p.stemId === n.stemId);
+    const closeX = prev && sameGrace && Math.abs(n.cx - prev.cx) <= staffSpace * 0.65;
     if (prev && (sameStem || closeX)) {
       prev.noteheads.push(n);
       prev.cx =
@@ -272,6 +283,79 @@ function pairColumnWithSlice(
   }
 
   return pairs;
+}
+
+function attachMeasureFingerings(
+  visualCols: VisualColumn[],
+  fingerings: SvgFingering[],
+  staffSpace: number,
+  pairedBySvgId: Map<number, { midi: RawMidiNote; buildNote: BuildNote }>
+): void {
+  if (fingerings.length === 0 || visualCols.length === 0) return;
+
+  // Match each fingering to its horizontally nearest VisualColumn (within 1.8 * staffSpace)
+  const colFingerings = new Map<VisualColumn, SvgFingering[]>();
+  for (const f of fingerings) {
+    let bestCol: VisualColumn | null = null;
+    let bestDx = Infinity;
+    for (const col of visualCols) {
+      const dx = Math.abs(f.cx - col.cx);
+      if (dx <= staffSpace * 1.8 && dx < bestDx) {
+        bestDx = dx;
+        bestCol = col;
+      }
+    }
+    if (!bestCol) continue;
+    const arr = colFingerings.get(bestCol) ?? [];
+    arr.push(f);
+    colFingerings.set(bestCol, arr);
+  }
+
+  for (const [col, fings] of colFingerings.entries()) {
+    // Group by staff inside the column
+    for (const staffNum of [1, 2] as const) {
+      const staffNotes = col.noteheads
+        .filter((n) => n.staff === staffNum && pairedBySvgId.has(n.id))
+        .sort((a, b) => a.cy - b.cy); // top-to-bottom (highest pitch first)
+      if (staffNotes.length === 0) continue;
+
+      const staffFings = fings
+        .filter((f) => {
+          const hasOtherStaff = col.noteheads.some((n) => n.staff !== staffNum && pairedBySvgId.has(n.id));
+          if (!hasOtherStaff) return true;
+          return f.staff === staffNum;
+        })
+        .sort((a, b) => a.cy - b.cy); // top-to-bottom
+
+      if (staffFings.length === 0) continue;
+
+      if (staffFings.length >= staffNotes.length) {
+        for (let i = 0; i < staffNotes.length; i++) {
+          pairedBySvgId.get(staffNotes[i].id)!.buildNote.fingering = staffFings[i].value;
+        }
+      } else if (staffFings.length === 1) {
+        // Single fingering on a chord: attach to the vertically closest notehead
+        const f = staffFings[0];
+        let bestNote = staffNotes[0];
+        let bestDy = Math.abs(f.cy - bestNote.cy);
+        for (let i = 1; i < staffNotes.length; i++) {
+          const dy = Math.abs(f.cy - staffNotes[i].cy);
+          if (dy < bestDy) {
+            bestDy = dy;
+            bestNote = staffNotes[i];
+          }
+        }
+        pairedBySvgId.get(bestNote.id)!.buildNote.fingering = f.value;
+      } else {
+        // Partial stacked fingerings: if above chord -> top notes; if below chord -> bottom notes
+        const allAbove = staffFings.every((f) => f.cy < staffNotes[0].cy);
+        const startIdx = allAbove ? 0 : staffNotes.length - staffFings.length;
+        for (let i = 0; i < staffFings.length; i++) {
+          pairedBySvgId.get(staffNotes[startIdx + i].id)!.buildNote.fingering = staffFings[i].value;
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -808,13 +892,15 @@ export function alignSvgsAndMidi(
 
     // 2. Align remaining visual columns with MIDI onset slices linearly
     let sliceIdx = 0;
+    let pendingGraceSnapStart: number | null = null;
     for (let cIdx = colOffset; cIdx < visualCols.length; cIdx++) {
       const col = visualCols[cIdx];
+      const isGraceCol = col.noteheads.every((n) => n.isGrace);
 
       // Check if this column's noteheads are same-measure tie continuations via visual arc + no new NoteOn
       const remainingCols = visualCols.length - cIdx;
       const remainingSlices = midiSlices.length - sliceIdx;
-      if (remainingCols > remainingSlices) {
+      if (!isGraceCol && remainingCols > remainingSlices) {
         let handledAsTie = false;
         for (const svg of col.noteheads) {
           const srcSvg = findIncomingArc(svg, seenSvgInMeasure, svgM.arcs, svgM.staffSpace);
@@ -858,12 +944,59 @@ export function alignSvgsAndMidi(
       }
 
       if (sliceIdx >= midiSlices.length) break;
-      const slice = midiSlices[sliceIdx++];
-      const pairs = pairColumnWithSlice(col.noteheads, slice.notes);
+      const colArpeggios = svgM.arpeggios.filter(
+        (a) => a.cx <= col.cx && col.cx - a.cx <= svgM.staffSpace * 2.5
+      );
+
+      const slice = midiSlices[sliceIdx];
+      let sliceNotesForCol = slice.notes;
+      let arpeggioBaseStartTick: number | null = null;
+
+      if (isGraceCol && slice.notes.length > col.noteheads.length) {
+        // Simultaneous grace + principal note at same startTick: consume shortest note(s) for grace column
+        const sortedByDur = [...slice.notes].sort((a, b) => a.durationTick - b.durationTick);
+        sliceNotesForCol = sortedByDur.slice(0, col.noteheads.length);
+        const consumed = new Set(sliceNotesForCol);
+        slice.notes = slice.notes.filter((n) => !consumed.has(n));
+      } else if (!isGraceCol && colArpeggios.length > 0) {
+        // Collapse slightly staggered MIDI onset slices for an arpeggiated chord into a single Onset Slice
+        arpeggioBaseStartTick = slice.startTick;
+        const maxRollWindow = Math.round(ppq * 0.6);
+        const collapsed = [...slice.notes];
+        sliceIdx++;
+        while (
+          sliceIdx < midiSlices.length &&
+          collapsed.length < col.noteheads.length &&
+          midiSlices[sliceIdx].startTick - arpeggioBaseStartTick <= maxRollWindow
+        ) {
+          collapsed.push(...midiSlices[sliceIdx].notes);
+          sliceIdx++;
+        }
+        sliceNotesForCol = collapsed;
+      } else {
+        sliceIdx++;
+      }
+
+      const pairs = pairColumnWithSlice(col.noteheads, sliceNotesForCol);
 
       // Determine next visual column's slice start if a tie splits a long MIDI note inside this measure
       const nextSliceStart =
         sliceIdx < midiSlices.length ? midiSlices[sliceIdx].startTick : span.endTick;
+
+      if (isGraceCol && pairs.length > 0) {
+        const graceStart = Math.min(...pairs.map((p) => p.midi.startTick));
+        const graceEnd = Math.max(...pairs.map((p) => p.midi.endTick));
+        const nextStart = sliceIdx < midiSlices.length ? midiSlices[sliceIdx].startTick : graceStart;
+        if (
+          graceEnd - graceStart <= ppq / 4 &&
+          Math.abs(nextStart - graceEnd) <= Math.max(2, Math.round(ppq / 32))
+        ) {
+          pendingGraceSnapStart = graceStart;
+        }
+      }
+
+      const snapStart = !isGraceCol ? pendingGraceSnapStart : null;
+      if (!isGraceCol) pendingGraceSnapStart = null;
 
       for (const { svg, midi } of pairs) {
         const hv = handVoiceMap.get(svg.id) ?? { staff: svg.staff, voice: svg.staff === 1 ? "1" : "2" };
@@ -877,6 +1010,29 @@ export function alignSvgsAndMidi(
             measureNumber,
             message: `Alignment anomaly in measure ${measureNumber}: visual ${svg.step}${svg.octave} paired with MIDI ${midi.pitch} yields alter=${alter}.`,
           });
+        }
+
+        if (isGraceCol || svg.isGrace) {
+          const { type } = durationToTypeAndDots(Math.max(1, midi.durationTick), ppq);
+          const bn: BuildNote = {
+            kind: "note",
+            onsetOffset: midi.startTick - span.startTick,
+            isGrace: true,
+            pitch: {
+              step: svg.step,
+              alter: alter !== 0 ? alter : undefined,
+              octave: svg.octave,
+            },
+            duration: 0,
+            voice: hv.voice,
+            staff: hv.staff,
+            type,
+            stem: svg.stemDir ?? undefined,
+          };
+          buildNotes.push(bn);
+          pairedBySvgId.set(svg.id, { midi, buildNote: bn });
+          seenSvgInMeasure.push(svg);
+          continue;
         }
 
         // Check if this note has an outgoing same-measure visual arc to a later notehead in this measure
@@ -893,7 +1049,17 @@ export function alignSvgsAndMidi(
             )
         );
 
-        const segStart = midi.startTick;
+        const segStart =
+          arpeggioBaseStartTick !== null
+            ? arpeggioBaseStartTick
+            : snapStart !== null
+              ? snapStart
+              : midi.startTick;
+        const isArpeggiated = colArpeggios.some(
+          (a) =>
+            svg.cy >= a.minY - svgM.staffSpace * 0.8 &&
+            svg.cy <= a.maxY + svgM.staffSpace * 0.8
+        );
         const maxSegEnd = Math.min(span.endTick, midi.endTick);
         // If there's an outgoing tie arc inside the measure and no new NoteOn, split duration before nextSliceStart/maxSegEnd
         let segEnd = maxSegEnd;
@@ -920,6 +1086,7 @@ export function alignSvgsAndMidi(
           dots: dots > 0 ? dots : undefined,
           tieStart: crossMeasureTie || undefined,
           stem: svg.stemDir ?? undefined,
+          arpeggiate: isArpeggiated || undefined,
         };
         buildNotes.push(bn);
         pairedBySvgId.set(svg.id, { midi, buildNote: bn });
@@ -930,11 +1097,18 @@ export function alignSvgsAndMidi(
       }
     }
 
-    // Mark chord notes sharing the same (voice, onsetOffset)
+    attachMeasureFingerings(visualCols, svgM.fingerings, svgM.staffSpace, pairedBySvgId);
+
+    // Mark chord notes sharing the same (voice, onsetOffset, grace-state)
     const seenOnsetByVoice = new Set<string>();
-    buildNotes.sort((a, b) => (a.onsetOffset ?? 0) - (b.onsetOffset ?? 0) || a.voice.localeCompare(b.voice));
+    buildNotes.sort(
+      (a, b) =>
+        (a.onsetOffset ?? 0) - (b.onsetOffset ?? 0) ||
+        (a.isGrace ? 0 : 1) - (b.isGrace ? 0 : 1) ||
+        a.voice.localeCompare(b.voice)
+    );
     for (const bn of buildNotes) {
-      const key = `${bn.voice}:${bn.onsetOffset ?? 0}`;
+      const key = `${bn.voice}:${bn.onsetOffset ?? 0}:${bn.isGrace ? "g" : "n"}`;
       if (seenOnsetByVoice.has(key)) {
         bn.isChord = true;
       } else {
