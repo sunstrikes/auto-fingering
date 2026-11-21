@@ -46,22 +46,47 @@ export interface RawMidiData {
   pedals: RawMidiPedalEvent[];
 }
 
+export type ConversionWarningCode =
+  | "MIDI_ONLY_FALLBACK"
+  | "SVG_NO_SYSTEMS_FALLBACK"
+  | "PNG_PAGE_SKIPPED"
+  | "INVALID_SVG_PAGE_SKIPPED"
+  | "PREVIEW_TRUNCATED"
+  | "MEASURE_COUNT_MISMATCH"
+  | "LOW_CONFIDENCE_MEASURE_FALLBACK"
+  | "ALIGNMENT_ALTER_OUT_OF_RANGE";
+
 export interface ConversionDiagnostic {
   level: "info" | "warning" | "error";
-  code: string;
+  code: ConversionWarningCode | (string & {});
   message: string;
   measureNumber?: number;
+  pageIndex?: number;
 }
+
+export interface ConversionDiagnostics extends Array<ConversionDiagnostic> {
+  totalPages: number;
+  svgPagesParsed: number;
+  pngPagesSkipped: number;
+  measuresAligned: number;
+  fallbackMeasures: number;
+  alignmentConfidence: number;
+  warnings: ConversionDiagnostic[];
+}
+
+export type SvgPageInput = string | Uint8Array | ArrayBuffer;
 
 export interface ConversionOptions {
   title?: string;
   pickupTicks?: number;
   splitPitch?: number;
+  totalPages?: number;
+  alignmentConfidenceThreshold?: number;
 }
 
 export interface ConversionResult {
   xml: string;
-  diagnostics: ConversionDiagnostic[];
+  diagnostics: ConversionDiagnostics;
 }
 
 export type NoteTypeName =
@@ -106,6 +131,9 @@ export interface BuildNote {
   tieStop?: boolean;
   slurStarts?: number[];
   slurStops?: number[];
+  slurStart?: boolean;
+  slurStop?: boolean;
+  slurNumber?: number;
   articulations?: ArticulationType[];
   stem?: "up" | "down";
   fingering?: number;
@@ -141,10 +169,10 @@ export interface BuildDynamicEvent {
 }
 
 export interface BuildWedgeEvent {
-  tickOffset: number;
+  tickOffset: number; // offset from measure start in divisions
   type: "crescendo" | "diminuendo" | "stop";
-  number: number;
-  staff: 1 | 2;
+  number?: number;
+  staff?: 1 | 2;
 }
 
 export interface BuildPedalEvent {

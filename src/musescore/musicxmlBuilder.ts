@@ -91,17 +91,16 @@ function renderDynamicDirection(kind: DynamicMarking, staff: 1 | 2): string[] {
   ];
 }
 
-function renderWedgeDirection(w: BuildWedgeEvent): string[] {
+function renderWedgeDirection(w: BuildWedgeEvent, defaultStaff: 1 | 2): string[] {
   return [
     '      <direction placement="below">',
     "        <direction-type>",
-    `          <wedge type="${w.type}" number="${w.number}"/>`,
+    `          <wedge type="${w.type}" number="${w.number ?? 1}"/>`,
     "        </direction-type>",
-    `        <staff>${w.staff}</staff>`,
+    `        <staff>${w.staff ?? defaultStaff}</staff>`,
     "      </direction>",
   ];
 }
-
 /**
  * Serializes a `<note>` element strictly respecting MusicXML 4.0 child-element ordering:
  * grace -> chord -> pitch|rest -> duration -> tie -> voice -> type -> dot -> stem -> staff -> notations.
@@ -161,6 +160,8 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
   const hasNotations =
     note.tieStop ||
     note.tieStart ||
+    note.slurStop ||
+    note.slurStart ||
     (note.slurStops?.length ?? 0) > 0 ||
     (note.slurStarts?.length ?? 0) > 0 ||
     (note.articulations?.length ?? 0) > 0 ||
@@ -173,6 +174,12 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
     }
     if (note.tieStart) {
       lines.push('          <tied type="start"/>');
+    }
+    if (note.slurStop) {
+      lines.push(`          <slur type="stop" number="${note.slurNumber ?? 1}"/>`);
+    }
+    if (note.slurStart) {
+      lines.push(`          <slur type="start" number="${note.slurNumber ?? 1}"/>`);
     }
     for (const num of note.slurStops ?? []) {
       lines.push(`          <slur type="stop" number="${num}"/>`);
@@ -237,7 +244,7 @@ function renderMeasure(measure: BuildMeasure, staves: 1 | 2): string[] {
   for (const w of measure.wedges ?? []) {
     pendingDirections.push({
       tickOffset: w.tickOffset,
-      lines: renderWedgeDirection(w),
+      lines: renderWedgeDirection(w, 1),
     });
   }
   pendingDirections.sort((a, b) => a.tickOffset - b.tickOffset);
