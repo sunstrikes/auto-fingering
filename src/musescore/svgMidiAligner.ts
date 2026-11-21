@@ -5,9 +5,10 @@ import {
   durationToTypeAndDots,
   type MeasureSpan,
 } from "./midiToScoreModel";
-import type { ParsedSvgPage, SvgArc, SvgNotehead } from "./svgParser";
+import type { ParsedSvgPage, SvgArc, SvgArticulation, SvgDynamic, SvgNotehead } from "./svgParser";
 import type {
   BuildAttributes,
+  BuildDynamicEvent,
   BuildMeasure,
   BuildNote,
   BuildPitch,
@@ -33,11 +34,17 @@ export function diatonicToMidi(step: BuildPitch["step"], octave: number): number
 }
 
 interface SvgMeasureData {
+  pageIndex: number;
+  systemIndex: number;
   globalMeasureIndex: number;
   staffSpace: number;
   stavesCount: 1 | 2;
+  minX: number;
+  maxX: number;
   noteheads: SvgNotehead[];
   arcs: SvgArc[];
+  articulations: SvgArticulation[];
+  dynamics: SvgDynamic[];
 }
 
 interface VisualColumn {
@@ -68,18 +75,36 @@ function collectSvgMeasures(pages: ParsedSvgPage[]): {
       const ss = sys.staves[0]?.staffSpace ?? 80;
       const sysNotes = page.noteheads.filter((n) => n.systemIndex === sys.systemIndex);
       const sysArcs = page.arcs.filter((a) => a.systemIndex === sys.systemIndex);
+      const sysArticulations = page.articulations.filter(
+        (a) => a.systemIndex === sys.systemIndex
+      );
+      const sysDynamics = page.dynamics.filter(
+        (d) => d.systemIndex === sys.systemIndex
+      );
 
       for (const m of sys.measures) {
         const mNotes = sysNotes.filter((n) => n.measureIndex === m.measureIndex);
         const mArcs = sysArcs.filter(
           (a) => a.endX >= m.minX - ss && a.startX <= m.maxX + ss
         );
+        const mArticulations = sysArticulations.filter(
+          (a) => a.measureIndex === m.measureIndex
+        );
+        const mDynamics = sysDynamics.filter(
+          (d) => d.measureIndex === m.measureIndex
+        );
         measures.push({
+          pageIndex: page.pageIndex,
+          systemIndex: sys.systemIndex,
           globalMeasureIndex: measures.length,
           staffSpace: ss,
           stavesCount: sys.staves.length >= 2 ? 2 : 1,
+          minX: m.minX,
+          maxX: m.maxX,
           noteheads: mNotes,
           arcs: mArcs,
+          articulations: mArticulations,
+          dynamics: mDynamics,
         });
       }
     }
@@ -199,13 +224,14 @@ function groupMidiSlices(notes: RawMidiNote[], ppq: number): MidiOnsetSlice[] {
   return slices;
 }
 
-function findIncomingArc(
+function findIncomingTieArc(
   target: SvgNotehead,
   prevNotes: SvgNotehead[],
   arcs: SvgArc[],
   staffSpace: number
-): SvgNotehead | null {
+): { src: SvgNotehead; arc: SvgArc } | null {
   for (const arc of arcs) {
+    if (arc.kind !== "tie") continue;
     const nearEnd =
       Math.abs(arc.endX - target.cx) <= staffSpace * 1.6 &&
       Math.abs(arc.endY - target.cy) <= staffSpace * 2.5;
@@ -217,7 +243,7 @@ function findIncomingArc(
       const nearStart =
         Math.abs(arc.startX - src.cx) <= staffSpace * 1.6 &&
         Math.abs(arc.startY - src.cy) <= staffSpace * 2.5;
-      if (nearStart) return src;
+      if (nearStart) return { src, arc };
     }
   }
   return null;
@@ -285,6 +311,8 @@ export function alignSvgsAndMidi(
 
   // Track active MIDI notes crossing measure boundaries: key = `${pitch}:${voice}` -> last BuildNote
   const activeTieOutByNote = new Map<RawMidiNote, BuildNote>();
+  const svgNoteToBuildNote = new Map<string, BuildNote>();
+  const consumedTieArcs = new Set<string>();
 
   for (let mIdx = 0; mIdx < measureCount; mIdx++) {
     const span = spans[mIdx];
@@ -376,7 +404,17 @@ export function alignSvgsAndMidi(
           };
           buildNotes.push(bn);
           pairedBySvgId.set(svg.id, { midi, buildNote: bn });
+          svgNoteToBuildNote.set(`${svgM.pageIndex}:${svg.id}`, bn);
           seenSvgInMeasure.push(svg);
+          for (const arc of svgM.arcs) {
+            if (
+              arc.kind === "tie" &&
+              Math.abs(arc.endX - svg.cx) <= svgM.staffSpace * 1.6 &&
+              Math.abs(arc.endY - svg.cy) <= svgM.staffSpace * 2.5
+            ) {
+              consumedTieArcs.add(`${svgM.pageIndex}:${arc.id}`);
+            }
+          }
           if (tieStart) activeTieOutByNote.set(midi, bn);
           else activeTieOutByNote.delete(midi);
         }
@@ -394,8 +432,9 @@ export function alignSvgsAndMidi(
       if (remainingCols > remainingSlices) {
         let handledAsTie = false;
         for (const svg of col.noteheads) {
-          const srcSvg = findIncomingArc(svg, seenSvgInMeasure, svgM.arcs, svgM.staffSpace);
-          if (srcSvg) {
+          const tieMatch = findIncomingTieArc(svg, seenSvgInMeasure, svgM.arcs, svgM.staffSpace);
+          if (tieMatch) {
+            const { src: srcSvg, arc: tieArc } = tieMatch;
             const prevPair = pairedBySvgId.get(srcSvg.id);
             if (prevPair && prevPair.midi.endTick > span.startTick + (prevPair.buildNote.onsetOffset ?? 0) + prevPair.buildNote.duration) {
               // No new NoteOn; this is a Tie Continuation of prevPair.midi!
@@ -426,6 +465,8 @@ export function alignSvgsAndMidi(
               };
               buildNotes.push(bn);
               pairedBySvgId.set(svg.id, { midi: prevPair.midi, buildNote: bn });
+              svgNoteToBuildNote.set(`${svgM.pageIndex}:${svg.id}`, bn);
+              consumedTieArcs.add(`${svgM.pageIndex}:${tieArc.id}`);
               seenSvgInMeasure.push(svg);
               handledAsTie = true;
             }
@@ -455,9 +496,10 @@ export function alignSvgsAndMidi(
           });
         }
 
-        // Check if this note has an outgoing same-measure visual arc to a later notehead in this measure
+        // Check if this note has an outgoing same-measure tie arc to a later notehead in this measure
         const hasOutgoingSameMeasureArc = svgM.arcs.some(
           (a) =>
+            a.kind === "tie" &&
             Math.abs(a.startX - svg.cx) <= svgM.staffSpace * 1.6 &&
             Math.abs(a.startY - svg.cy) <= svgM.staffSpace * 2.5 &&
             svgM.noteheads.some(
@@ -499,9 +541,36 @@ export function alignSvgsAndMidi(
         };
         buildNotes.push(bn);
         pairedBySvgId.set(svg.id, { midi, buildNote: bn });
+        svgNoteToBuildNote.set(`${svgM.pageIndex}:${svg.id}`, bn);
         seenSvgInMeasure.push(svg);
         if (crossMeasureTie) {
           activeTieOutByNote.set(midi, bn);
+        }
+      }
+    }
+
+    // Attach articulations to their nearest aligned noteheads
+    for (const art of svgM.articulations) {
+      let bestNote: SvgNotehead | null = null;
+      let bestScore = Infinity;
+      for (const n of svgM.noteheads) {
+        const dx = Math.abs(n.cx - art.cx);
+        if (dx > svgM.staffSpace * 1.4) continue;
+        const dy = Math.abs(n.cy - art.cy);
+        const staffPenalty = n.staff === art.staff ? 0 : svgM.staffSpace * 4;
+        const score = dx + dy * 0.1 + staffPenalty;
+        if (score < bestScore) {
+          bestScore = score;
+          bestNote = n;
+        }
+      }
+      if (bestNote) {
+        const bn = svgNoteToBuildNote.get(`${svgM.pageIndex}:${bestNote.id}`);
+        if (bn) {
+          const existing = bn.articulations ?? [];
+          if (!existing.includes(art.kind)) {
+            bn.articulations = [...existing, art.kind];
+          }
         }
       }
     }
@@ -530,6 +599,12 @@ export function alignSvgsAndMidi(
         staff: maxStaves,
       }));
 
+    const dynamics: BuildDynamicEvent[] = svgM.dynamics.map((d) => ({
+      tickOffset: resolveTickOffsetForX(d.cx, svgM, span.duration, svgNoteToBuildNote),
+      kind: d.kind,
+      staff: d.staff,
+    }));
+
     buildMeasures.push({
       number: span.number,
       implicit: span.implicit || undefined,
@@ -537,9 +612,13 @@ export function alignSvgsAndMidi(
       attributes: attrs,
       tempos: tempos.length > 0 ? tempos : undefined,
       pedals: pedals.length > 0 ? pedals : undefined,
+      dynamics: dynamics.length > 0 ? dynamics : undefined,
       notes: buildNotes,
     });
   }
+
+  attachSlursFromUnconsumedArcs(pages, svgNoteToBuildNote, consumedTieArcs);
+  attachWedgesFromHairpins(pages, svgMeasures, buildMeasures, svgNoteToBuildNote);
 
   return {
     model: {
@@ -550,4 +629,178 @@ export function alignSvgsAndMidi(
     },
     diagnostics,
   };
+}
+
+function resolveTickOffsetForX(
+  x: number,
+  svgM: SvgMeasureData,
+  measureDuration: number,
+  svgNoteToBuildNote: Map<string, BuildNote>
+): number {
+  let bestNote: SvgNotehead | null = null;
+  let bestDx = Infinity;
+  for (const n of svgM.noteheads) {
+    const dx = Math.abs(n.cx - x);
+    if (dx <= svgM.staffSpace * 1.8 && dx < bestDx) {
+      bestDx = dx;
+      bestNote = n;
+    }
+  }
+  if (bestNote) {
+    const bn = svgNoteToBuildNote.get(`${svgM.pageIndex}:${bestNote.id}`);
+    if (bn && bn.onsetOffset !== undefined) {
+      return Math.max(0, Math.min(measureDuration, bn.onsetOffset));
+    }
+  }
+  const width = Math.max(1, svgM.maxX - svgM.minX);
+  const ratio = Math.max(0, Math.min(1, (x - svgM.minX) / width));
+  return Math.round(ratio * measureDuration);
+}
+
+function findSystemMeasureForX(
+  x: number,
+  sysMeasures: SvgMeasureData[]
+): SvgMeasureData {
+  for (const m of sysMeasures) {
+    if (x >= m.minX && x <= m.maxX) return m;
+  }
+  return x < sysMeasures[0].minX ? sysMeasures[0] : sysMeasures[sysMeasures.length - 1];
+}
+
+function attachWedgesFromHairpins(
+  pages: ParsedSvgPage[],
+  svgMeasures: SvgMeasureData[],
+  buildMeasures: BuildMeasure[],
+  svgNoteToBuildNote: Map<string, BuildNote>
+): void {
+  const alignedCount = buildMeasures.length;
+  for (const page of pages) {
+    for (const sys of page.systems) {
+      const sysMs = svgMeasures.filter(
+        (m) =>
+          m.pageIndex === page.pageIndex &&
+          m.systemIndex === sys.systemIndex &&
+          m.globalMeasureIndex < alignedCount
+      );
+      if (sysMs.length === 0) continue;
+
+      const sysHairpins = page.hairpins
+        .filter((h) => h.systemIndex === sys.systemIndex)
+        .sort((a, b) => a.startX - b.startX || a.endX - b.endX);
+
+      let nextWedgeNum = 1;
+      for (const hp of sysHairpins) {
+        const startSvgM = findSystemMeasureForX(hp.startX, sysMs);
+        const endSvgM = findSystemMeasureForX(hp.endX, sysMs);
+        const startBm = buildMeasures[startSvgM.globalMeasureIndex];
+        const endBm = buildMeasures[endSvgM.globalMeasureIndex];
+        if (!startBm || !endBm) continue;
+
+        let startOffset = resolveTickOffsetForX(
+          hp.startX,
+          startSvgM,
+          startBm.duration,
+          svgNoteToBuildNote
+        );
+        let stopOffset = resolveTickOffsetForX(
+          hp.endX,
+          endSvgM,
+          endBm.duration,
+          svgNoteToBuildNote
+        );
+
+        if (startSvgM.globalMeasureIndex === endSvgM.globalMeasureIndex && stopOffset <= startOffset) {
+          if (startOffset < endBm.duration) {
+            stopOffset = endBm.duration;
+          } else {
+            startOffset = Math.max(0, stopOffset - 1);
+          }
+        }
+
+        const num = nextWedgeNum;
+        nextWedgeNum = nextWedgeNum >= 6 ? 1 : nextWedgeNum + 1;
+
+        startBm.wedges = [
+          ...(startBm.wedges ?? []),
+          { tickOffset: startOffset, type: hp.kind, number: num, staff: hp.staff },
+        ];
+        endBm.wedges = [
+          ...(endBm.wedges ?? []),
+          { tickOffset: stopOffset, type: "stop", number: num, staff: hp.staff },
+        ];
+      }
+    }
+  }
+}
+
+function findArcEndpointNotehead(
+  x: number,
+  y: number,
+  arcStaff: 1 | 2,
+  candidates: SvgNotehead[],
+  staffSpace: number,
+  excludeId?: number,
+  minCx?: number
+): SvgNotehead | null {
+  let best: SvgNotehead | null = null;
+  let bestScore = Infinity;
+  for (const n of candidates) {
+    if (excludeId !== undefined && n.id === excludeId) continue;
+    if (minCx !== undefined && n.cx < minCx) continue;
+    const dx = Math.abs(n.cx - x);
+    if (dx > staffSpace * 2.2) continue;
+    const dy = Math.abs(n.cy - y);
+    const staffPenalty = n.staff === arcStaff ? 0 : staffSpace * 4;
+    const score = dx + dy * 0.25 + staffPenalty;
+    if (score < bestScore) {
+      bestScore = score;
+      best = n;
+    }
+  }
+  return best;
+}
+
+function attachSlursFromUnconsumedArcs(
+  pages: ParsedSvgPage[],
+  svgNoteToBuildNote: Map<string, BuildNote>,
+  consumedTieArcs: Set<string>
+): void {
+  for (const page of pages) {
+    for (const sys of page.systems) {
+      const ss = sys.staves[0]?.staffSpace ?? 80;
+      const sysNotes = page.noteheads.filter((n) => n.systemIndex === sys.systemIndex);
+      const sysArcs = page.arcs
+        .filter((a) => a.systemIndex === sys.systemIndex)
+        .sort((a, b) => a.startX - b.startX || a.endX - b.endX);
+
+      for (const arc of sysArcs) {
+        if (consumedTieArcs.has(`${page.pageIndex}:${arc.id}`)) continue;
+        const startNote = findArcEndpointNotehead(arc.startX, arc.startY, arc.staff, sysNotes, ss);
+        if (!startNote) continue;
+        const endNote = findArcEndpointNotehead(
+          arc.endX,
+          arc.endY,
+          arc.staff,
+          sysNotes,
+          ss,
+          startNote.id,
+          startNote.cx - ss * 0.5
+        );
+        if (!endNote) continue;
+
+        const startBn = svgNoteToBuildNote.get(`${page.pageIndex}:${startNote.id}`);
+        const stopBn = svgNoteToBuildNote.get(`${page.pageIndex}:${endNote.id}`);
+        if (!startBn || !stopBn || startBn === stopBn) continue;
+
+        // If this arc was a tieStop/tieStart pair on the same sustaining note, skip
+        if (startBn.tieStart && stopBn.tieStop && startNote.step === endNote.step && startNote.octave === endNote.octave && arc.kind === "tie") {
+          continue;
+        }
+
+        const slurNumber = 1;
+        startBn.slurStarts = [...(startBn.slurStarts ?? []), slurNumber];
+        stopBn.slurStops = [...(stopBn.slurStops ?? []), slurNumber];
+      }
+    }
+  }
 }

@@ -2,6 +2,8 @@ import type {
   BuildAttributes,
   BuildMeasure,
   BuildNote,
+  BuildWedgeEvent,
+  DynamicMarking,
   ScoreBuildModel,
 } from "./types";
 
@@ -76,6 +78,30 @@ function renderPedalDirection(type: "start" | "change" | "stop", staff: 1 | 2): 
   ];
 }
 
+function renderDynamicDirection(kind: DynamicMarking, staff: 1 | 2): string[] {
+  return [
+    '      <direction placement="below">',
+    "        <direction-type>",
+    "          <dynamics>",
+    `            <${kind}/>`,
+    "          </dynamics>",
+    "        </direction-type>",
+    `        <staff>${staff}</staff>`,
+    "      </direction>",
+  ];
+}
+
+function renderWedgeDirection(w: BuildWedgeEvent): string[] {
+  return [
+    '      <direction placement="below">',
+    "        <direction-type>",
+    `          <wedge type="${w.type}" number="${w.number}"/>`,
+    "        </direction-type>",
+    `        <staff>${w.staff}</staff>`,
+    "      </direction>",
+  ];
+}
+
 /**
  * Serializes a `<note>` element strictly respecting MusicXML 4.0 child-element ordering:
  * grace -> chord -> pitch|rest -> duration -> tie -> voice -> type -> dot -> stem -> staff -> notations.
@@ -133,7 +159,13 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
   }
 
   const hasNotations =
-    note.tieStop || note.tieStart || note.arpeggiate || note.fingering !== undefined;
+    note.tieStop ||
+    note.tieStart ||
+    (note.slurStops?.length ?? 0) > 0 ||
+    (note.slurStarts?.length ?? 0) > 0 ||
+    (note.articulations?.length ?? 0) > 0 ||
+    note.arpeggiate ||
+    note.fingering !== undefined;
   if (hasNotations) {
     lines.push("        <notations>");
     if (note.tieStop) {
@@ -142,13 +174,26 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
     if (note.tieStart) {
       lines.push('          <tied type="start"/>');
     }
-    if (note.arpeggiate) {
-      lines.push("          <arpeggiate/>");
+    for (const num of note.slurStops ?? []) {
+      lines.push(`          <slur type="stop" number="${num}"/>`);
+    }
+    for (const num of note.slurStarts ?? []) {
+      lines.push(`          <slur type="start" number="${num}"/>`);
     }
     if (note.fingering !== undefined) {
       lines.push("          <technical>");
       lines.push(`            <fingering>${note.fingering}</fingering>`);
       lines.push("          </technical>");
+    }
+    if (note.articulations && note.articulations.length > 0) {
+      lines.push("          <articulations>");
+      for (const art of note.articulations) {
+        lines.push(`            <${art}/>`);
+      }
+      lines.push("          </articulations>");
+    }
+    if (note.arpeggiate) {
+      lines.push("          <arpeggiate/>");
     }
     lines.push("        </notations>");
   }
@@ -181,6 +226,18 @@ function renderMeasure(measure: BuildMeasure, staves: 1 | 2): string[] {
     pendingDirections.push({
       tickOffset: p.tickOffset,
       lines: renderPedalDirection(p.type, p.staff ?? (staves === 2 ? 2 : 1)),
+    });
+  }
+  for (const d of measure.dynamics ?? []) {
+    pendingDirections.push({
+      tickOffset: d.tickOffset,
+      lines: renderDynamicDirection(d.kind, d.staff),
+    });
+  }
+  for (const w of measure.wedges ?? []) {
+    pendingDirections.push({
+      tickOffset: w.tickOffset,
+      lines: renderWedgeDirection(w),
     });
   }
   pendingDirections.sort((a, b) => a.tickOffset - b.tickOffset);

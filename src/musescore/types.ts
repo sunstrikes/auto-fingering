@@ -83,6 +83,14 @@ export interface BuildPitch {
   octave: number;
 }
 
+export type ArticulationType =
+  | "staccato"
+  | "accent"
+  | "tenuto"
+  | "staccatissimo"
+  | "strong-accent"
+  | "detached-legato";
+
 export interface BuildNote {
   kind: "note" | "rest";
   onsetOffset?: number; // offset from measure start in divisions
@@ -96,10 +104,47 @@ export interface BuildNote {
   dots?: number;
   tieStart?: boolean;
   tieStop?: boolean;
+  slurStarts?: number[];
+  slurStops?: number[];
+  articulations?: ArticulationType[];
   stem?: "up" | "down";
   fingering?: number;
   arpeggiate?: boolean;
   measureRest?: boolean;
+}
+
+export type DynamicMarking =
+  | "pppp"
+  | "ppp"
+  | "pp"
+  | "p"
+  | "mp"
+  | "mf"
+  | "f"
+  | "ff"
+  | "fff"
+  | "ffff"
+  | "fp"
+  | "sf"
+  | "sfp"
+  | "sfpp"
+  | "sfz"
+  | "sffz"
+  | "fz"
+  | "rf"
+  | "rfz";
+
+export interface BuildDynamicEvent {
+  tickOffset: number;
+  kind: DynamicMarking;
+  staff: 1 | 2;
+}
+
+export interface BuildWedgeEvent {
+  tickOffset: number;
+  type: "crescendo" | "diminuendo" | "stop";
+  number: number;
+  staff: 1 | 2;
 }
 
 export interface BuildPedalEvent {
@@ -129,6 +174,8 @@ export interface BuildMeasure {
   attributes?: BuildAttributes;
   tempos?: BuildTempoEvent[];
   pedals?: BuildPedalEvent[];
+  dynamics?: BuildDynamicEvent[];
+  wedges?: BuildWedgeEvent[];
   notes: BuildNote[];
 }
 

@@ -1,4 +1,4 @@
-import type { BuildPitch } from "./types";
+import type { ArticulationType, BuildPitch, DynamicMarking } from "./types";
 
 export interface BBox {
   minX: number;
@@ -99,6 +99,39 @@ export interface SvgArc {
   bbox: BBox;
 }
 
+export interface SvgArticulation {
+  id: number;
+  kind: ArticulationType;
+  systemIndex: number;
+  measureIndex: number;
+  staff: 1 | 2;
+  cx: number;
+  cy: number;
+  bbox: BBox;
+}
+
+export interface SvgDynamic {
+  id: number;
+  kind: DynamicMarking;
+  systemIndex: number;
+  measureIndex: number;
+  staff: 1 | 2;
+  cx: number;
+  cy: number;
+  bbox: BBox;
+}
+
+export interface SvgHairpin {
+  id: number;
+  kind: "crescendo" | "diminuendo";
+  systemIndex: number;
+  staff: 1 | 2;
+  startX: number;
+  endX: number;
+  cy: number;
+  bbox: BBox;
+}
+
 export interface ParsedSvgPage {
   pageIndex: number;
   viewBox: { x: number; y: number; width: number; height: number };
@@ -108,6 +141,9 @@ export interface ParsedSvgPage {
   beams: SvgBeam[];
   rests: SvgRest[];
   arcs: SvgArc[];
+  articulations: SvgArticulation[];
+  dynamics: SvgDynamic[];
+  hairpins: SvgHairpin[];
   keySigCount: number;
   timeSigCount: number;
 }
@@ -401,8 +437,11 @@ function scanSvgShapes(svgText: string): {
   while ((m = tagRegex.exec(cleaned)) !== null) {
     const isClose = m[1] === "/";
     const tag = m[2].toLowerCase();
-    const attrStr = m[3] ?? "";
-    const isSelfClosing = m[4] === "/";
+    const rawAttrStr = m[3] ?? "";
+    const isSelfClosing = m[4] === "/" || rawAttrStr.trimEnd().endsWith("/");
+    const attrStr = isSelfClosing && rawAttrStr.trimEnd().endsWith("/")
+      ? rawAttrStr.trimEnd().slice(0, -1)
+      : rawAttrStr;
 
     if (isClose) {
       if (matrixStack.length > 1) {
@@ -801,6 +840,9 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
       beams: [],
       rests: [],
       arcs: [],
+      articulations: [],
+      dynamics: [],
+      hairpins: [],
       keySigCount: 0,
       timeSigCount: 0,
     };
@@ -1012,6 +1054,64 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
     ...slurShapes.map((s, i) => toArc(s, tieShapes.length + i, "slur")),
   ];
 
+  // Articulations (semantic .Articulation)
+  const articulationShapes = shapes.filter((s) => s.classes.has("Articulation"));
+  const articulations: SvgArticulation[] = articulationShapes.map((s, id) => {
+    const sysIdx = findNearestSystemIndex(s.bbox.cy, systems);
+    const sys = systems[sysIdx];
+    const staff = findNearestStaff(s.bbox.cy, sys);
+    const ss = staff.staffSpace;
+    return {
+      id,
+      kind: classifyArticulation(s.bbox, ss),
+      systemIndex: sysIdx,
+      measureIndex: findMeasureIndex(s.bbox.cx, sys),
+      staff: staff.staffNumber,
+      cx: s.bbox.cx,
+      cy: s.bbox.cy,
+      bbox: s.bbox,
+    };
+  });
+
+  // Dynamics (semantic .Dynamic)
+  const dynamicShapes = shapes.filter((s) => s.classes.has("Dynamic"));
+  const dynamics: SvgDynamic[] = [];
+  for (const s of dynamicShapes) {
+    const sysIdx = findNearestSystemIndex(s.bbox.cy, systems);
+    const sys = systems[sysIdx];
+    const staff = findNearestStaff(s.bbox.cy, sys);
+    const kind = classifyDynamic(s, staff.staffSpace);
+    if (!kind) continue;
+    dynamics.push({
+      id: dynamics.length,
+      kind,
+      systemIndex: sysIdx,
+      measureIndex: findMeasureIndex(s.bbox.cx, sys),
+      staff: staff.staffNumber,
+      cx: s.bbox.cx,
+      cy: s.bbox.cy,
+      bbox: s.bbox,
+    });
+  }
+
+  // Hairpins (semantic .HairpinSegment)
+  const hairpinShapes = shapes.filter((s) => s.classes.has("HairpinSegment"));
+  const hairpins: SvgHairpin[] = hairpinShapes.map((s, id) => {
+    const sysIdx = findNearestSystemIndex(s.bbox.cy, systems);
+    const sys = systems[sysIdx];
+    const staff = findNearestStaff(s.bbox.cy, sys);
+    return {
+      id,
+      kind: classifyHairpin(s),
+      systemIndex: sysIdx,
+      staff: staff.staffNumber,
+      startX: s.bbox.minX,
+      endX: s.bbox.maxX,
+      cy: s.bbox.cy,
+      bbox: s.bbox,
+    };
+  });
+
   return {
     pageIndex,
     viewBox,
@@ -1021,7 +1121,140 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
     beams,
     rests,
     arcs,
+    articulations,
+    dynamics,
+    hairpins,
     keySigCount,
     timeSigCount,
   };
+}
+
+function classifyArticulation(bbox: BBox, staffSpace: number): ArticulationType {
+  const wNorm = bbox.width / staffSpace;
+  const hNorm = bbox.height / staffSpace;
+  const aspect = bbox.width / Math.max(1e-6, bbox.height);
+
+  if (wNorm <= 0.55 && hNorm <= 0.55) {
+    return "staccato";
+  }
+  if (aspect >= 2.8 && hNorm <= 0.35) {
+    return "tenuto";
+  }
+  if (bbox.height / Math.max(1e-6, bbox.width) >= 1.5 && wNorm <= 0.55 && hNorm >= 0.55) {
+    return "staccatissimo";
+  }
+  if (bbox.width > bbox.height && wNorm >= 0.85) {
+    return "accent";
+  }
+  return "strong-accent";
+}
+
+const VALID_DYNAMICS = new Set<string>([
+  "pppp", "ppp", "pp", "p", "mp", "mf", "f", "ff", "fff", "ffff",
+  "fp", "sf", "sfp", "sfpp", "sfz", "sffz", "fz", "rf", "rfz",
+]);
+
+function computeBBoxFromPts(pts: Array<[number, number]>): BBox | null {
+  if (pts.length === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [x, y] of pts) {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    cx: (minX + maxX) / 2,
+    cy: (minY + maxY) / 2,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
+}
+
+function classifyDynamic(shape: RawSvgShape, staffSpace: number): DynamicMarking | null {
+  const attrDyn = shape.attrs["data-dynamic"]?.trim().toLowerCase();
+  if (attrDyn && VALID_DYNAMICS.has(attrDyn)) {
+    return attrDyn as DynamicMarking;
+  }
+
+  const d = shape.attrs.d ?? "";
+  const subParts = d.split(/(?=M)/).filter((p) => p.trim().startsWith("M"));
+  const subBoxes: BBox[] = [];
+  for (const part of subParts) {
+    const pts = extractPathPoints(part, shape.matrix);
+    const b = computeBBoxFromPts(pts);
+    if (b && b.width > 0 && b.height > 0) subBoxes.push(b);
+  }
+  if (subBoxes.length === 0) return null;
+
+  // Identify enclosed counter holes (e.g., the bowl of 'p')
+  const isHole = new Array<boolean>(subBoxes.length).fill(false);
+  const hasHole = new Array<boolean>(subBoxes.length).fill(false);
+  for (let i = 0; i < subBoxes.length; i++) {
+    const inner = subBoxes[i];
+    for (let j = 0; j < subBoxes.length; j++) {
+      if (i === j) continue;
+      const outer = subBoxes[j];
+      if (
+        inner.minX > outer.minX &&
+        inner.maxX < outer.maxX &&
+        inner.minY > outer.minY &&
+        inner.maxY < outer.maxY
+      ) {
+        isHole[i] = true;
+        hasHole[j] = true;
+        break;
+      }
+    }
+  }
+
+  const letters = subBoxes
+    .map((b, idx) => ({ bbox: b, hasHole: hasHole[idx], isHole: isHole[idx] }))
+    .filter((item) => !item.isHole)
+    .sort((a, b) => a.bbox.minX - b.bbox.minX);
+
+  let text = "";
+  for (const letter of letters) {
+    const hNorm = letter.bbox.height / staffSpace;
+    const wNorm = letter.bbox.width / staffSpace;
+    const aspect = letter.bbox.width / Math.max(1e-6, letter.bbox.height);
+    if (letter.hasHole) {
+      text += "p";
+    } else if (hNorm >= 2.0) {
+      text += "f";
+    } else if (aspect >= 1.15 && wNorm >= 1.1) {
+      text += "m";
+    } else if (hNorm >= 1.45) {
+      text += "p";
+    }
+  }
+
+  if (VALID_DYNAMICS.has(text)) {
+    return text as DynamicMarking;
+  }
+  return null;
+}
+
+function classifyHairpin(shape: RawSvgShape): "crescendo" | "diminuendo" {
+  const { minX, maxX, width } = shape.bbox;
+  const leftYs: number[] = [];
+  const rightYs: number[] = [];
+  const tol = Math.max(1, width * 0.2);
+
+  for (const [x, y] of shape.points) {
+    if (x <= minX + tol) leftYs.push(y);
+    if (x >= maxX - tol) rightYs.push(y);
+  }
+
+  const spread = (ys: number[]) =>
+    ys.length >= 2 ? Math.max(...ys) - Math.min(...ys) : 0;
+
+  return spread(rightYs) >= spread(leftYs) ? "crescendo" : "diminuendo";
 }
