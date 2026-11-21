@@ -156,6 +156,21 @@ export interface BuildAttributes {
   staves?: number;
 }
 
+export interface BuildNavMarker {
+  kind:
+    | "segno"
+    | "coda"
+    | "fine"
+    | "to-coda"
+    | "dc"
+    | "dc-al-fine"
+    | "dc-al-coda"
+    | "ds"
+    | "ds-al-fine"
+    | "ds-al-coda";
+  text: string;
+}
+
 export interface BuildMeasure {
   number: string;
   implicit?: boolean;
@@ -165,6 +180,11 @@ export interface BuildMeasure {
   pedals?: BuildPedalEvent[];
   wedges?: BuildWedgeEvent[];
   notes: BuildNote[];
+  repeatStart?: boolean;
+  repeatStop?: boolean;
+  endingStart?: string;
+  endingStop?: { number: string; type: "stop" | "discontinue" };
+  navMarkers?: BuildNavMarker[];
 }
 
 export interface ScoreBuildModel {

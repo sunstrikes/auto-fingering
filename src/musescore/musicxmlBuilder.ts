@@ -1,6 +1,7 @@
 import type {
   BuildAttributes,
   BuildMeasure,
+  BuildNavMarker,
   BuildNote,
   ScoreBuildModel,
 } from "./types";
@@ -184,12 +185,89 @@ interface MeasureDirection {
   lines: string[];
 }
 
+function renderLeftBarline(measure: BuildMeasure): string[] {
+  if (!measure.repeatStart && !measure.endingStart) return [];
+  const lines: string[] = ['      <barline location="left">'];
+  if (measure.repeatStart) {
+    lines.push("        <bar-style>heavy-light</bar-style>");
+  }
+  if (measure.endingStart) {
+    lines.push(`        <ending number="${escapeXml(measure.endingStart)}" type="start"/>`);
+  }
+  if (measure.repeatStart) {
+    lines.push('        <repeat direction="forward"/>');
+  }
+  lines.push("      </barline>");
+  return lines;
+}
+
+function renderRightBarline(measure: BuildMeasure): string[] {
+  if (!measure.repeatStop && !measure.endingStop) return [];
+  const lines: string[] = ['      <barline location="right">'];
+  if (measure.repeatStop) {
+    lines.push("        <bar-style>light-heavy</bar-style>");
+  }
+  if (measure.endingStop) {
+    lines.push(
+      `        <ending number="${escapeXml(measure.endingStop.number)}" type="${measure.endingStop.type}"/>`
+    );
+  }
+  if (measure.repeatStop) {
+    lines.push('        <repeat direction="backward"/>');
+  }
+  lines.push("      </barline>");
+  return lines;
+}
+
+function renderNavDirection(marker: BuildNavMarker): string[] {
+  const lines: string[] = ['      <direction placement="above">', "        <direction-type>"];
+  if (marker.kind === "segno") {
+    lines.push("          <segno/>");
+    lines.push("        </direction-type>");
+    lines.push('        <sound segno="segno"/>');
+  } else if (marker.kind === "coda") {
+    lines.push("          <coda/>");
+    lines.push("        </direction-type>");
+    lines.push('        <sound coda="coda"/>');
+  } else {
+    lines.push(`          <words>${escapeXml(marker.text)}</words>`);
+    lines.push("        </direction-type>");
+    if (marker.kind === "dc") {
+      lines.push('        <sound dacapo="yes"/>');
+    } else if (marker.kind === "dc-al-fine") {
+      lines.push('        <sound dacapo="yes"/>');
+    } else if (marker.kind === "dc-al-coda") {
+      lines.push('        <sound dacapo="yes" tocoda="coda"/>');
+    } else if (marker.kind === "ds") {
+      lines.push('        <sound dalsegno="segno"/>');
+    } else if (marker.kind === "ds-al-fine") {
+      lines.push('        <sound dalsegno="segno"/>');
+    } else if (marker.kind === "ds-al-coda") {
+      lines.push('        <sound dalsegno="segno" tocoda="coda"/>');
+    } else if (marker.kind === "fine") {
+      lines.push('        <sound fine="yes"/>');
+    } else if (marker.kind === "to-coda") {
+      lines.push('        <sound tocoda="coda"/>');
+    }
+  }
+  lines.push("      </direction>");
+  return lines;
+}
+
 function renderMeasure(measure: BuildMeasure, staves: 1 | 2): string[] {
   const implicitAttr = measure.implicit ? ' implicit="yes"' : "";
   const lines: string[] = [`    <measure number="${escapeXml(measure.number)}"${implicitAttr}>`];
 
+  lines.push(...renderLeftBarline(measure));
+
   if (measure.attributes) {
     lines.push(...renderAttributes(measure.attributes, staves));
+  }
+
+  for (const m of measure.navMarkers ?? []) {
+    if (m.kind === "segno" || m.kind === "coda") {
+      lines.push(...renderNavDirection(m));
+    }
   }
 
   const pendingDirections: MeasureDirection[] = [];
@@ -306,6 +384,13 @@ function renderMeasure(measure: BuildMeasure, staves: 1 | 2): string[] {
     }
   }
 
+  for (const m of measure.navMarkers ?? []) {
+    if (m.kind !== "segno" && m.kind !== "coda") {
+      lines.push(...renderNavDirection(m));
+    }
+  }
+
+  lines.push(...renderRightBarline(measure));
   lines.push("    </measure>");
   return lines;
 }
