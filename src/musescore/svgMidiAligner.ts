@@ -1,9 +1,12 @@
 import {
   activeKeySigAt,
   activeTimeSigAt,
+  assignStaffByTrack,
   buildMeasureSpans,
+  buildStaffVoicesForMeasure,
   durationToTypeAndDots,
   type MeasureSpan,
+  type NoteSegment,
 } from "./midiToScoreModel";
 import type { ParsedSvgPage, SvgArc, SvgNotehead } from "./svgParser";
 import type {
@@ -257,38 +260,279 @@ function pairColumnWithSlice(
 }
 
 /**
+ * Synthesizes a single measure's BuildNotes from raw MIDI truth events.
+ */
+function synthesizeMeasureFromMidi(
+  span: MeasureSpan,
+  rawMidi: RawMidiData,
+  staffOf: (note: RawMidiNote) => 1 | 2,
+  keyFifths: number,
+  stavesCount: 1 | 2
+): { notes: BuildNote[]; hasStaff2: boolean } {
+  const segs1: NoteSegment[] = [];
+  const segs2: NoteSegment[] = [];
+
+  for (const note of rawMidi.notes) {
+    if (note.endTick <= span.startTick || note.startTick >= span.endTick) continue;
+    const segStart = Math.max(note.startTick, span.startTick);
+    const segEnd = Math.min(note.endTick, span.endTick);
+    if (segEnd <= segStart) continue;
+    const staff = staffOf(note);
+    const seg: NoteSegment = {
+      pitch: note.pitch,
+      startTick: segStart,
+      endTick: segEnd,
+      staff,
+      tieStart: segEnd < note.endTick,
+      tieStop: segStart > note.startTick,
+    };
+    if (staff === 1) segs1.push(seg);
+    else segs2.push(seg);
+  }
+
+  const rhNotes = buildStaffVoicesForMeasure(
+    segs1,
+    span.startTick,
+    span.duration,
+    1,
+    rawMidi.ppq,
+    keyFifths
+  );
+  const useTwoStaves = stavesCount === 2 || segs2.length > 0;
+  const lhNotes = useTwoStaves
+    ? buildStaffVoicesForMeasure(segs2, span.startTick, span.duration, 2, rawMidi.ppq, keyFifths)
+    : [];
+
+  return { notes: [...rhNotes, ...lhNotes], hasStaff2: segs2.length > 0 };
+}
+
+export interface AlignSvgsResult {
+  model: ScoreBuildModel;
+  diagnostics: ConversionDiagnostic[];
+  measuresAligned: number;
+  fallbackMeasures: number;
+  alignmentConfidence: number;
+}
+
+function pitchKey(p?: BuildPitch): string | null {
+  if (!p) return null;
+  return `${p.step}:${p.alter ?? 0}:${p.octave}`;
+}
+
+/**
+ * Explicitly closes any open cross-boundary `<tie>`, `<slur>`, `<wedge>`, and `<pedal>`
+ * spanners at SVG/fallback boundaries (and at the end of the score).
+ */
+export function closeBoundarySpanners(
+  measures: BuildMeasure[],
+  isFallback: boolean[]
+): void {
+  if (measures.length === 0) return;
+
+  // 1. <tie> reconciliation across SVG/fallback boundaries & end of score
+  for (let mIdx = 0; mIdx < measures.length; mIdx++) {
+    const curr = measures[mIdx];
+    const isLast = mIdx === measures.length - 1;
+    const nextIsBoundary = !isLast && isFallback[mIdx] !== isFallback[mIdx + 1];
+
+    if (isLast) {
+      const openInLast = new Map<string, BuildNote[]>();
+      for (const n of curr.notes) {
+        const k = pitchKey(n.pitch);
+        if (!k) continue;
+        if (n.tieStop) {
+          const stack = openInLast.get(k);
+          if (stack && stack.length > 0) stack.shift();
+        }
+        if (n.tieStart) {
+          const stack = openInLast.get(k) ?? [];
+          stack.push(n);
+          openInLast.set(k, stack);
+        }
+      }
+      for (const stack of openInLast.values()) {
+        for (const unclosed of stack) {
+          unclosed.tieStart = undefined;
+        }
+      }
+    } else if (nextIsBoundary) {
+      const next = measures[mIdx + 1];
+      const nextStopKeys = new Set<string>();
+      for (const n of next.notes) {
+        const k = pitchKey(n.pitch);
+        if (n.tieStop && k) nextStopKeys.add(k);
+      }
+      const currStartKeys = new Set<string>();
+      for (const n of curr.notes) {
+        const k = pitchKey(n.pitch);
+        if (n.tieStart && k) {
+          if (nextStopKeys.has(k)) {
+            currStartKeys.add(k);
+          } else {
+            n.tieStart = undefined;
+          }
+        }
+      }
+      for (const n of next.notes) {
+        const k = pitchKey(n.pitch);
+        if (n.tieStop && (!k || !currStartKeys.has(k))) {
+          n.tieStop = undefined;
+        }
+      }
+    }
+  }
+
+  // 2. <slur> closure at SVG/fallback boundaries & end of score
+  const openSlurs = new Map<number, { startNote: BuildNote; lastNote: BuildNote }>();
+  const closeAllSlurs = () => {
+    for (const [, state] of openSlurs.entries()) {
+      if (state.lastNote === state.startNote) {
+        state.startNote.slurStart = undefined;
+      } else {
+        state.lastNote.slurStop = true;
+      }
+    }
+    openSlurs.clear();
+  };
+
+  for (let mIdx = 0; mIdx < measures.length; mIdx++) {
+    if (mIdx > 0 && isFallback[mIdx - 1] !== isFallback[mIdx] && openSlurs.size > 0) {
+      closeAllSlurs();
+    }
+    for (const n of measures[mIdx].notes) {
+      if (n.kind !== "note") continue;
+      const num = n.slurNumber ?? 1;
+      for (const state of openSlurs.values()) {
+        state.lastNote = n;
+      }
+      if (n.slurStop) {
+        if (openSlurs.has(num)) {
+          openSlurs.delete(num);
+        } else {
+          n.slurStop = undefined;
+        }
+      }
+      if (n.slurStart) {
+        openSlurs.set(num, { startNote: n, lastNote: n });
+      }
+    }
+  }
+  if (openSlurs.size > 0) {
+    closeAllSlurs();
+  }
+
+  // 3. <wedge> closure at SVG/fallback boundaries & end of score
+  let openWedge: { staff: 1 | 2 } | null = null;
+  for (let mIdx = 0; mIdx < measures.length; mIdx++) {
+    if (mIdx > 0 && isFallback[mIdx - 1] !== isFallback[mIdx] && openWedge !== null) {
+      const prev = measures[mIdx - 1];
+      prev.wedges = prev.wedges ?? [];
+      prev.wedges.push({ tickOffset: prev.duration, type: "stop", staff: openWedge.staff });
+      openWedge = null;
+    }
+    const wedges = measures[mIdx].wedges;
+    if (!wedges || wedges.length === 0) continue;
+    wedges.sort((a, b) => a.tickOffset - b.tickOffset);
+    const kept = [];
+    for (const w of wedges) {
+      if (w.type === "crescendo" || w.type === "diminuendo") {
+        openWedge = { staff: w.staff ?? 1 };
+        kept.push(w);
+      } else if (w.type === "stop") {
+        if (openWedge !== null) {
+          openWedge = null;
+          kept.push(w);
+        }
+      }
+    }
+    measures[mIdx].wedges = kept.length > 0 ? kept : undefined;
+  }
+  if (openWedge !== null) {
+    const last = measures[measures.length - 1];
+    last.wedges = last.wedges ?? [];
+    last.wedges.push({ tickOffset: last.duration, type: "stop", staff: openWedge.staff });
+  }
+
+  // 4. <pedal> closure at SVG/fallback boundaries & end of score
+  let openPedal: { staff: 1 | 2 } | null = null;
+  for (let mIdx = 0; mIdx < measures.length; mIdx++) {
+    if (mIdx > 0 && isFallback[mIdx - 1] !== isFallback[mIdx] && openPedal !== null) {
+      const prev = measures[mIdx - 1];
+      prev.pedals = prev.pedals ?? [];
+      prev.pedals.push({ tickOffset: prev.duration, type: "stop", staff: openPedal.staff });
+      openPedal = null;
+    }
+    const pedals = measures[mIdx].pedals;
+    if (!pedals || pedals.length === 0) continue;
+    pedals.sort((a, b) => a.tickOffset - b.tickOffset);
+    const kept = [];
+    for (const p of pedals) {
+      if (p.type === "start") {
+        openPedal = { staff: p.staff ?? 2 };
+        kept.push(p);
+      } else if (p.type === "change") {
+        if (openPedal === null) {
+          openPedal = { staff: p.staff ?? 2 };
+          kept.push({ ...p, type: "start" as const });
+        } else {
+          kept.push(p);
+        }
+      } else if (p.type === "stop") {
+        if (openPedal !== null) {
+          openPedal = null;
+          kept.push(p);
+        }
+      }
+    }
+    measures[mIdx].pedals = kept.length > 0 ? kept : undefined;
+  }
+  if (openPedal !== null) {
+    const last = measures[measures.length - 1];
+    last.pedals = last.pedals ?? [];
+    last.pedals.push({ tickOffset: last.duration, type: "stop", staff: openPedal.staff });
+  }
+}
+
+/**
  * Aligns parsed MS4 SVG pages with raw MIDI truth events to produce a unified ScoreBuildModel.
  */
 export function alignSvgsAndMidi(
   pages: ParsedSvgPage[],
   rawMidi: RawMidiData,
   options?: ConversionOptions
-): { model: ScoreBuildModel; diagnostics: ConversionDiagnostic[] } {
+): AlignSvgsResult {
   const diagnostics: ConversionDiagnostic[] = [];
   const ppq = rawMidi.ppq;
+  const splitPitch = options?.splitPitch ?? 60;
+  const staffOf = assignStaffByTrack(rawMidi, splitPitch);
   const spans: MeasureSpan[] = buildMeasureSpans(rawMidi, options);
-  const { measures: svgMeasures, maxStaves } = collectSvgMeasures(pages);
+  const { measures: svgMeasures, maxStaves: svgMaxStaves } = collectSvgMeasures(pages);
+  let maxStaves: 1 | 2 = svgMaxStaves;
 
   if (svgMeasures.length !== spans.length) {
     diagnostics.push({
       level: "warning",
       code: "MEASURE_COUNT_MISMATCH",
-      message: `SVG measure count (${svgMeasures.length}) differs from MIDI measure count (${spans.length}); aligning linearly over ${Math.min(svgMeasures.length, spans.length)} measures.`,
+      message: `SVG measure count (${svgMeasures.length}) differs from MIDI measure count (${spans.length}); synthesizing uncovered measures from MIDI.`,
     });
   }
 
-  const measureCount = Math.min(svgMeasures.length, spans.length);
   const buildMeasures: BuildMeasure[] = [];
+  const isFallback: boolean[] = [];
   let prevKeyFifths: number | undefined;
   let prevBeats: number | undefined;
   let prevBeatType: number | undefined;
+  let measuresAligned = 0;
+  let fallbackMeasures = 0;
+  let confidenceSum = 0;
+  const confidenceThreshold = options?.alignmentConfidenceThreshold ?? 0.5;
 
-  // Track active MIDI notes crossing measure boundaries: key = `${pitch}:${voice}` -> last BuildNote
+  // Track active MIDI notes crossing measure boundaries
   const activeTieOutByNote = new Map<RawMidiNote, BuildNote>();
 
-  for (let mIdx = 0; mIdx < measureCount; mIdx++) {
+  for (let mIdx = 0; mIdx < spans.length; mIdx++) {
     const span = spans[mIdx];
-    const svgM = svgMeasures[mIdx];
+    const svgM = mIdx < svgMeasures.length ? svgMeasures[mIdx] : undefined;
     const measureNumber = Number.parseInt(span.number, 10) || mIdx + 1;
 
     const ks = activeKeySigAt(rawMidi.keySigs, span.startTick);
@@ -318,6 +562,36 @@ export function alignSvgsAndMidi(
     prevBeats = ts.numerator;
     prevBeatType = ts.denominator;
 
+    if (!svgM) {
+      const synth = synthesizeMeasureFromMidi(span, rawMidi, staffOf, ks.fifths, maxStaves);
+      if (synth.hasStaff2) maxStaves = 2;
+      fallbackMeasures++;
+
+      const tempos = rawMidi.tempos
+        .filter((t) => t.tick >= span.startTick && t.tick < span.endTick)
+        .map((t) => ({ tickOffset: t.tick - span.startTick, bpm: t.bpm }));
+
+      const pedals = rawMidi.pedals
+        .filter((p) => p.tick >= span.startTick && p.tick < span.endTick)
+        .map((p) => ({
+          tickOffset: p.tick - span.startTick,
+          type: p.type,
+          staff: maxStaves,
+        }));
+
+      isFallback.push(true);
+      buildMeasures.push({
+        number: span.number,
+        implicit: span.implicit || undefined,
+        duration: span.duration,
+        attributes: attrs,
+        tempos: tempos.length > 0 ? tempos : undefined,
+        pedals: pedals.length > 0 ? pedals : undefined,
+        notes: synth.notes,
+      });
+      continue;
+    }
+
     const handVoiceMap = computeHandAndVoiceMap(svgM.noteheads, svgM.staffSpace);
     const visualCols = groupVisualColumns(svgM.noteheads, svgM.staffSpace);
 
@@ -332,6 +606,7 @@ export function alignSvgsAndMidi(
     const buildNotes: BuildNote[] = [];
     const pairedBySvgId = new Map<number, { midi: RawMidiNote; buildNote: BuildNote }>();
     const seenSvgInMeasure: SvgNotehead[] = [];
+    let alterAnomalyCount = 0;
 
     // 1. Handle cross-measure continuing MIDI notes at the start of the measure
     let colOffset = 0;
@@ -447,6 +722,7 @@ export function alignSvgsAndMidi(
         const dMidi = diatonicToMidi(svg.step, svg.octave);
         const alter = midi.pitch - dMidi;
         if (Math.abs(alter) > 2) {
+          alterAnomalyCount++;
           diagnostics.push({
             level: "warning",
             code: "ALIGNMENT_ALTER_OUT_OF_RANGE",
@@ -530,6 +806,50 @@ export function alignSvgsAndMidi(
         staff: maxStaves,
       }));
 
+    const expectedMidiCount = newMidiNotes.length + continuingMidiNotes.length;
+    const svgCount = svgM.noteheads.length;
+    const pairedCount = buildNotes.filter((n) => n.kind === "note").length;
+    let measureConfidence = 1;
+    if (expectedMidiCount === 0 && svgCount === 0) {
+      measureConfidence = 1;
+    } else if (expectedMidiCount === 0 || svgCount === 0) {
+      measureConfidence = 0;
+    } else {
+      const coverage = pairedCount / Math.max(expectedMidiCount, svgCount);
+      const alterPenalty = alterAnomalyCount / Math.max(1, pairedCount);
+      measureConfidence = Math.max(0, coverage * (1 - 0.8 * alterPenalty));
+    }
+
+    if (measureConfidence < confidenceThreshold) {
+      diagnostics.push({
+        level: "warning",
+        code: "LOW_CONFIDENCE_MEASURE_FALLBACK",
+        measureNumber,
+        message: `Measure ${measureNumber} alignment confidence (${measureConfidence.toFixed(2)}) below threshold (${confidenceThreshold}); falling back to raw MIDI.`,
+      });
+      const synth = synthesizeMeasureFromMidi(span, rawMidi, staffOf, ks.fifths, maxStaves);
+      if (synth.hasStaff2) maxStaves = 2;
+      fallbackMeasures++;
+      confidenceSum += measureConfidence;
+
+      isFallback.push(true);
+      isFallback.push(true);
+      buildMeasures.push({
+        number: span.number,
+        implicit: span.implicit || undefined,
+        duration: span.duration,
+        attributes: attrs,
+        tempos: tempos.length > 0 ? tempos : undefined,
+        pedals: pedals.length > 0 ? pedals : undefined,
+        notes: synth.notes,
+      });
+      continue;
+    }
+
+    measuresAligned++;
+    confidenceSum += measureConfidence;
+    isFallback.push(false);
+
     buildMeasures.push({
       number: span.number,
       implicit: span.implicit || undefined,
@@ -541,6 +861,15 @@ export function alignSvgsAndMidi(
     });
   }
 
+  closeBoundarySpanners(buildMeasures, isFallback);
+
+  if (buildMeasures.length > 0 && buildMeasures[0].attributes) {
+    buildMeasures[0].attributes.staves = maxStaves;
+  }
+
+  const totalMeasures = spans.length;
+  const alignmentConfidence = totalMeasures > 0 ? confidenceSum / totalMeasures : 0;
+
   return {
     model: {
       title: options?.title ?? "MuseScore Import",
@@ -549,5 +878,8 @@ export function alignSvgsAndMidi(
       measures: buildMeasures,
     },
     diagnostics,
+    measuresAligned,
+    fallbackMeasures,
+    alignmentConfidence,
   };
 }

@@ -76,6 +76,17 @@ function renderPedalDirection(type: "start" | "change" | "stop", staff: 1 | 2): 
   ];
 }
 
+function renderWedgeDirection(type: "crescendo" | "diminuendo" | "stop", staff: 1 | 2): string[] {
+  return [
+    '      <direction placement="below">',
+    "        <direction-type>",
+    `          <wedge type="${type}"/>`,
+    "        </direction-type>",
+    `        <staff>${staff}</staff>`,
+    "      </direction>",
+  ];
+}
+
 /**
  * Serializes a `<note>` element strictly respecting MusicXML 4.0 child-element ordering:
  * grace -> chord -> pitch|rest -> duration -> tie -> voice -> type -> dot -> stem -> staff -> notations.
@@ -133,7 +144,12 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
   }
 
   const hasNotations =
-    note.tieStop || note.tieStart || note.arpeggiate || note.fingering !== undefined;
+    note.tieStop ||
+    note.tieStart ||
+    note.slurStop ||
+    note.slurStart ||
+    note.arpeggiate ||
+    note.fingering !== undefined;
   if (hasNotations) {
     lines.push("        <notations>");
     if (note.tieStop) {
@@ -141,6 +157,12 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
     }
     if (note.tieStart) {
       lines.push('          <tied type="start"/>');
+    }
+    if (note.slurStop) {
+      lines.push(`          <slur type="stop" number="${note.slurNumber ?? 1}"/>`);
+    }
+    if (note.slurStart) {
+      lines.push(`          <slur type="start" number="${note.slurNumber ?? 1}"/>`);
     }
     if (note.arpeggiate) {
       lines.push("          <arpeggiate/>");
@@ -181,6 +203,12 @@ function renderMeasure(measure: BuildMeasure, staves: 1 | 2): string[] {
     pendingDirections.push({
       tickOffset: p.tickOffset,
       lines: renderPedalDirection(p.type, p.staff ?? (staves === 2 ? 2 : 1)),
+    });
+  }
+  for (const w of measure.wedges ?? []) {
+    pendingDirections.push({
+      tickOffset: w.tickOffset,
+      lines: renderWedgeDirection(w.type, w.staff ?? 1),
     });
   }
   pendingDirections.sort((a, b) => a.tickOffset - b.tickOffset);
