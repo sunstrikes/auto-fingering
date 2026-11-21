@@ -12,7 +12,7 @@ import type {
   ScoreBuildModel,
 } from "./types";
 
-interface MeasureSpan {
+export interface MeasureSpan {
   index: number;
   number: string;
   implicit: boolean;
@@ -47,7 +47,7 @@ const DURATION_TABLE: Array<{ quarters: number; type: NoteTypeName; dots: number
   { quarters: 0.0625, type: "64th", dots: 0 },
 ];
 
-function durationToTypeAndDots(
+export function durationToTypeAndDots(
   durationTicks: number,
   ppq: number
 ): { type: NoteTypeName; dots: number } {
@@ -106,7 +106,7 @@ function midiToBuildPitch(midi: number, fifths: number): BuildPitch {
   };
 }
 
-function activeTimeSigAt(timeSigs: RawMidiTimeSig[], tick: number): RawMidiTimeSig {
+export function activeTimeSigAt(timeSigs: RawMidiTimeSig[], tick: number): RawMidiTimeSig {
   let active: RawMidiTimeSig = { tick: 0, numerator: 4, denominator: 4 };
   for (const ts of timeSigs) {
     if (ts.tick <= tick) {
@@ -118,7 +118,7 @@ function activeTimeSigAt(timeSigs: RawMidiTimeSig[], tick: number): RawMidiTimeS
   return active;
 }
 
-function activeKeySigAt(keySigs: RawMidiKeySig[], tick: number): RawMidiKeySig {
+export function activeKeySigAt(keySigs: RawMidiKeySig[], tick: number): RawMidiKeySig {
   let active: RawMidiKeySig = { tick: 0, fifths: 0, mode: "major" };
   for (const ks of keySigs) {
     if (ks.tick <= tick) {
@@ -130,7 +130,7 @@ function activeKeySigAt(keySigs: RawMidiKeySig[], tick: number): RawMidiKeySig {
   return active;
 }
 
-function buildMeasureSpans(
+export function buildMeasureSpans(
   rawMidi: RawMidiData,
   options?: ConversionOptions
 ): MeasureSpan[] {

@@ -1,11 +1,15 @@
 import { rawMidiToScoreModel } from "./midiToScoreModel";
 import { buildMusicXml } from "./musicxmlBuilder";
 import { parseRawMidi } from "./rawMidi";
+import { alignSvgsAndMidi } from "./svgMidiAligner";
+import { parseMs4Svg } from "./svgParser";
 import type { ConversionDiagnostic, ConversionOptions, ConversionResult } from "./types";
 
 export { parseRawMidi } from "./rawMidi";
 export { buildMusicXml } from "./musicxmlBuilder";
 export { rawMidiToScoreModel } from "./midiToScoreModel";
+export { parseMs4Svg } from "./svgParser";
+export { alignSvgsAndMidi } from "./svgMidiAligner";
 export type * from "./types";
 
 /**
@@ -26,15 +30,26 @@ export function svgsAndMidiToMusicXml(
       code: "MIDI_ONLY_FALLBACK",
       message: "No SVG pages provided; converting using non-destructive MIDI-only fallback.",
     });
-  } else {
-    diagnostics.push({
-      level: "warning",
-      code: "SVG_ALIGNMENT_NOT_YET_ENABLED",
-      message: "SVG alignment is not yet enabled in this milestone; using MIDI-only fallback.",
-    });
+    const model = rawMidiToScoreModel(rawMidi, options);
+    const xml = buildMusicXml(model);
+    return { xml, diagnostics };
   }
 
-  const model = rawMidiToScoreModel(rawMidi, options);
-  const xml = buildMusicXml(model);
+  const parsedPages = svgPages.map((svg, idx) => parseMs4Svg(svg, idx));
+  const hasSystems = parsedPages.some((p) => p.systems.length > 0);
+  if (!hasSystems) {
+    diagnostics.push({
+      level: "warning",
+      code: "SVG_NO_SYSTEMS_FALLBACK",
+      message: "No musical staves found in SVG pages; falling back to MIDI-only conversion.",
+    });
+    const model = rawMidiToScoreModel(rawMidi, options);
+    const xml = buildMusicXml(model);
+    return { xml, diagnostics };
+  }
+
+  const aligned = alignSvgsAndMidi(parsedPages, rawMidi, options);
+  diagnostics.push(...aligned.diagnostics);
+  const xml = buildMusicXml(aligned.model);
   return { xml, diagnostics };
 }
