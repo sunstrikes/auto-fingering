@@ -18,6 +18,20 @@ export { rawMidiToScoreModel } from "./midiToScoreModel";
 export { parseMs4Svg } from "./svgParser";
 export { alignSvgsAndMidi, closeBoundarySpanners } from "./svgMidiAligner";
 export { validateSvgPageAsset, isPngMagicBytes } from "./assetValidation";
+export {
+  parseMuseScoreInput,
+  parseMuseScoreHtmlMetadata,
+  downloadMuseScoreAssets,
+  downloadAndConvertMuseScore,
+} from "./downloader";
+export type {
+  MuseScoreInputTarget,
+  MuseScoreDownloadOptions,
+  MuseScorePageMetadata,
+  DownloadedMuseScoreAssets,
+  MuseScoreDownloadAndConvertOptions,
+  MuseScoreImportResult,
+} from "./downloader";
 export type * from "./types";
 
 function createDiagnostics(
