@@ -7,10 +7,12 @@ import {
   type Hand,
   type HandSpanProfile,
   type NoteEvent,
+  type PriorMode,
   type ScoreDocument,
   type SolveResult,
   type TransitionCue,
 } from "../domain/types";
+import { DEFAULT_PRIOR_LAMBDA } from "../prior/types";
 import type { MxlContainer } from "../musicxml/mxl";
 import type { XmlDomDeps } from "../musicxml/parser";
 import type { ExportFormat } from "../musicxml/scoreSession";
@@ -75,6 +77,9 @@ export interface StudioState {
   singleStaffHand: Hand;
   handSpanProfile: HandSpanProfile;
   ignoreExistingFingerings: boolean;
+  priorMode: PriorMode;
+  priorLambda: number;
+  customModelBaseUrl: string;
   scoreDoc: ScoreDocument | null;
   renderedXml: string | null;
   solveResult: SolveResult | null;
@@ -96,6 +101,9 @@ export interface StudioState {
   setSingleStaffHand: (hand: Hand) => void;
   setHandSpanProfile: (profile: HandSpanProfile) => void;
   setIgnoreExistingFingerings: (ignore: boolean) => void;
+  setPriorMode: (priorMode: PriorMode) => void;
+  setPriorLambda: (priorLambda: number) => void;
+  setCustomModelBaseUrl: (customModelBaseUrl: string) => void;
   setStatus: (status: string) => void;
   setErrorMsg: (errorMsg: string | null) => void;
   clearScoreErrorState: (errorMsg: string, status?: string) => void;
@@ -233,6 +241,9 @@ const INITIAL_DATA = {
   singleStaffHand: "RH" as Hand,
   handSpanProfile: DEFAULT_HAND_SPAN_PROFILE,
   ignoreExistingFingerings: false,
+  priorMode: "model-assist" as PriorMode,
+  priorLambda: DEFAULT_PRIOR_LAMBDA,
+  customModelBaseUrl: "",
   scoreDoc: null as ScoreDocument | null,
   renderedXml: null as string | null,
   solveResult: null as SolveResult | null,
@@ -258,6 +269,9 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
   setSingleStaffHand: (singleStaffHand) => set({ singleStaffHand }),
   setHandSpanProfile: (handSpanProfile) => set({ handSpanProfile }),
   setIgnoreExistingFingerings: (ignoreExistingFingerings) => set({ ignoreExistingFingerings }),
+  setPriorMode: (priorMode) => set({ priorMode }),
+  setPriorLambda: (priorLambda) => set({ priorLambda }),
+  setCustomModelBaseUrl: (customModelBaseUrl) => set({ customModelBaseUrl }),
   setStatus: (status) => set({ status }),
   setErrorMsg: (errorMsg) => set({ errorMsg }),
 

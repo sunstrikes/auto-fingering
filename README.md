@@ -17,7 +17,7 @@
 
 ## 功能特性
 
-- **自动指法推导**：以 `Onset Slice`（同手同拍新击键）为单位运行 Beam Search 动态规划，统一处理双手/跨谱表、和弦、`Tie Continuation` 延音、`Grace Note` 倚音与既有指法锚点；提供 `S` / `M` / `L` 三种 `Hand Span Profile`，以及「避免大拇指弹黑键」「优先保持手位稳定」两个偏好开关。
+- **自动指法推导**：以 `Onset Slice`（同手同拍新击键）为单位运行 Beam Search 动态规划，统一处理双手/跨谱表、和弦、`Tie Continuation` 延音、`Grace Note` 倚音与既有指法锚点；提供 `S` / `M` / `L` 三种 `Hand Span Profile`，以及「避免大拇指弹黑键」「优先保持手位稳定」两个偏好开关；支持按需开启**「模型辅助(Beta)」预训练 Transformer 软先验**（纯 TS CPU 前向、懒加载 ~0.8 MB 权重，在物理合规候选间重排，P0 物理跨度与锚点保持一票否决）。
 - **双手 88 键可视化**：五线谱内联指法气泡、`Hand Position` 色带、`Transition Cue`（穿指/跨指/移把/大跨度）与风险小结栏；底部 88 键共用键盘上用靛蓝/青绿区分左右手，并用连续骨骼 SVG 模拟双手 `Hand Posture`。
 - **交互式微调**：停止状态下点击任意音符即可设锚点，在 Web Worker 中局部重算受影响乐句；支持 `phrase` / `pinOnly` 两种锚点语义、撤销/重做，以及 `Before → After` 变更对照。
 - **交互练琴**：
@@ -89,6 +89,7 @@ src/
 ├── domain/        # 领域模型与纯数据契约（NoteEvent / OnsetSlice / PracticeStep ...）
 ├── musicxml/      # 解析、无损回写、.mxl 容器读写
 ├── solver/        # 束搜索 DP、代价模型、手位与过渡推导、局部锚点重算
+├── prior/         # 可选预训练 Transformer 指法软先验（26×5 特征适配、纯 TS 前向与懒加载）
 ├── workers/       # Web Worker 入口与强类型 RPC（新请求自动取消旧请求）
 ├── audio/         # 钢琴音源、节拍器、播放/等待/A-B 循环调度
 ├── midi/          # Web MIDI 热插拔、端口选择、软件输入适配
@@ -137,6 +138,7 @@ test-corpus/       # 01–05 回归样本（含真实曲目《武昌》）
 | [GLOSSARY.md](GLOSSARY.md) | 领域术语表（中英对照） |
 | [ADR-0001](docs/adr/0001-dual-hand-88key-timeline-studio.md) | 双手 88 键时间轴工作室架构决策 |
 | [ADR-0002](docs/adr/0002-interactive-practice-midi-waiting-loop.md) | 交互练琴（节拍器/MIDI/等待模式/A-B 循环）架构决策 |
+| [ADR-0003](docs/adr/0003-pretrained-fingering-prior.md) | 预训练指法 Transformer 软先验与物理否决架构决策（含许可风险记录与 `VITE_BUNDLE_PRIOR=0` 降级开关） |
 | [test-corpus/README.md](test-corpus/README.md) | 回归样本说明与预期结果 |
 
 ## 浏览器兼容与限制
@@ -146,6 +148,8 @@ test-corpus/       # 01–05 回归样本（含真实曲目《武昌》）
 - 首次播放会懒加载钢琴采样，网络不可用时自动退回 Web Audio 合成音，不影响指法功能。
 - 指法结果由代价模型推导，仅作为练习参考；不同手型/演奏习惯可通过 `S`/`M`/`L` 与锚点自行调整。
 
-## 许可
+## 许可与第三方声明
 
 本项目基于 [Apache License 2.0](LICENSE) 发布，版权归 sunstrikes 所有（见 [NOTICE](NOTICE)）。
+
+可选的「模型辅助(Beta)」功能使用了 [`@lumikey/piano-fingering-model`](https://github.com/lumikey/piano-fingering-model)（npm 声明 MIT）的 26-token 特征定义与预训练 Transformer 权重；上游训练数据包含 PIG 数据集（Eita Nakamura, Yasuyuki Saito, Kazuyoshi Yoshii, *"Statistical Learning and Estimation of Piano Fingering"*, Information Sciences, Vol. 517, pp. 68–85, 2020；该数据集仅限非营利/学术用途，本仓库不包含或分发任何 PIG 数据集文件）。详细合规说明及 `VITE_BUNDLE_PRIOR=0` 一键剥离权重开关见 [NOTICE](NOTICE) 与 [ADR-0003](docs/adr/0003-pretrained-fingering-prior.md)。

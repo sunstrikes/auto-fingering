@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import {
   DEFAULT_PIANO_TIMBRE,
   PIANO_TIMBRE_PRESETS,
@@ -5,8 +6,9 @@ import {
   type PianoTimbreId,
 } from "../audio/pianoAudio";
 import type { SpeedMultiplier } from "../audio/playbackEngine";
-import type { HandSpanProfile, SpanPreset } from "../domain/types";
+import type { HandSpanProfile, PriorMode, SpanPreset } from "../domain/types";
 import type { MidiConnectionState } from "../midi/webMidi";
+import type { PriorLoadProgress } from "../prior/loader";
 
 const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
   { preset: "S", title: "小手型（偏保守跨度，0.82×）" },
@@ -26,10 +28,17 @@ export interface PracticeSettingsModalProps {
   loopGapEnabled?: boolean;
   metronomeVolume: number;
   skipGraceNotes?: boolean;
+  strictHoldDurationEnabled?: boolean;
   showStatusBar?: boolean;
   showPianoOverhead?: boolean;
   showFullPalm?: boolean;
   handSpanProfile?: HandSpanProfile;
+  priorMode?: PriorMode;
+  priorLambda?: number;
+  priorLoading?: boolean;
+  priorProgress?: PriorLoadProgress | null;
+  priorFallbackReason?: string | null;
+  customModelBaseUrl?: string;
   onSelectDevice: (deviceId: string | null) => void;
   onToggleLocalSound: (enabled: boolean) => void;
   onChangePianoTimbre?: (timbre: PianoTimbreId) => void;
@@ -38,10 +47,14 @@ export interface PracticeSettingsModalProps {
   onToggleLoopGap?: () => void;
   onChangeMetronomeVolume: (volume: number) => void;
   onToggleSkipGraceNotes?: () => void;
+  onToggleStrictHoldDuration?: () => void;
   onToggleShowStatusBar?: () => void;
   onToggleShowPianoOverhead?: () => void;
   onToggleShowFullPalm?: () => void;
   onChangeHandSpanProfile?: (profile: HandSpanProfile) => void;
+  onChangePriorMode?: (mode: PriorMode) => void;
+  onChangePriorLambda?: (lambda: number) => void;
+  onChangeCustomModelBaseUrl?: (url: string) => void;
   onClose: () => void;
 }
 
@@ -91,10 +104,17 @@ export function PracticeSettingsModal({
   loopGapEnabled = false,
   metronomeVolume,
   skipGraceNotes = false,
+  strictHoldDurationEnabled = true,
   showStatusBar = true,
   showPianoOverhead = true,
-  showFullPalm = false,
+  showFullPalm = true,
   handSpanProfile,
+  priorMode = "model-assist",
+  priorLambda = 0.85,
+  priorLoading = false,
+  priorProgress = null,
+  priorFallbackReason = null,
+  customModelBaseUrl = "",
   onSelectDevice,
   onToggleLocalSound,
   onChangePianoTimbre,
@@ -103,12 +123,27 @@ export function PracticeSettingsModal({
   onToggleLoopGap,
   onChangeMetronomeVolume,
   onToggleSkipGraceNotes,
+  onToggleStrictHoldDuration,
   onToggleShowStatusBar,
   onToggleShowPianoOverhead,
   onToggleShowFullPalm,
   onChangeHandSpanProfile,
+  onChangePriorMode,
+  onChangePriorLambda,
+  onChangeCustomModelBaseUrl,
   onClose,
 }: PracticeSettingsModalProps) {
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
   if (!open) return null;
 
   const statusLabel = formatMidiStatusLabel(midiState);
@@ -120,10 +155,15 @@ export function PracticeSettingsModal({
       role="dialog"
       aria-modal="true"
       aria-label="练习设置"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
     >
-      <div className="max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 shadow-xl">
-        <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+      <div className="flex max-h-[90dvh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold text-slate-900">练习设置</h2>
             <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${badgeClass}`}>
@@ -134,13 +174,13 @@ export function PracticeSettingsModal({
             type="button"
             data-testid="practice-settings-close-btn"
             onClick={onClose}
-            className="rounded-md border border-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
+            className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
           >
             关闭
           </button>
         </div>
 
-        <div className="mt-3 space-y-4 text-xs text-slate-700">
+        <div className="flex-1 space-y-4 overflow-y-auto px-4 py-3 text-xs text-slate-700">
           {/* Web MIDI Device Selector */}
           <div className="space-y-1.5">
             <label htmlFor="midi-device-select" className="block font-semibold text-slate-800">
@@ -321,6 +361,23 @@ export function PracticeSettingsModal({
             />
           </div>
 
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div>
+              <div className="font-medium text-slate-900">等待模式严格时值保持验证</div>
+              <div className="text-[11px] text-slate-500">
+                按下正确琴键后需按住达到音符理论时值的 80% 才推进下一步；提前松手或误触其它键需松开所有键重弹
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              data-testid="strict-hold-duration-toggle"
+              aria-label="等待模式严格时值保持验证"
+              checked={strictHoldDurationEnabled}
+              onChange={() => onToggleStrictHoldDuration?.()}
+              className="h-4 w-4 accent-blue-600"
+            />
+          </div>
+
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
             <div className="mb-1.5 flex items-center justify-between">
               <label htmlFor="metronome-volume-slider" className="font-medium text-slate-900">
@@ -409,6 +466,141 @@ export function PracticeSettingsModal({
                   className="h-4 w-4 shrink-0 accent-blue-600"
                 />
               </label>
+
+              {onChangePriorMode && (
+                <div className="space-y-2 border-t border-slate-200/70 pt-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="font-semibold text-slate-800">指法风格</div>
+                      <div className="text-[11px] text-slate-500">
+                        模型辅助仅在物理合规候选间作软先验重排，P0 物理跨度与锚点保持一票否决
+                      </div>
+                    </div>
+                    <div
+                      data-testid="prior-mode-selector"
+                      className="inline-flex shrink-0 rounded-lg border border-slate-300 bg-white p-0.5 text-xs font-medium"
+                      role="group"
+                      aria-label="指法风格"
+                    >
+                      <button
+                        type="button"
+                        data-testid="prior-mode-classic-btn"
+                        aria-pressed={priorMode === "classic"}
+                        onClick={() => onChangePriorMode("classic")}
+                        className={`rounded-md px-2.5 py-1 transition ${
+                          priorMode === "classic"
+                            ? "bg-slate-900 text-white shadow-xs"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                      >
+                        经典
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="prior-mode-assist-btn"
+                        aria-pressed={priorMode === "model-assist"}
+                        onClick={() => onChangePriorMode("model-assist")}
+                        className={`rounded-md px-2.5 py-1 transition ${
+                          priorMode === "model-assist"
+                            ? "bg-slate-900 text-white shadow-xs"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                      >
+                        模型辅助(Beta)
+                      </button>
+                    </div>
+                  </div>
+
+                  {priorMode === "model-assist" && (
+                    <div
+                      data-testid="prior-assist-controls"
+                      className="space-y-2 rounded-lg border border-slate-200 bg-white p-2.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <label htmlFor="prior-lambda-slider" className="font-medium text-slate-900">
+                          模型先验强度 (λ)
+                        </label>
+                        <span
+                          data-testid="prior-lambda-label"
+                          className="text-[11px] font-semibold text-slate-700"
+                        >
+                          {priorLambda <= 0.5
+                            ? "轻度辅助"
+                            : priorLambda <= 1.1
+                              ? "辅助(默认)"
+                              : "模型主导"}{" "}
+                          · λ={priorLambda.toFixed(2)}
+                        </span>
+                      </div>
+                      <input
+                        id="prior-lambda-slider"
+                        data-testid="prior-lambda-slider"
+                        type="range"
+                        min={0.1}
+                        max={2.0}
+                        step={0.05}
+                        value={priorLambda}
+                        onChange={(e) =>
+                          onChangePriorLambda?.(Number.parseFloat(e.target.value))
+                        }
+                        className="w-full accent-blue-600"
+                      />
+
+                      {(priorLoading || priorProgress) && (
+                        <div
+                          data-testid="prior-download-progress"
+                          className="text-[11px] text-slate-600"
+                        >
+                          {priorLoading
+                            ? `正在加载预训练指法先验权重 (~0.8 MB)... ${
+                                priorProgress && priorProgress.totalBytes > 0
+                                  ? `${Math.round(
+                                      (priorProgress.loadedBytes / priorProgress.totalBytes) * 100
+                                    )}% (${Math.round(priorProgress.loadedBytes / 1024)} / ${Math.round(
+                                      priorProgress.totalBytes / 1024
+                                    )} KB)`
+                                  : ""
+                              }`
+                            : priorProgress
+                              ? `预训练指法先验已就绪 (${Math.round(
+                                  priorProgress.totalBytes / 1024
+                                )} KB)`
+                              : null}
+                        </div>
+                      )}
+
+                      {priorFallbackReason && (
+                        <div
+                          data-testid="prior-fallback-alert"
+                          className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-800"
+                        >
+                          模型先验加载失败，已静默回退至经典启发式求解：{priorFallbackReason}
+                        </div>
+                      )}
+
+                      {onChangeCustomModelBaseUrl && (
+                        <div className="pt-1">
+                          <label
+                            htmlFor="prior-custom-url-input"
+                            className="block text-[11px] font-medium text-slate-600"
+                          >
+                            自定义模型权重地址（可选，留空使用内置权重）
+                          </label>
+                          <input
+                            id="prior-custom-url-input"
+                            data-testid="prior-custom-url-input"
+                            type="text"
+                            placeholder="/models"
+                            value={customModelBaseUrl}
+                            onChange={(e) => onChangeCustomModelBaseUrl(e.target.value)}
+                            className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

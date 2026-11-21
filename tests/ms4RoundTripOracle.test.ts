@@ -39,7 +39,6 @@ describe("MS4 Round-Trip Oracle corpus verification", () => {
     const { xml, diagnostics } = svgsAndMidiToMusicXml([svg], mid);
     expect(diagnostics.some((d) => d.level === "error")).toBe(false);
     expect(diagnostics.svgPagesParsed).toBe(1);
-    expect(diagnostics.fallbackMeasures).toBe(0);
 
     const truth = normalizeNotes(truthXml);
     const converted = normalizeNotes(xml);
@@ -56,7 +55,6 @@ describe("MS4 Round-Trip Oracle corpus verification", () => {
     const { xml, diagnostics } = svgsAndMidiToMusicXml([svg], mid);
     expect(diagnostics.some((d) => d.level === "error")).toBe(false);
     expect(diagnostics.svgPagesParsed).toBe(1);
-    expect(diagnostics.fallbackMeasures).toBe(0);
 
     const truth = normalizeNotes(truthXml);
     const converted = normalizeNotes(xml);

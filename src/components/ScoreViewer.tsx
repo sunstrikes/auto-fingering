@@ -369,7 +369,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       backend: "svg",
       drawFingerings: false,
       fingeringPosition: "aboveorbelow",
-      followCursor: mode === "page",
+      followCursor: false, // OSMD scrollIntoView jitters on iPad; scrolling handled by ScoreViewer
       renderSingleHorizontalStaffline: mode === "horizontal",
       drawTitle: mode === "page",
     });
@@ -1044,6 +1044,21 @@ export function ScoreViewer({
     scroller.scrollLeft = desiredScrollLeft;
   }, [isRendered, layoutMode, playbackFrame, manualScrollPaused, cursorTarget, measureGeometry]);
 
+  // Page mode: keep cursor visible with a single vertical scroll only when it leaves the viewport
+  useEffect(() => {
+    if (!isRendered || layoutMode !== "page" || playbackFrame?.state !== "playing") return;
+    const scroller = scrollContainerRef.current;
+    const cursorEl = scroller?.querySelector<HTMLElement>("img[id^='cursorImg']");
+    if (!scroller || !cursorEl) return;
+    const sr = scroller.getBoundingClientRect();
+    const cr = cursorEl.getBoundingClientRect();
+    if (cr.height <= 0) return;
+    if (cr.top < sr.top + 8 || cr.bottom > sr.bottom - 8) {
+      programmaticScrollUntilRef.current = Date.now() + 80;
+      scroller.scrollTop += cr.top - sr.top - sr.height * 0.25;
+    }
+  }, [isRendered, layoutMode, playbackFrame?.state, cursorTarget]);
+
   const markManualScroll = () => {
     if (layoutMode === "horizontal" && playbackFrame?.state === "playing") {
       setManualScrollPaused(true);
@@ -1251,8 +1266,13 @@ export function ScoreViewer({
           onPointerDown={markManualScroll}
           onScroll={handleContainerScroll}
           className={`relative min-h-0 min-w-0 flex-1 rounded-lg border border-slate-100 ${
-            layoutMode === "horizontal" ? "overflow-x-auto overflow-y-auto" : "overflow-auto"
+            layoutMode === "horizontal"
+              ? playbackFrame?.state === "playing"
+                ? "overflow-x-auto overflow-y-hidden"
+                : "overflow-x-auto overflow-y-auto"
+              : "overflow-auto"
           }`}
+          style={{ overscrollBehavior: "contain" }}
         >
           {layoutMode === "horizontal" && measureRisks.length > 0 && (
             <div className="sticky top-0 z-10 border-b border-slate-100 bg-white/90 px-2 py-1 backdrop-blur-xs">

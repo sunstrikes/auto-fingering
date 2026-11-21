@@ -1,7 +1,14 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, extname, resolve } from "node:path";
 import { exportMxlContainer } from "../musicxml/mxl";
-import { downloadAndConvertMuseScore, downloadMuseScorePdf } from "./downloader";
+import {
+  downloadMuseScoreAssets,
+  downloadMuseScorePdf,
+  parseMuseScoreInput,
+  shouldUseBrowserMode,
+  svgsToPdfViaBrowser,
+} from "./downloader";
+import { svgsAndMidiToMusicXml } from "./index";
 import type { ConversionDiagnostics } from "./types";
 
 export interface CliIo {
@@ -20,19 +27,26 @@ interface ParsedArgs {
   headers: Record<string, string>;
   title?: string;
   baseOrigin?: string;
+  mode?: "auto" | "browser" | "fetch";
+  headless: boolean;
+  profile?: string;
   json: boolean;
 }
 
 const USAGE = `Usage: musescore-import <url-or-score-id> [options]
 
 Fetch MuseScore 4 SVG/PNG pages + MIDI and convert to MusicXML 4.0 (.musicxml / .mxl).
+Uses msdl-style persistent Chrome browser session by default to clear Cloudflare challenges.
 
 Options:
   -o, --out <path>          Output file path (.musicxml or .mxl)
   --pdf <path>              Also download MuseScore PDF to <path>
   --format <musicxml|mxl>   Output format (inferred from -o extension if omitted)
-  --cookie <cookie>         Browser session Cookie header (or MUSESCORE_COOKIE env)
-  --header <Key: Value>     Extra HTTP header for MuseScore origin (repeatable)
+  --headless                Run Chrome in headless mode (requires cached cf_clearance)
+  --profile <dir>           Persistent Chrome profile dir (default: ~/.cache/msdl/profile)
+  --fetch                   Use pure Node.js fetch instead of Chrome browser session
+  --cookie <cookie>         Browser session Cookie header (or MUSESCORE_COOKIE env, --fetch mode)
+  --header <Key: Value>     Extra HTTP header for MuseScore origin (repeatable, --fetch mode)
   --title <title>           Override output score title
   --base-origin <origin>    Override base origin (default: https://musescore.com)
   --json                    Print diagnostic summary as JSON
@@ -43,6 +57,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   const parsed: ParsedArgs = {
     help: false,
     headers: {},
+    headless: false,
     json: false,
   };
 
@@ -54,6 +69,20 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     }
     if (arg === "--json") {
       parsed.json = true;
+      continue;
+    }
+    if (arg === "--headless") {
+      parsed.headless = true;
+      continue;
+    }
+    if (arg === "--fetch") {
+      parsed.mode = "fetch";
+      continue;
+    }
+    if (arg === "--profile") {
+      const val = argv[++i];
+      if (!val) throw new Error("Missing value for --profile");
+      parsed.profile = val;
       continue;
     }
     if (arg === "-o" || arg === "--out") {
@@ -140,7 +169,6 @@ function buildDiagnosticSummary(
     svgPagesParsed: diagnostics.svgPagesParsed,
     pngPagesSkipped: diagnostics.pngPagesSkipped,
     measuresAligned: diagnostics.measuresAligned,
-    fallbackMeasures: diagnostics.fallbackMeasures,
     alignmentConfidence: diagnostics.alignmentConfidence,
     warnings: diagnostics.warnings.map((w) => ({
       code: w.code,
@@ -158,7 +186,6 @@ function formatTextSummary(summary: ReturnType<typeof buildDiagnosticSummary>): 
     `svgPagesParsed: ${summary.svgPagesParsed}`,
     `pngPagesSkipped: ${summary.pngPagesSkipped}`,
     `measuresAligned: ${summary.measuresAligned}`,
-    `fallbackMeasures: ${summary.fallbackMeasures}`,
     `warnings: ${summary.warnings.length}`,
   ];
   for (const w of summary.warnings) {
@@ -199,11 +226,49 @@ export async function runCli(
   const cookie = args.cookie ?? io.env?.MUSESCORE_COOKIE;
 
   try {
-    const result = await downloadAndConvertMuseScore(args.target, {
+    const downloadOpts = {
       baseOrigin: args.baseOrigin,
+      mode: args.mode,
+      headless: args.headless,
+      profile: args.profile,
       cookie,
       headers: Object.keys(args.headers).length > 0 ? args.headers : undefined,
-      title: args.title,
+    };
+
+    const wantsMusicXml = args.outPath !== undefined || args.format !== undefined || !args.pdfPath;
+
+    if (!wantsMusicXml && args.pdfPath) {
+      const pdfBytes = await downloadMuseScorePdf(args.target, downloadOpts);
+      const pdfOutPath = resolve(args.pdfPath);
+      mkdirSync(dirname(pdfOutPath), { recursive: true });
+      writeFileSync(pdfOutPath, pdfBytes);
+      if (args.json) {
+        io.stdout(JSON.stringify({ pdfPath: pdfOutPath }, null, 2) + "\n");
+      } else {
+        io.stdout(`Wrote PDF to ${pdfOutPath}\n`);
+      }
+      return 0;
+    }
+
+    const assets = await downloadMuseScoreAssets(args.target, downloadOpts);
+
+    let pdfOutPath: string | undefined;
+    if (args.pdfPath) {
+      const target = parseMuseScoreInput(args.target, args.baseOrigin);
+      const scoreOrigin = args.baseOrigin
+        ? new URL(args.baseOrigin).origin
+        : new URL(target.scoreUrl).origin;
+      const pdfBytes = shouldUseBrowserMode(scoreOrigin, downloadOpts)
+        ? await svgsToPdfViaBrowser(assets.pages)
+        : await downloadMuseScorePdf(args.target, downloadOpts);
+      pdfOutPath = resolve(args.pdfPath);
+      mkdirSync(dirname(pdfOutPath), { recursive: true });
+      writeFileSync(pdfOutPath, pdfBytes);
+    }
+
+    const result = svgsAndMidiToMusicXml(assets.pages, assets.midiBuffer, {
+      title: args.title ?? assets.title,
+      totalPages: assets.totalPages,
     });
 
     const inferredFormat: "musicxml" | "mxl" =
@@ -212,7 +277,7 @@ export async function runCli(
         ? "mxl"
         : "musicxml");
 
-    const defaultFilename = `${sanitizeFilename(args.title ?? result.assets.title)}.${inferredFormat}`;
+    const defaultFilename = `${sanitizeFilename(args.title ?? assets.title)}.${inferredFormat}`;
     const outPath = resolve(args.outPath ?? defaultFilename);
     mkdirSync(dirname(outPath), { recursive: true });
 
@@ -221,18 +286,6 @@ export async function runCli(
       writeFileSync(outPath, mxlBytes);
     } else {
       writeFileSync(outPath, result.xml, "utf8");
-    }
-
-    let pdfOutPath: string | undefined;
-    if (args.pdfPath) {
-      const pdfBytes = await downloadMuseScorePdf(args.target, {
-        baseOrigin: args.baseOrigin,
-        cookie,
-        headers: Object.keys(args.headers).length > 0 ? args.headers : undefined,
-      });
-      pdfOutPath = resolve(args.pdfPath);
-      mkdirSync(dirname(pdfOutPath), { recursive: true });
-      writeFileSync(pdfOutPath, pdfBytes);
     }
 
     const summary = buildDiagnosticSummary(result.diagnostics, outPath, inferredFormat, pdfOutPath);

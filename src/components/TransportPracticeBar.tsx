@@ -26,6 +26,7 @@ import {
   type MeasureRiskSummary,
   type RiskSeverity,
 } from "./MarginRiskGutter";
+import type { MeasureErrorSummary } from "../practice/practiceAnalytics";
 import type { AbPickStep, ScoreLayoutMode } from "./ScoreViewer";
 
 export interface TransportPracticeBarProps {
@@ -39,6 +40,7 @@ export interface TransportPracticeBarProps {
   measureCount: number;
   measureTimelines: MeasureTimeline[];
   measureRisks?: MeasureRiskSummary[];
+  measureErrorsByIndex?: ReadonlyMap<number, MeasureErrorSummary>;
   measureGeometry?: MeasureGeometry[];
   layoutMode?: ScoreLayoutMode;
   activeMeasureIndex: number | null;
@@ -107,6 +109,7 @@ export function TransportPracticeBar({
   measureCount,
   measureTimelines,
   measureRisks = [],
+  measureErrorsByIndex,
   measureGeometry = [],
   layoutMode = "page",
   activeMeasureIndex,
@@ -257,6 +260,10 @@ export function TransportPracticeBar({
                         label: `第${mIdx + 1}小节`,
                       };
                       const risk = riskByMeasure.get(mIdx);
+                      const errSummary = measureErrorsByIndex?.get(mIdx);
+                      const errorCount = errSummary?.totalErrors ?? 0;
+                      const isMastered = Boolean(errSummary?.mastered);
+                      const cleanStreak = errSummary?.cleanStreak ?? 0;
                       const severity: RiskSeverity = risk?.highestSeverity ?? "none";
                       const isActive = activeMeasureIndex === mIdx;
                       const inAbLoop =
@@ -270,6 +277,13 @@ export function TransportPracticeBar({
                       const riskHint =
                         risk && risk.warningCount > 0
                           ? ` · ${risk.warningCount} 条提示`
+                          : "";
+                      const errorHint = isMastered
+                        ? ` · 已连续 ${cleanStreak} 遍零失误掌握 ✓`
+                        : errSummary && errorCount > 0
+                          ? ` · 练习失误 ${errorCount} 次 (错音 ${errSummary.pitchErrors} / 时值不足 ${errSummary.durationErrors}${
+                              cleanStreak > 0 ? ` · 已连续 ${cleanStreak}/3 遍零失误` : ""
+                            })`
                           : "";
                       const actionHint =
                         abPickStep === "start"
@@ -285,7 +299,14 @@ export function TransportPracticeBar({
                           data-testid={`measure-ruler-item-${mIdx}`}
                           data-in-ab-loop={inAbLoop ? "true" : "false"}
                           data-severity={severity}
-                          title={`${meta.label}${riskHint}${inAbLoop ? " (A-B 循环内)" : ""}${actionHint}`}
+                          data-practice-errors={
+                            errorCount > 0 && !isMastered ? String(errorCount) : undefined
+                          }
+                          data-practice-mastered={isMastered ? "true" : undefined}
+                          data-practice-streak={
+                            cleanStreak > 0 ? String(cleanStreak) : undefined
+                          }
+                          title={`${meta.label}${riskHint}${errorHint}${inAbLoop ? " (A-B 循环内)" : ""}${actionHint}`}
                           aria-label={`${meta.label}${inAbLoop ? " (A-B 循环内)" : ""}`}
                           onClick={(e) => {
                             if (abPickStep !== "idle" && onPickAbMeasure) {
@@ -319,6 +340,24 @@ export function TransportPracticeBar({
                                   : RISK_CELL_STYLE[severity]
                           }`}
                         >
+                          {isMastered && (
+                            <span
+                              data-testid={`measure-ruler-mastered-dot-${mIdx}`}
+                              aria-hidden="true"
+                              className={`absolute inset-x-0 top-0 h-1 ${
+                                isActive ? "bg-emerald-300" : "bg-emerald-500"
+                              }`}
+                            />
+                          )}
+                          {errorCount > 0 && !isMastered && (
+                            <span
+                              data-testid={`measure-ruler-error-dot-${mIdx}`}
+                              aria-hidden="true"
+                              className={`absolute inset-x-0 top-0 h-1 ${
+                                isActive ? "bg-rose-300" : "bg-rose-600"
+                              }`}
+                            />
+                          )}
                           {severity !== "none" && !isActive && (
                             <span
                               aria-hidden="true"
@@ -354,12 +393,21 @@ export function TransportPracticeBar({
 
             <button
               type="button"
-              data-testid="audio-play-btn"
-              disabled={!hasScore || playbackState === "playing"}
-              onClick={onPlay}
-              className="rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45"
+              data-testid={playbackState === "playing" ? "audio-pause-btn" : "audio-play-btn"}
+              data-playback-state={playbackState}
+              disabled={!hasScore}
+              onClick={playbackState === "playing" ? onPause : onPlay}
+              className={`rounded-md px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
+                playbackState === "playing"
+                  ? "border border-amber-500 bg-amber-500 text-white hover:bg-amber-600"
+                  : "bg-emerald-600 text-white hover:bg-emerald-700"
+              }`}
             >
-              {playbackState === "paused" ? "继续" : "播放"}
+              {playbackState === "playing"
+                ? "⏸ 暂停"
+                : playbackState === "paused"
+                  ? "▶ 继续"
+                  : "▶ 播放"}
             </button>
 
             <button
@@ -371,16 +419,6 @@ export function TransportPracticeBar({
               className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
             >
               从当前
-            </button>
-
-            <button
-              type="button"
-              data-testid="audio-pause-btn"
-              disabled={playbackState !== "playing"}
-              onClick={onPause}
-              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              暂停
             </button>
 
             <button

@@ -145,4 +145,15 @@ describe("parseMs4Svg (MS4 semantic-first SVG parser)", () => {
     expect(page.noteheads.filter((n) => n.measureIndex === 1)).toHaveLength(2);
     expect(page.noteheads.filter((n) => n.measureIndex === 2)).toHaveLength(3);
   });
+
+  it("parses batched multi-subpath <path class='StaffLines'> and <path class='BarLine'> from Qt Tiny SVG exports", () => {
+    const svg = `<svg width="2000" height="1000" xmlns="http://www.w3.org/2000/svg" version="1.2" baseProfile="tiny">
+      <path class="StaffLines" fill="none" stroke="#000" d="M100 200H1800M100 225H1800M100 250H1800M100 275H1800M100 300H1800M100 450H1800M100 475H1800M100 500H1800M100 525H1800M100 550H1800"/>
+      <path class="BarLine" fill="none" stroke="#000" d="M900 200V550M1800 200V550"/>
+    </svg>`;
+    const page = parseMs4Svg(svg, 0);
+    expect(page.systems).toHaveLength(1);
+    expect(page.systems[0].staves).toHaveLength(2);
+    expect(page.systems[0].measures).toHaveLength(2);
+  });
 });

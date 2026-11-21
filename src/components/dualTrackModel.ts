@@ -145,7 +145,7 @@ function findSustainingHandSliceId(
   return latestSliceId;
 }
 
-function sliceCenterMidi(slice: OnsetSlice): number {
+export function sliceCenterMidi(slice: OnsetSlice): number {
   if (slice.notes.length === 0) return 60;
   if (slice.notes.length === 1) return slice.notes[0].midi;
   return Math.round((slice.notes[0].midi + slice.notes[slice.notes.length - 1].midi) / 2);

@@ -3,3 +3,25 @@ Copyright 2026 sunstrikes
 
 This product includes software developed by the MusicXML Piano
 Auto-Fingering project (https://github.com/sunstrikes/auto-fingering).
+
+---
+
+Third-Party Notices (Optional Pretrained Fingering Prior)
+
+1. @lumikey/piano-fingering-model (v0.3.0)
+   Source: https://github.com/lumikey/piano-fingering-model
+   npm package license declaration: MIT
+   Used for: Optional 26-token feature encoding (`buildTokens` adaptation in `src/prior/lumikeyAdapter.ts`)
+   and pretrained Transformer encoder weights (`public/models/lumikey-prior-{left,right}.bin`).
+
+2. Piano Fingering Dataset (PIG) Academic Citation & Provenance Notice
+   The upstream `@lumikey/piano-fingering-model` weights were trained on a mixture of datasets
+   that includes preprocessed data from the PIG dataset:
+     Eita Nakamura, Yasuyuki Saito, and Kazuyoshi Yoshii,
+     "Statistical Learning and Estimation of Piano Fingering",
+     Information Sciences, Vol. 517, pp. 68-85, 2020.
+   Note: The PIG dataset itself is restricted to nonprofit/academic use and is NOT bundled or
+   redistributed in this repository. Because upstream has not formally clarified whether the
+   derived model weights are subject to PIG dataset terms, the pretrained prior can be disabled
+   or unbundled at build time via `VITE_BUNDLE_PRIOR=0` (or pointed to a user-supplied model URL).
+   See `docs/adr/0003-pretrained-fingering-prior.md` for details.

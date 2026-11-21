@@ -1338,4 +1338,91 @@ describe("handPostureModel continuous 88-key kinematics", () => {
       }
     }
   });
+
+  it("exposes upcomingShift preview only for non-trivial movements and renders it only when paused/waiting", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>1</divisions>
+        <clef><sign>G</sign><line>2</line></clef>
+      </attributes>
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations><technical><fingering>1</fingering></technical></notations>
+      </note>
+      <note>
+        <pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations><technical><fingering>2</fingering></technical></notations>
+      </note>
+      <note>
+        <pitch><step>E</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations><technical><fingering>3</fingering></technical></notations>
+      </note>
+      <note>
+        <pitch><step>F</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice>
+        <notations><technical><fingering>1</fingering></technical></notations>
+      </note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(xml, { DOMParser });
+    const solveResult = solveFingering(scoreDoc.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
+    const slices = scoreDoc.onsetSlices;
+    expect(slices.length).toBe(4);
+
+    // Slice 0 (C4 f1 -> D4 f2): trivial in-position step => no upcomingShift
+    const frame0 = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveResult,
+      slices[0].sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    expect(frame0.rh.upcomingShift ?? null).toBeNull();
+
+    // Slice 2 (E4 f3 -> F4 f1): thumb-under crossing => upcomingShift populated
+    const frame2 = projectDualHandPostureAtSlice(
+      scoreDoc,
+      solveResult,
+      slices[2].sliceId,
+      DEFAULT_HAND_SPAN_PROFILE
+    );
+    expect(frame2.rh.upcomingShift).toBeTruthy();
+    expect(frame2.rh.upcomingShift?.kind).toBe("thumb-under");
+    expect(frame2.rh.upcomingShift?.targets).toEqual([
+      { midi: 65, finger: 1, isBlack: false },
+    ]);
+
+    // Static / waiting mode (no playbackFrame) renders overhead cue & target key marker
+    const staticHtml = renderToStaticMarkup(
+      createElement(UnifiedPiano88, {
+        scoreDoc,
+        solveResult,
+        selectedSliceId: slices[2].sliceId,
+      })
+    );
+    const staticDom = new JSDOM(staticHtml).window.document;
+    expect(staticDom.querySelector('[data-testid="upcoming-shift-cue-RH"]')).not.toBeNull();
+    expect(staticDom.querySelector('[data-testid="upcoming-target-key-RH-65"]')).not.toBeNull();
+
+    // Active playback mode (playbackFrame provided) suppresses upcoming preview to keep view clean
+    const playingHtml = renderToStaticMarkup(
+      createElement(UnifiedPiano88, {
+        scoreDoc,
+        solveResult,
+        selectedSliceId: slices[2].sliceId,
+        playbackFrame: {
+          state: "playing",
+          scoreSec: slices[2].onsetSec + 0.05,
+          totalDurationSec: 4,
+        },
+      })
+    );
+    const playingDom = new JSDOM(playingHtml).window.document;
+    expect(playingDom.querySelector('[data-testid="upcoming-shift-cue-RH"]')).toBeNull();
+    expect(playingDom.querySelector('[data-testid="upcoming-target-key-RH-65"]')).toBeNull();
+  });
 });

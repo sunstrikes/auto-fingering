@@ -1232,24 +1232,25 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
       await new Promise((r) => setTimeout(r, 20));
     });
 
-    const playBtn = mountedContainer.querySelector('[data-testid="audio-play-btn"]') as HTMLButtonElement;
-    const pauseBtn = mountedContainer.querySelector('[data-testid="audio-pause-btn"]') as HTMLButtonElement;
+    const playPauseBtn = mountedContainer.querySelector('[data-testid="audio-play-btn"]') as HTMLButtonElement;
     const rulerM2 = mountedContainer.querySelector('[data-testid="measure-ruler-item-1"]') as HTMLButtonElement;
 
     // Play measure 1, pause at t=0.2s, switch to measure 2, then press Play
     await act(async () => {
-      playBtn.click();
+      playPauseBtn.click();
       await Promise.resolve();
     });
+    expect(playPauseBtn.dataset.testid).toBe("audio-pause-btn");
     expect(syncCursor).toHaveBeenLastCalledWith(
       expect.objectContaining({ measureIndex: 0, midis: [60] })
     );
 
     await act(async () => {
       currentTime = 0.2;
-      pauseBtn.click();
+      playPauseBtn.click();
       await Promise.resolve();
     });
+    expect(playPauseBtn.dataset.testid).toBe("audio-play-btn");
 
     await act(async () => {
       rulerM2.click();
@@ -1257,7 +1258,7 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     });
 
     await act(async () => {
-      playBtn.click();
+      playPauseBtn.click();
       await Promise.resolve();
     });
     expect(syncCursor).toHaveBeenLastCalledWith(
@@ -1415,5 +1416,149 @@ describe("Seam 3: ScoreViewer Cursor Sync & Top-bar Audio Controls in App", () =
     expect(loadSmplrPiano).toHaveBeenCalledTimes(2);
     expect(loadSmplrPiano).toHaveBeenLastCalledWith(mockCtx, "ep-wurlitzer");
     expect(statusBadge.textContent).toContain("Wurlitzer EP200");
+  });
+
+  it("keeps scheduling upcoming notes via background ticker when requestAnimationFrame is paused in background", async () => {
+    const longScoreXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <direction><sound tempo="60"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+    <measure number="3">
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+    const scoreDoc = parseMusicXml(longScoreXml, { DOMParser: window.DOMParser });
+    let currentTime = 0;
+    const mockCtx = createMockAudioContext(0);
+    Object.defineProperty(mockCtx, "currentTime", {
+      get: () => currentTime,
+    });
+
+    const triggered: Array<{ midi: number; time: number }> = [];
+    const audioEngine = createPianoAudioEngine({
+      getAudioContext: () => mockCtx,
+      loadSmplrPiano: async () => ({
+        load: Promise.resolve(),
+        start: (note) => triggered.push({ midi: Number(note.note), time: note.time ?? 0 }),
+        stop: vi.fn(),
+      }),
+    });
+
+    let bgTick: (() => void) | null = null;
+    const bgStartSpy = vi.fn((_ms: number, onTick: () => void) => {
+      bgTick = onTick;
+    });
+    const bgStopSpy = vi.fn(() => {
+      bgTick = null;
+    });
+
+    const engine = createPlaybackEngine({
+      audioEngine,
+      // Simulate browser pausing rAF completely when tab is in background
+      requestAnimationFrame: () => 1,
+      cancelAnimationFrame: () => {},
+      createBackgroundTicker: () => ({
+        start: bgStartSpy,
+        stop: bgStopSpy,
+      }),
+      scheduleAheadRealSec: 4.0,
+    });
+
+    await engine.play(scoreDoc);
+
+    // At t=0 with 4.0s lookahead, measure 1 (0s) and measure 2 (4.0s) are scheduled; measure 3 (8.0s) is not yet
+    expect(bgStartSpy).toHaveBeenCalledTimes(1);
+    expect(triggered.map((n) => n.midi)).toEqual([60, 62]);
+
+    // Advance clock to t=5.0s and fire background ticker (no rAF ticks!)
+    currentTime = 5.0;
+    expect(bgTick).not.toBeNull();
+    (bgTick as (() => void) | null)?.();
+    expect(triggered.map((n) => n.midi)).toEqual([60, 62, 64]);
+    expect(triggered[2].time).toBeCloseTo(8.0, 5);
+    expect(engine.getState()).toBe("playing");
+
+    // Advance past end of score (12.0s) via background ticker -> stops cleanly and stops ticker
+    currentTime = 12.1;
+    (bgTick as (() => void) | null)?.();
+    expect(engine.getState()).toBe("stopped");
+    expect(bgStopSpy).toHaveBeenCalled();
+
+    engine.dispose();
+  });
+
+  it("resumes a suspended AudioContext when prepare() is called again or tab returns to visible", async () => {
+    const mockCtx = createMockAudioContext(0);
+    let ctxState: AudioContextState = "running";
+    Object.defineProperty(mockCtx, "state", {
+      get: () => ctxState,
+    });
+    const resumeSpy = vi.fn(async () => {
+      ctxState = "running";
+    });
+    mockCtx.resume = resumeSpy;
+
+    const audioEngine = createPianoAudioEngine({
+      getAudioContext: () => mockCtx,
+      loadSmplrPiano: async () => ({
+        load: Promise.resolve(),
+        start: vi.fn(),
+        stop: vi.fn(),
+      }),
+    });
+
+    await audioEngine.prepare();
+    expect(resumeSpy).not.toHaveBeenCalled();
+
+    // Simulate OS/browser suspending AudioContext after samples were already loaded
+    ctxState = "suspended";
+    await audioEngine.prepare();
+    expect(resumeSpy).toHaveBeenCalledTimes(1);
+
+    // Now test visibilitychange -> visible resuming suspended AudioContext during playback
+    const simpleXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <direction><sound tempo="60"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+    const scoreDoc = parseMusicXml(simpleXml, { DOMParser: window.DOMParser });
+
+    const engine = createPlaybackEngine({
+      audioEngine,
+      requestAnimationFrame: () => 1,
+      cancelAnimationFrame: () => {},
+      createBackgroundTicker: () => ({
+        start: () => {},
+        stop: () => {},
+      }),
+    });
+
+    await engine.play(scoreDoc);
+
+    ctxState = "suspended";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(resumeSpy).toHaveBeenCalledTimes(2);
+
+    engine.dispose();
   });
 });

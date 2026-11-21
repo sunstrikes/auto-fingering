@@ -17,7 +17,7 @@
 
 ## Features
 
-- **Automatic fingering** — beam-search dynamic programming over `Onset Slice`s (all newly struck notes of one hand at the same onset), covering both hands, cross-staff voices, chords, `Tie Continuation`s, `Grace Note`s and existing finger anchors. Choose an `S` / `M` / `L` `Hand Span Profile`, plus “avoid thumb on black keys” and “prefer stable hand positions” switches.
+- **Automatic fingering** — beam-search dynamic programming over `Onset Slice`s (all newly struck notes of one hand at the same onset), covering both hands, cross-staff voices, chords, `Tie Continuation`s, `Grace Note`s and existing finger anchors. Choose an `S` / `M` / `L` `Hand Span Profile`, plus “avoid thumb on black keys” and “prefer stable hand positions” switches, with an opt-in **Model Assist (Beta) pretrained Transformer soft prior** (pure-TS CPU forward pass, lazy-loaded ~0.8 MB weights, reordering only among physically feasible candidates while P0 span and anchor constraints hold absolute veto power).
 - **Dual-hand 88-key visualization** — inline fingering bubbles on the score, `Hand Position` bands, `Transition Cue`s (thumb-under, cross-over, position shift, wide stretch) and a per-measure risk gutter. A shared 88-key keyboard distinguishes the hands by colour and renders continuous SVG `Hand Posture` skeletons.
 - **Interactive overrides** — while stopped, click any note to pin an anchor and locally re-solve only the affected phrase in the worker. Supports `phrase` / `pinOnly` anchor semantics, undo/redo and a `Before → After` diff.
 - **Practice tools**:
@@ -89,6 +89,7 @@ src/
 ├── domain/        # Domain model and pure data contracts (NoteEvent / OnsetSlice / PracticeStep ...)
 ├── musicxml/      # Parsing, lossless write-back, .mxl container I/O
 ├── solver/        # Beam-search DP, cost model, hand positions & cues, local anchor re-solve
+├── prior/         # Opt-in pretrained Transformer soft prior (26×5 token adapter, pure-TS forward pass & lazy loader)
 ├── workers/       # Worker entry and typed RPC (a new request cancels the previous one)
 ├── audio/         # Piano engine, metronome, playback / waiting / A-B loop scheduler
 ├── midi/          # Web MIDI hot-plug, port selection, virtual input adapters
@@ -137,6 +138,7 @@ This is a purely static SPA: run `npm run build` and serve `dist/` from any stat
 | [GLOSSARY.md](GLOSSARY.md) | Domain glossary (Chinese/English) |
 | [ADR-0001](docs/adr/0001-dual-hand-88key-timeline-studio.md) | Dual-hand 88-key timeline studio |
 | [ADR-0002](docs/adr/0002-interactive-practice-midi-waiting-loop.md) | Interactive practice (metronome / MIDI / waiting mode / A-B loop) |
+| [ADR-0003](docs/adr/0003-pretrained-fingering-prior.md) | Pretrained fingering Transformer soft prior & physical veto (including license risk record and `VITE_BUNDLE_PRIOR=0` downgrade switch) |
 | [test-corpus/README.md](test-corpus/README.md) | Regression samples and expected results |
 
 ## Browser support and limitations
@@ -146,6 +148,8 @@ This is a purely static SPA: run `npm run build` and serve `dist/` from any stat
 - Piano samples are lazily loaded on first playback; if the network is unavailable the engine falls back to Web Audio synthesis. Fingering is unaffected.
 - Fingering suggestions come from a cost model and are meant as practice references; use `S`/`M`/`L` and anchors to match your own hands.
 
-## License
+## License and Third-Party Notices
 
 Licensed under the [Apache License 2.0](LICENSE). Copyright 2026 sunstrikes — see [NOTICE](NOTICE).
+
+The opt-in **Model Assist (Beta)** mode uses the 26-token feature encoding and pretrained Transformer encoder weights from [`@lumikey/piano-fingering-model`](https://github.com/lumikey/piano-fingering-model) (MIT declared in npm `package.json`). Upstream training datasets include preprocessed data from the PIG dataset (Eita Nakamura, Yasuyuki Saito, and Kazuyoshi Yoshii, *"Statistical Learning and Estimation of Piano Fingering"*, Information Sciences, Vol. 517, pp. 68–85, 2020; restricted to nonprofit/academic use — no PIG dataset files are bundled or redistributed in this repository). See [NOTICE](NOTICE) and [ADR-0003](docs/adr/0003-pretrained-fingering-prior.md) for provenance details and the `VITE_BUNDLE_PRIOR=0` unbundling switch.

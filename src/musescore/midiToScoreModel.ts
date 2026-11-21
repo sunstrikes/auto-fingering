@@ -1,6 +1,4 @@
 import type {
-  BuildAttributes,
-  BuildMeasure,
   BuildNote,
   BuildPitch,
   ConversionOptions,
@@ -9,7 +7,6 @@ import type {
   RawMidiKeySig,
   RawMidiNote,
   RawMidiTimeSig,
-  ScoreBuildModel,
 } from "./types";
 
 export interface MeasureSpan {
@@ -357,140 +354,4 @@ export function buildStaffVoicesForMeasure(
   }
 
   return out;
-}
-
-/**
- * Converts a non-destructive `RawMidiData` into a `ScoreBuildModel` for the unified MusicXML 4.0 builder.
- */
-export function rawMidiToScoreModel(
-  rawMidi: RawMidiData,
-  options?: ConversionOptions
-): ScoreBuildModel {
-  const ppq = rawMidi.ppq;
-  const splitPitch = options?.splitPitch ?? 60;
-  const spans = buildMeasureSpans(rawMidi, options);
-  const staffOf = assignStaffByTrack(rawMidi, splitPitch);
-
-  const segmentsByMeasure = spans.map(() => ({
-    1: [] as NoteSegment[],
-    2: [] as NoteSegment[],
-  }));
-
-  for (const note of rawMidi.notes) {
-    const staff = staffOf(note);
-    for (let mIdx = 0; mIdx < spans.length; mIdx++) {
-      const m = spans[mIdx];
-      if (note.endTick <= m.startTick) break;
-      if (note.startTick >= m.endTick) continue;
-      const segStart = Math.max(note.startTick, m.startTick);
-      const segEnd = Math.min(note.endTick, m.endTick);
-      if (segEnd > segStart) {
-        segmentsByMeasure[mIdx][staff].push({
-          pitch: note.pitch,
-          startTick: segStart,
-          endTick: segEnd,
-          staff,
-          tieStart: segEnd < note.endTick,
-          tieStop: segStart > note.startTick,
-        });
-      }
-    }
-  }
-
-  const tempos =
-    rawMidi.tempos.length > 0
-      ? rawMidi.tempos
-      : [{ tick: 0, usPerQuarter: 500_000, bpm: 120 }];
-
-  const measures: BuildMeasure[] = [];
-  let prevKeySig: RawMidiKeySig | null = null;
-  let prevTimeSig: { numerator: number; denominator: number } | null = null;
-
-  for (let mIdx = 0; mIdx < spans.length; mIdx++) {
-    const m = spans[mIdx];
-    const ks = activeKeySigAt(rawMidi.keySigs, m.startTick);
-
-    let attributes: BuildAttributes | undefined;
-    const keyChanged =
-      !prevKeySig || prevKeySig.fifths !== ks.fifths || prevKeySig.mode !== ks.mode;
-    const timeChanged =
-      !prevTimeSig ||
-      prevTimeSig.numerator !== m.numerator ||
-      prevTimeSig.denominator !== m.denominator;
-
-    if (mIdx === 0 || keyChanged || timeChanged) {
-      attributes = {};
-      if (mIdx === 0) {
-        attributes.divisions = ppq;
-        attributes.staves = 2;
-      }
-      if (mIdx === 0 || keyChanged) {
-        attributes.fifths = ks.fifths;
-        attributes.mode = ks.mode;
-      }
-      if (mIdx === 0 || timeChanged) {
-        attributes.beats = m.numerator;
-        attributes.beatType = m.denominator;
-      }
-    }
-    prevKeySig = ks;
-    prevTimeSig = { numerator: m.numerator, denominator: m.denominator };
-
-    const measureTempos = tempos
-      .filter((t) =>
-        mIdx === spans.length - 1
-          ? t.tick >= m.startTick && t.tick <= m.endTick
-          : t.tick >= m.startTick && t.tick < m.endTick
-      )
-      .map((t) => ({
-        tickOffset: Math.max(0, Math.min(m.duration, t.tick - m.startTick)),
-        bpm: t.bpm,
-      }));
-
-    const measurePedals = rawMidi.pedals
-      .filter((p) =>
-        mIdx === spans.length - 1
-          ? p.tick >= m.startTick && p.tick <= m.endTick
-          : p.tick >= m.startTick && p.tick < m.endTick
-      )
-      .map((p) => ({
-        tickOffset: Math.max(0, Math.min(m.duration, p.tick - m.startTick)),
-        type: p.type,
-        staff: 2 as const,
-      }));
-
-    const rhNotes = buildStaffVoicesForMeasure(
-      segmentsByMeasure[mIdx][1],
-      m.startTick,
-      m.duration,
-      1,
-      ppq,
-      ks.fifths
-    );
-    const lhNotes = buildStaffVoicesForMeasure(
-      segmentsByMeasure[mIdx][2],
-      m.startTick,
-      m.duration,
-      2,
-      ppq,
-      ks.fifths
-    );
-
-    measures.push({
-      number: m.number,
-      implicit: m.implicit,
-      duration: m.duration,
-      attributes,
-      tempos: measureTempos.length > 0 ? measureTempos : undefined,
-      pedals: measurePedals.length > 0 ? measurePedals : undefined,
-      notes: [...rhNotes, ...lhNotes],
-    });
-  }
-
-  return {
-    title: options?.title ?? "Untitled MIDI Score",
-    divisions: ppq,
-    staves: 2,
-    measures,
-  };
 }

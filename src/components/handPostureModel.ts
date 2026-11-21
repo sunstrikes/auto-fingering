@@ -25,6 +25,7 @@ import { DEFAULT_COST_WEIGHTS } from "../solver/weights";
 import {
   buildTransitionCueArcs,
   findHandPositionForSlice,
+  sliceCenterMidi,
   whiteKeyIndexToMidi,
   type TransitionCueArc,
 } from "./dualTrackModel";
@@ -90,6 +91,22 @@ export interface FingerPosture {
   layerOffset: -1 | 0 | 1;
 }
 
+export interface UpcomingTargetNote {
+  midi: number;
+  finger?: Finger;
+  isBlack: boolean;
+}
+
+export interface UpcomingShiftPreview {
+  kind: "thumb-under" | "cross-over" | "position-shift" | "same-finger-jump";
+  severity: "info" | "warn" | "danger";
+  label: string;
+  fromMidi: number;
+  toMidi: number;
+  nextHandPosition: HandPosition | null;
+  targets: UpcomingTargetNote[];
+}
+
 export interface HandPosture {
   hand: Hand;
   spanPreset?: SpanPreset;
@@ -102,6 +119,7 @@ export interface HandPosture {
   fingers: Record<Finger, FingerPosture>;
   handPosition: HandPosition | null;
   transitionCues: TransitionCueArc[];
+  upcomingShift?: UpcomingShiftPreview | null;
   pedalSustainedKeys?: Array<{ midi: number; finger?: Finger; isRepairedAnchor?: boolean }>;
 }
 
@@ -973,16 +991,16 @@ function projectSingleHandPosture(
     solveResult.transitionCues,
     sliceIndexById
   );
-  const cuesNext =
-    shiftBlend > 0.25 && nextSlice
-      ? buildTransitionCueArcs(
-          hand,
-          nextSlice,
-          scoreDoc.onsetSlices,
-          solveResult.transitionCues,
-          sliceIndexById
-        )
-      : [];
+  const cuesNextAll = nextSlice
+    ? buildTransitionCueArcs(
+        hand,
+        nextSlice,
+        scoreDoc.onsetSlices,
+        solveResult.transitionCues,
+        sliceIndexById
+      )
+    : [];
+  const cuesNext = shiftBlend > 0.25 ? cuesNextAll : [];
 
   const relevantCues = cuesNext.length > 0 ? cuesNext : cuesCurr;
   let crossingStyle: HandPosture["crossingStyle"] = "none";
@@ -1396,6 +1414,47 @@ function projectSingleHandPosture(
 
   const pedalSustainedKeys = Array.from(pedalSustainedMap.values());
 
+  let upcomingShift: UpcomingShiftPreview | null = null;
+  if (currSlice && nextSlice && !isResting) {
+    const moveCue = cuesNextAll.find(
+      (c) =>
+        c.cue.type === "thumb-under" ||
+        c.cue.type === "cross-over" ||
+        c.cue.type === "position-shift"
+    );
+    if (moveCue || isWholeHandShift || isSameFingerJump) {
+      const fromMidi = moveCue ? moveCue.fromMidi : sliceCenterMidi(currSlice);
+      const toMidi = moveCue ? moveCue.toMidi : sliceCenterMidi(nextSlice);
+      const kind: UpcomingShiftPreview["kind"] = moveCue
+        ? (moveCue.cue.type as "thumb-under" | "cross-over" | "position-shift")
+        : isSameFingerJump
+          ? "same-finger-jump"
+          : "position-shift";
+      const severity: UpcomingShiftPreview["severity"] = moveCue
+        ? moveCue.cue.severity
+        : "info";
+      const label = moveCue
+        ? moveCue.cue.label
+        : isSameFingerJump
+          ? "同指移位"
+          : "手位移动";
+      const targets: UpcomingTargetNote[] = nextSlice.notes.map((n) => ({
+        midi: n.midi,
+        finger: solveResult.fingerByNoteUid[n.noteUid],
+        isBlack: isBlackKey(n.midi),
+      }));
+      upcomingShift = {
+        kind,
+        severity,
+        label,
+        fromMidi,
+        toMidi,
+        nextHandPosition: nextHandPos,
+        targets,
+      };
+    }
+  }
+
   return {
     hand,
     spanPreset,
@@ -1408,6 +1467,7 @@ function projectSingleHandPosture(
     fingers,
     handPosition: currHandPos ?? baseHandPos,
     transitionCues: cuesCurr,
+    upcomingShift,
     pedalSustainedKeys,
   };
 }
@@ -1544,6 +1604,7 @@ function buildEmptyHandPosture(hand: Hand, spanPreset: SpanPreset = "M"): HandPo
     fingers,
     handPosition: null,
     transitionCues: [],
+    upcomingShift: null,
   };
 }
 

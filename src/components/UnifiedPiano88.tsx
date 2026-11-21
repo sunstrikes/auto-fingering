@@ -9,6 +9,7 @@ import {
   type ScoreDocument,
   type SolveResult,
   type TransitionCue,
+  type WaitingResetReason,
 } from "../domain/types";
 import { isBlackKey, midiToPitchLabel } from "../solver/keyboard";
 import { whiteKeyIndexToMidi } from "./dualTrackModel";
@@ -26,6 +27,7 @@ import {
 } from "./handPostureModel";
 
 import {
+  BLACK_TIP_Y,
   PIANO_BLACK_KEY_H,
   PIANO_BLACK_KEY_W,
   PIANO_KEYBED_BOTTOM_Y,
@@ -33,6 +35,7 @@ import {
   PIANO_SVG_H,
   PIANO_WHITE_KEY_H,
   PIANO_WHITE_KEY_W,
+  WHITE_TIP_Y,
 } from "../solver/handKinematics";
 import { computeHandSkeleton } from "./handSkeleton";
 
@@ -49,6 +52,10 @@ export interface UnifiedPiano88Props {
   hitMidis?: ReadonlySet<number>;
   pressedMidis?: ReadonlySet<number>;
   sustainPedalPressed?: boolean;
+  waitingTainted?: boolean;
+  waitingResetReason?: WaitingResetReason;
+  waitingIsHolding?: boolean;
+  waitingHoldProgress?: number;
   onSelectSlice?: (sliceId: string) => void;
   onAuditionMidi?: (midi: number) => void;
   onVirtualNoteOn?: (midi: number, velocity?: number) => void;
@@ -323,14 +330,17 @@ function OverheadHandLane({
   posture,
   laneY,
   dimmed = false,
+  showUpcoming = false,
 }: {
   posture: HandPosture;
   laneY: number;
   dimmed?: boolean;
+  showUpcoming?: boolean;
 }) {
   const pal = handPalette(posture.hand);
   const hp = posture.handPosition;
   const primaryCue = posture.transitionCues[0] ?? null;
+  const upcoming = showUpcoming ? (posture.upcomingShift ?? null) : null;
 
   const hpSpan = useMemo(() => {
     if (!hp) return null;
@@ -345,12 +355,39 @@ function OverheadHandLane({
     };
   }, [hp]);
 
+  const nextHpSpan = useMemo(() => {
+    const nextHp = upcoming?.nextHandPosition;
+    if (!nextHp) return null;
+    if (hp && nextHp.thumbKey === hp.thumbKey && nextHp.pinkyKey === hp.pinkyKey) return null;
+    const loMidi = whiteKeyIndexToMidi(Math.min(nextHp.thumbKey, nextHp.pinkyKey));
+    const hiMidi = whiteKeyIndexToMidi(Math.max(nextHp.thumbKey, nextHp.pinkyKey));
+    const x1 = (midiToWhiteUnitX(loMidi) - 0.5) * WHITE_KEY_W + 2;
+    const x2 = (midiToWhiteUnitX(hiMidi) + 0.5) * WHITE_KEY_W - 2;
+    return { x1, x2 };
+  }, [upcoming, hp]);
+
   return (
     <g
       data-testid={`overhead-lane-${posture.hand}`}
       data-dimmed={dimmed ? "true" : "false"}
       opacity={dimmed ? 0.3 : 1}
     >
+      {nextHpSpan && (
+        <rect
+          data-testid={`upcoming-hand-span-${posture.hand}`}
+          x={nextHpSpan.x1}
+          y={laneY + 1}
+          width={Math.max(WHITE_KEY_W, nextHpSpan.x2 - nextHpSpan.x1)}
+          height={14}
+          rx={4}
+          fill="none"
+          stroke={pal.stroke}
+          strokeWidth={1}
+          strokeOpacity={0.45}
+          strokeDasharray="2,2"
+        />
+      )}
+
       {hpSpan && (
         <g>
           <rect
@@ -417,6 +454,128 @@ function OverheadHandLane({
             </g>
           );
         })()}
+
+      {upcoming &&
+        (() => {
+          const fromX = midiToWhiteUnitX(upcoming.fromMidi) * WHITE_KEY_W;
+          const toX = midiToWhiteUnitX(upcoming.toMidi) * WHITE_KEY_W;
+          const midX = (fromX + toX) / 2;
+          const colors = cueColors(upcoming.severity);
+          const pillW = 104;
+          const rawPillX = primaryCue ? toX - pillW / 2 : midX - pillW / 2;
+          const pillX = Math.max(4, Math.min(SVG_W - pillW - 4, rawPillX));
+          return (
+            <g data-testid={`upcoming-shift-cue-${posture.hand}`}>
+              {Math.abs(toX - fromX) > 4 && (
+                <path
+                  d={`M ${fromX} ${laneY + 14} Q ${midX} ${Math.max(2, laneY - 2)} ${toX} ${laneY + 13}`}
+                  fill="none"
+                  stroke={colors.stroke}
+                  strokeWidth={1.5}
+                  strokeDasharray="3.5,2.5"
+                  markerEnd={`url(#upcoming-arrow-${upcoming.severity})`}
+                />
+              )}
+              <rect
+                x={pillX}
+                y={laneY}
+                width={pillW}
+                height={15}
+                rx={7}
+                fill={colors.bg}
+                fillOpacity={0.94}
+                stroke={colors.stroke}
+                strokeWidth={0.9}
+                strokeDasharray="3,2"
+              />
+              <text
+                x={pillX + pillW / 2}
+                y={laneY + 10.5}
+                textAnchor="middle"
+                fontSize={8.2}
+                fontWeight={700}
+                fill={colors.stroke}
+              >
+                → 即将: {upcoming.label}
+              </text>
+            </g>
+          );
+        })()}
+    </g>
+  );
+}
+
+function UpcomingTargetMarkers({
+  posture,
+  dimmed = false,
+}: {
+  posture: HandPosture;
+  dimmed?: boolean;
+}) {
+  const upcoming = posture.upcomingShift;
+  if (!upcoming || upcoming.targets.length === 0) return null;
+  const pal = handPalette(posture.hand);
+
+  return (
+    <g
+      data-testid={`upcoming-targets-${posture.hand}`}
+      opacity={dimmed ? 0.25 : 0.9}
+      className="pointer-events-none"
+    >
+      {upcoming.targets.map((target, idx) => {
+        const unitX = midiToWhiteUnitX(target.midi);
+        const cx = unitX * WHITE_KEY_W;
+        const cy = target.finger
+          ? target.isBlack
+            ? BLACK_TIP_Y[target.finger]
+            : WHITE_TIP_Y[target.finger]
+          : target.isBlack
+            ? 98
+            : 136;
+        const keyX = target.isBlack ? cx - BLACK_KEY_W / 2 : (unitX - 0.5) * WHITE_KEY_W;
+        const keyW = target.isBlack ? BLACK_KEY_W : WHITE_KEY_W;
+        const keyH = target.isBlack ? BLACK_KEY_H : WHITE_KEY_H;
+
+        return (
+          <g
+            key={`${target.midi}-${idx}`}
+            data-testid={`upcoming-target-key-${posture.hand}-${target.midi}`}
+          >
+            <rect
+              x={keyX + 1.5}
+              y={KEYS_Y + 1.5}
+              width={keyW - 3}
+              height={keyH - 3}
+              rx={2}
+              fill="none"
+              stroke={pal.primary}
+              strokeWidth={1.1}
+              strokeOpacity={0.5}
+              strokeDasharray="3,2"
+            />
+            <circle
+              cx={cx}
+              cy={cy}
+              r={5.6}
+              fill="#ffffff"
+              fillOpacity={0.88}
+              stroke={pal.primary}
+              strokeWidth={1.15}
+              strokeDasharray="2.5,1.6"
+            />
+            <text
+              x={cx}
+              y={cy + 2.8}
+              textAnchor="middle"
+              fontSize={7.8}
+              fontWeight={700}
+              fill={pal.primary}
+            >
+              {target.finger ?? "•"}
+            </text>
+          </g>
+        );
+      })}
     </g>
   );
 }
@@ -433,11 +592,15 @@ export function UnifiedPiano88({
   playbackFrame = null,
   practiceMode = "both",
   showOverhead = true,
-  showFullPalm = false,
+  showFullPalm = true,
   wrongMidis,
   hitMidis,
   pressedMidis,
   sustainPedalPressed = false,
+  waitingTainted = false,
+  waitingResetReason = null,
+  waitingIsHolding = false,
+  waitingHoldProgress = 0,
   onSelectSlice,
   onAuditionMidi,
   onVirtualNoteOn,
@@ -446,6 +609,8 @@ export function UnifiedPiano88({
   const dimRh = practiceMode === "lh-only";
   const dimLh = practiceMode === "rh-only";
   const [auditionMidi, setAuditionMidi] = useState<number | null>(null);
+  const pointerDownMidisRef = useRef<Set<number>>(new Set());
+  const pointerReleaseTimerRef = useRef<number | null>(null);
 
   const postureIndex = useMemo(() => {
     if (!scoreDoc || !solveResult || scoreDoc.onsetSlices.length === 0) return null;
@@ -490,10 +655,10 @@ export function UnifiedPiano88({
 
     let rafId = 0;
     const durationMs = 180;
-    const startMs = globalThis.performance?.now?.() ?? Date.now();
+    const startMs = Date.now();
 
-    const step = (now: number) => {
-      const elapsed = Math.max(0, (now || Date.now()) - startMs);
+    const step = () => {
+      const elapsed = Math.max(0, Date.now() - startMs);
       const raw = Math.min(1, elapsed / durationMs);
       const eased = 1 - Math.pow(1 - raw, 3);
 
@@ -551,18 +716,46 @@ export function UnifiedPiano88({
   const lhHandPos = displayFrame.lh.handPosition;
 
   const handleKeyPress = (midi: number) => {
+    // If pointerDown already triggered this note and pointerUp released it, avoid duplicate click firing
+    if (pointerDownMidisRef.current.has(midi)) {
+      pointerDownMidisRef.current.delete(midi);
+      return;
+    }
+    if (pointerReleaseTimerRef.current !== null) {
+      window.clearTimeout(pointerReleaseTimerRef.current);
+      pointerReleaseTimerRef.current = null;
+    }
     setAuditionMidi(midi);
     onVirtualNoteOn?.(midi, 96);
     onAuditionMidi?.(midi);
-    window.setTimeout(() => {
+    pointerReleaseTimerRef.current = window.setTimeout(() => {
+      pointerReleaseTimerRef.current = null;
       setAuditionMidi((prev) => (prev === midi ? null : prev));
       onVirtualNoteOff?.(midi);
     }, 180);
   };
 
+  const handleKeyPointerDown = (midi: number) => {
+    if (pointerReleaseTimerRef.current !== null) {
+      window.clearTimeout(pointerReleaseTimerRef.current);
+      pointerReleaseTimerRef.current = null;
+    }
+    pointerDownMidisRef.current.add(midi);
+    setAuditionMidi(midi);
+    onVirtualNoteOn?.(midi, 96);
+    onAuditionMidi?.(midi);
+  };
+
+  const handleKeyPointerUp = (midi: number) => {
+    if (!pointerDownMidisRef.current.has(midi)) return;
+    setAuditionMidi((prev) => (prev === midi ? null : prev));
+    onVirtualNoteOff?.(midi);
+  };
+
   const viewBoxTop = showOverhead ? 0 : FALLBOARD_Y;
   const viewBoxBottom = showFullPalm ? PIANO_SVG_H : SVG_BOTTOM_Y;
   const viewBoxHeight = viewBoxBottom - viewBoxTop;
+  const showUpcomingPreview = !playbackFrame;
 
   return (
     <section
@@ -598,6 +791,36 @@ export function UnifiedPiano88({
         </div>
 
         <div className="flex items-center gap-1.5">
+          {waitingIsHolding && (
+            <span
+              data-testid="waiting-hold-progress-badge"
+              data-hold-progress={Math.round(waitingHoldProgress * 100)}
+              className="inline-flex items-center gap-1.5 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-800"
+            >
+              <span>保持时值 {Math.round(waitingHoldProgress * 100)}%</span>
+              <span className="h-1.5 w-12 overflow-hidden rounded-full bg-emerald-200">
+                <span
+                  className="block h-full bg-emerald-600 transition-all"
+                  style={{ width: `${Math.min(100, Math.round(waitingHoldProgress * 100))}%` }}
+                />
+              </span>
+            </span>
+          )}
+          {(waitingTainted || waitingResetReason) && (
+            <span
+              data-testid="waiting-strict-fault-badge"
+              data-fault-reason={waitingResetReason ?? "tainted"}
+              className="rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-700"
+            >
+              {waitingResetReason === "early-release"
+                ? waitingTainted
+                  ? "时值不足 · 请松开所有键重弹"
+                  : "时值不足 · 请按住直到时值达标"
+                : waitingTainted
+                  ? "存在误触 · 请松开所有键重弹"
+                  : "误触已重置 · 请重新弹奏"}
+            </span>
+          )}
           {sustainPedalPressed && (
             <span
               data-testid="midi-sustain-indicator"
@@ -690,13 +913,40 @@ export function UnifiedPiano88({
               <stop offset="65%" stopColor="#6366f1" stopOpacity={0.2} />
               <stop offset="100%" stopColor="#6366f1" stopOpacity={0.02} />
             </linearGradient>
+            {(["info", "warn", "danger"] as const).map((sev) => {
+              const c = cueColors(sev).stroke;
+              return (
+                <marker
+                  key={sev}
+                  id={`upcoming-arrow-${sev}`}
+                  viewBox="0 0 8 8"
+                  refX="6"
+                  refY="4"
+                  markerWidth="5.5"
+                  markerHeight="5.5"
+                  orient="auto"
+                >
+                  <path d="M 1 1.5 L 7 4 L 1 6.5 z" fill={c} />
+                </marker>
+              );
+            })}
           </defs>
 
           {/* Overhead Dual Lanes: RH Top, LH Bottom */}
           {showOverhead && (
             <>
-              <OverheadHandLane posture={displayFrame.rh} laneY={RH_LANE_Y} dimmed={dimRh} />
-              <OverheadHandLane posture={displayFrame.lh} laneY={LH_LANE_Y} dimmed={dimLh} />
+              <OverheadHandLane
+                posture={displayFrame.rh}
+                laneY={RH_LANE_Y}
+                dimmed={dimRh}
+                showUpcoming={showUpcomingPreview}
+              />
+              <OverheadHandLane
+                posture={displayFrame.lh}
+                laneY={LH_LANE_Y}
+                dimmed={dimLh}
+                showUpcoming={showUpcomingPreview}
+              />
             </>
           )}
 
@@ -764,6 +1014,14 @@ export function UnifiedPiano88({
                   data-hit-note={isHit ? "true" : undefined}
                   data-accompaniment-dimmed={isAccompanimentOnly ? "true" : undefined}
                   data-key-pressed={isPressed ? "true" : undefined}
+                  onMouseDown={() => handleKeyPointerDown(midi)}
+                  onMouseUp={() => handleKeyPointerUp(midi)}
+                  onMouseLeave={() => {
+                    if (pointerDownMidisRef.current.has(midi)) {
+                      handleKeyPointerUp(midi);
+                      pointerDownMidisRef.current.delete(midi);
+                    }
+                  }}
                   onClick={() => handleKeyPress(midi)}
                   className="cursor-pointer"
                 >
@@ -867,6 +1125,14 @@ export function UnifiedPiano88({
                   data-hit-note={isHit ? "true" : undefined}
                   data-accompaniment-dimmed={isAccompanimentOnly ? "true" : undefined}
                   data-key-pressed={isPressed ? "true" : undefined}
+                  onMouseDown={() => handleKeyPointerDown(midi)}
+                  onMouseUp={() => handleKeyPointerUp(midi)}
+                  onMouseLeave={() => {
+                    if (pointerDownMidisRef.current.has(midi)) {
+                      handleKeyPointerUp(midi);
+                      pointerDownMidisRef.current.delete(midi);
+                    }
+                  }}
                   onClick={() => handleKeyPress(midi)}
                   className="cursor-pointer"
                 >
@@ -893,6 +1159,14 @@ export function UnifiedPiano88({
             <HandVectorOverlay posture={displayFrame.lh} dimmed={dimLh} />
             <HandVectorOverlay posture={displayFrame.rh} dimmed={dimRh} />
           </g>
+
+          {/* Upcoming Non-Trivial Movement Target Markers (Static / Waiting Mode Only) */}
+          {showUpcomingPreview && (
+            <g data-layer="upcoming-target-markers">
+              <UpcomingTargetMarkers posture={displayFrame.lh} dimmed={dimLh} />
+              <UpcomingTargetMarkers posture={displayFrame.rh} dimmed={dimRh} />
+            </g>
+          )}
         </svg>
       </div>
     </section>

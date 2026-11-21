@@ -1,5 +1,4 @@
 import { validateSvgPageAsset } from "./assetValidation";
-import { rawMidiToScoreModel } from "./midiToScoreModel";
 import { buildMusicXml } from "./musicxmlBuilder";
 import { parseRawMidi } from "./rawMidi";
 import { alignSvgsAndMidi } from "./svgMidiAligner";
@@ -14,7 +13,6 @@ import type {
 
 export { parseRawMidi } from "./rawMidi";
 export { buildMusicXml } from "./musicxmlBuilder";
-export { rawMidiToScoreModel } from "./midiToScoreModel";
 export { parseMs4Svg } from "./svgParser";
 export { alignSvgsAndMidi, closeBoundarySpanners } from "./svgMidiAligner";
 export { validateSvgPageAsset, isPngMagicBytes } from "./assetValidation";
@@ -42,7 +40,6 @@ function createDiagnostics(
     svgPagesParsed: number;
     pngPagesSkipped: number;
     measuresAligned: number;
-    fallbackMeasures: number;
     alignmentConfidence: number;
   }
 ): ConversionDiagnostics {
@@ -53,33 +50,9 @@ function createDiagnostics(
   });
 }
 
-function buildFallbackResult(
-  rawMidi: ReturnType<typeof parseRawMidi>,
-  options: ConversionOptions | undefined,
-  items: ConversionDiagnostic[],
-  totalPages: number,
-  svgPagesParsed: number,
-  pngPagesSkipped: number
-): ConversionResult {
-  const model = rawMidiToScoreModel(rawMidi, options);
-  const xml = buildMusicXml(model);
-  return {
-    xml,
-    diagnostics: createDiagnostics(items, {
-      totalPages,
-      svgPagesParsed,
-      pngPagesSkipped,
-      measuresAligned: 0,
-      fallbackMeasures: model.measures.length,
-      alignmentConfidence: 0,
-    }),
-  };
-}
-
 /**
  * Pure conversion seam converting MuseScore 4 SVG pages + raw MIDI buffer into MusicXML 4.0.
- * Validates page assets (skipping binary PNGs cleanly), handles preview truncation and
- * low-confidence measure fallbacks, and reports structured diagnostics.
+ * Validates page assets (skipping binary PNGs cleanly) and reports structured diagnostics.
  */
 export function svgsAndMidiToMusicXml(
   svgPages: readonly SvgPageInput[],
@@ -89,6 +62,10 @@ export function svgsAndMidiToMusicXml(
   const items: ConversionDiagnostic[] = [];
   const rawMidi = parseRawMidi(midiBuffer);
   const totalPages = options?.totalPages ?? svgPages.length;
+
+  if (svgPages.length === 0) {
+    throw new Error("No SVG pages provided; SVG + MIDI conversion requires at least one SVG page.");
+  }
 
   let pngPagesSkipped = 0;
   const parsedPages = [];
@@ -123,31 +100,19 @@ export function svgsAndMidiToMusicXml(
     items.push({
       level: "warning",
       code: "PREVIEW_TRUNCATED",
-      message: `Preview truncated: ${svgPagesParsed} of ${totalPages} pages available as SVG; uncovered measures will be synthesized from MIDI.`,
+      message: `Preview truncated: only ${svgPagesParsed} of ${totalPages} pages available as SVG.`,
     });
-  }
-
-  if (svgPages.length === 0) {
-    items.push({
-      level: "info",
-      code: "MIDI_ONLY_FALLBACK",
-      message: "No SVG pages provided; converting using non-destructive MIDI-only fallback.",
-    });
-    return buildFallbackResult(rawMidi, options, items, totalPages, 0, 0);
   }
 
   if (svgPagesParsed === 0) {
-    return buildFallbackResult(rawMidi, options, items, totalPages, 0, pngPagesSkipped);
+    throw new Error(
+      `No valid SVG pages could be parsed (pngPagesSkipped=${pngPagesSkipped}); pure-MIDI fallback is disabled.`
+    );
   }
 
   const hasSystems = parsedPages.some((p) => p.systems.length > 0);
   if (!hasSystems) {
-    items.push({
-      level: "warning",
-      code: "SVG_NO_SYSTEMS_FALLBACK",
-      message: "No musical staves found in SVG pages; falling back to MIDI-only conversion.",
-    });
-    return buildFallbackResult(rawMidi, options, items, totalPages, svgPagesParsed, pngPagesSkipped);
+    throw new Error("No musical staves found in SVG pages; pure-MIDI fallback is disabled.");
   }
 
   const aligned = alignSvgsAndMidi(parsedPages, rawMidi, options);
@@ -160,7 +125,6 @@ export function svgsAndMidiToMusicXml(
       svgPagesParsed,
       pngPagesSkipped,
       measuresAligned: aligned.measuresAligned,
-      fallbackMeasures: aligned.fallbackMeasures,
       alignmentConfidence: aligned.alignmentConfidence,
     }),
   };

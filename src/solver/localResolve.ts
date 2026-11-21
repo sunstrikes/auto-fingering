@@ -2,12 +2,15 @@ import {
   DEFAULT_HAND_SPAN_PROFILE,
   type AnchorOverride,
   type Finger,
+  type FingeringPrior,
   type HandSpanProfile,
   type HeldNoteRelease,
   type NoteEvent,
   type OnsetSlice,
+  type PriorTable,
   type SolveResult,
 } from "../domain/types";
+import { buildPriorTableForSlices } from "../prior/lumikeyAdapter";
 import { analyzeHandHeldNotes, applyEffectiveHeldNotes } from "./heldNotes";
 import { getMaxSpan, getSpanScale, toHandFramePos } from "./keyboard";
 import { analyzeScoreRepairSuggestions } from "./scoreRepair";
@@ -31,6 +34,9 @@ export interface LocalResolveInput {
   removedRawAnchorUids?: string[];
   profile?: HandSpanProfile;
   ignoreExistingFingerings?: boolean;
+  prior?: PriorTable | null;
+  priorModel?: FingeringPrior | null;
+  priorLambda?: number;
 }
 
 export function applyAnchorOverridesToSlices(
@@ -154,7 +160,8 @@ function solveWindowWithConvergence(
   priorFingerByNoteUid: Record<string, Finger>,
   profile: HandSpanProfile,
   anchorConflictSliceIds: Set<string>,
-  rollReleasableUids: Set<string>
+  rollReleasableUids: Set<string>,
+  prior?: PriorTable | null
 ): {
   endIdx: number;
   chosen: Finger[][];
@@ -167,7 +174,8 @@ function solveWindowWithConvergence(
     windowSlices,
     profile,
     anchorConflictSliceIds,
-    false
+    false,
+    prior
   );
 
   const layers: BeamNode[][] = [];
@@ -196,6 +204,7 @@ function solveWindowWithConvergence(
       prevPrefixSlice,
       prevPrefixFingers,
       rollReleasableUids,
+      prior,
     });
     layers.push(deduped);
 
@@ -341,6 +350,20 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
     }
 
     // Expand backward lookback geometrically until DP converges at the left edge or hits minIdx
+    let activePrior: PriorTable | null = input.prior ?? null;
+    if (!activePrior && input.priorModel && (input.priorLambda === undefined || input.priorLambda > 0)) {
+      try {
+        const windowForPrior = effectiveSegment.slice(minIdx, maxIdx + 1);
+        activePrior = buildPriorTableForSlices(windowForPrior, input.priorModel, {
+          ignoreExistingFingerings: false,
+          history: input.priorFingerByNoteUid,
+          lambda: input.priorLambda,
+        });
+      } catch {
+        activePrior = null;
+      }
+    }
+
     let lookback = 8;
     let finalStart = minIdx;
     let finalChosen: Finger[][] = [];
@@ -362,7 +385,8 @@ export function localResolveFingering(input: LocalResolveInput): SolveResult {
         input.priorFingerByNoteUid,
         profile,
         attemptConflicts,
-        heldAnalysis.rollReleasableUids
+        heldAnalysis.rollReleasableUids,
+        activePrior
       );
 
       finalStart = startIdx;

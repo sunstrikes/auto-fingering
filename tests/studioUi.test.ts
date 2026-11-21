@@ -529,9 +529,9 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
       { layoutMode: "page", zoom: 0.75 }
     );
 
-    // Piano SVG crops bottom edge at keybed bottom (164), hides overhead by default, and supports toggling in settings
+    // Piano SVG shows full palm by default (244), hides overhead by default, and supports toggling in settings
     const pianoSvg = mountedContainer.querySelector('[data-testid="unified-piano-88"] svg') as SVGSVGElement;
-    expect(pianoSvg.getAttribute("viewBox")).toBe("0 46 1248 118");
+    expect(pianoSvg.getAttribute("viewBox")).toBe("0 46 1248 198");
     expect(mountedContainer.querySelector('[data-testid="top-status-warning-bar"]')).not.toBeNull();
     expect(mountedContainer.querySelector('[data-testid="overhead-lane-RH"]')).toBeNull();
 
@@ -544,7 +544,7 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
     const fullPalmToggle = mountedContainer.querySelector('[data-testid="show-full-palm-toggle"]') as HTMLInputElement;
     expect(statusToggle.checked).toBe(true);
     expect(overheadToggle.checked).toBe(false);
-    expect(fullPalmToggle.checked).toBe(false);
+    expect(fullPalmToggle.checked).toBe(true);
     expect(mountedContainer.querySelector('[data-layer="hand-posture-simulation"]')).not.toBeNull();
 
     await act(async () => {
@@ -556,7 +556,7 @@ describe("Slice 4: Top-Bottom Split Studio layout & warning/gutter interaction s
     expect(mountedContainer.querySelector('[data-testid="overhead-lane-RH"]')).not.toBeNull();
     expect(mountedContainer.querySelector('[data-testid="overhead-lane-LH"]')).not.toBeNull();
     expect(mountedContainer.querySelector('[data-layer="hand-posture-simulation"]')).not.toBeNull();
-    expect(pianoSvg.getAttribute("viewBox")).toBe("0 0 1248 244");
+    expect(pianoSvg.getAttribute("viewBox")).toBe("0 0 1248 164");
   });
 
   it("aggregates vertical MarginRiskGutter by system row when measureGeometry is provided and renders system pills in TransportPracticeBar", () => {

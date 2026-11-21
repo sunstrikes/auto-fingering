@@ -69,10 +69,17 @@ export interface PlayOptions {
   restart?: boolean;
 }
 
+export interface BackgroundTicker {
+  start(intervalMs: number, onTick: () => void): void;
+  stop(): void;
+}
+
 export interface PlaybackEngineDeps {
   audioEngine: PianoAudioEngine;
   requestAnimationFrame?: (cb: FrameRequestCallback) => number;
   cancelAnimationFrame?: (id: number) => void;
+  createBackgroundTicker?: () => BackgroundTicker;
+  backgroundTickIntervalMs?: number;
   scheduleAheadRealSec?: number;
   onStateChange?: (state: PlaybackState) => void;
   onSliceChange?: (slice: OnsetSlice) => void;
@@ -109,6 +116,85 @@ export interface PlaybackEngine {
 
 const GRACE_NOTE_PLAYBACK_SEC = 0.09;
 const DEFAULT_SCHEDULE_AHEAD_REAL_SEC = 4.0;
+const DEFAULT_BACKGROUND_TICK_MS = 250;
+
+/**
+ * Creates a background-safe periodic ticker using an inline Web Worker when available
+ * (which is not paused when a browser tab goes to the background like `requestAnimationFrame`),
+ * falling back to `globalThis.setInterval` in restricted or test environments.
+ */
+function createDefaultBackgroundTicker(): BackgroundTicker {
+  let worker: Worker | null = null;
+  let blobUrl: string | null = null;
+  let intervalId: ReturnType<typeof globalThis.setInterval> | null = null;
+
+  const stop = () => {
+    if (worker) {
+      try {
+        worker.postMessage({ type: "stop" });
+      } catch {
+        // ignore if already terminated
+      }
+      worker.terminate();
+      worker = null;
+    }
+    if (blobUrl !== null && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+      URL.revokeObjectURL(blobUrl);
+      blobUrl = null;
+    }
+    if (intervalId !== null) {
+      globalThis.clearInterval(intervalId);
+      intervalId = null;
+    }
+  };
+
+  const start = (intervalMs: number, onTick: () => void) => {
+    stop();
+    const safeMs = Math.max(50, Math.round(intervalMs));
+
+    if (
+      typeof Worker !== "undefined" &&
+      typeof Blob !== "undefined" &&
+      typeof URL !== "undefined" &&
+      typeof URL.createObjectURL === "function"
+    ) {
+      try {
+        const workerSource = [
+          "let timerId = null;",
+          "self.onmessage = (e) => {",
+          "  if (e.data && e.data.type === 'start') {",
+          "    if (timerId !== null) clearInterval(timerId);",
+          "    timerId = setInterval(() => self.postMessage('tick'), e.data.intervalMs);",
+          "  } else if (e.data && e.data.type === 'stop') {",
+          "    if (timerId !== null) { clearInterval(timerId); timerId = null; }",
+          "  }",
+          "};",
+        ].join("\n");
+        blobUrl = URL.createObjectURL(new Blob([workerSource], { type: "application/javascript" }));
+        worker = new Worker(blobUrl);
+        let receivedWorkerTick = false;
+        worker.onmessage = () => {
+          receivedWorkerTick = true;
+          onTick();
+        };
+        worker.onerror = () => {
+          if (!receivedWorkerTick) {
+            stop();
+            intervalId = globalThis.setInterval(onTick, safeMs);
+          }
+        };
+        worker.postMessage({ type: "start", intervalMs: safeMs });
+        return;
+      } catch {
+        stop();
+      }
+    }
+
+    intervalId = globalThis.setInterval(onTick, safeMs);
+  };
+
+  return { start, stop };
+}
 
 /**
  * Builds a playback schedule from a ScoreDocument, honoring `<sound tempo>` timings,
@@ -239,6 +325,8 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
   const cancelRaf =
     deps.cancelAnimationFrame ?? ((id: number) => globalThis.cancelAnimationFrame(id));
   const scheduleAheadRealSec = deps.scheduleAheadRealSec ?? DEFAULT_SCHEDULE_AHEAD_REAL_SEC;
+  const backgroundTickIntervalMs = deps.backgroundTickIntervalMs ?? DEFAULT_BACKGROUND_TICK_MS;
+  const backgroundTicker = (deps.createBackgroundTicker ?? createDefaultBackgroundTicker)();
   const metronomeAudio = createMetronomeAudio(() => deps.audioEngine.getAudioContext());
 
   let state: PlaybackState = "stopped";
@@ -249,6 +337,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
   let abLoop: AbLoopBounds = createDefaultAbLoopBounds(0);
   let runToken = 0;
   let rafId: number | null = null;
+  let activeTick: (() => boolean) | null = null;
 
   let activeDoc: ScoreDocument | null = null;
   let activeSchedule: PlaybackSchedule | null = null;
@@ -277,12 +366,49 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     }
   };
 
-  const clearRaf = () => {
+  const clearTimers = () => {
     if (rafId !== null) {
       cancelRaf(rafId);
       rafId = null;
     }
+    backgroundTicker.stop();
+    activeTick = null;
   };
+
+  const startDrivers = (tick: () => boolean) => {
+    clearTimers();
+    activeTick = tick;
+    const rafStep = () => {
+      if (!tick()) return;
+      rafId = requestRaf(rafStep);
+    };
+    rafId = requestRaf(rafStep);
+    backgroundTicker.start(backgroundTickIntervalMs, () => {
+      tick();
+    });
+  };
+
+  const handleVisibilityChange = () => {
+    if (typeof document === "undefined") return;
+    if (document.visibilityState === "visible") {
+      if (state === "playing" || activeTick !== null) {
+        const ctx = deps.audioEngine.getAudioContext();
+        const ctxState = ctx.state as string;
+        if ((ctxState === "suspended" || ctxState === "interrupted") && typeof ctx.resume === "function") {
+          void ctx.resume().catch(() => {});
+        }
+        activeTick?.();
+      }
+    } else if (document.visibilityState === "hidden") {
+      if (state === "playing" || activeTick !== null) {
+        activeTick?.();
+      }
+    }
+  };
+
+  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+  }
 
   const getCurrentScoreSec = (): number => {
     const ctx = deps.audioEngine.getAudioContext();
@@ -499,8 +625,8 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     }
 
     const token = runToken;
-    const step = () => {
-      if (token !== runToken || state !== "playing" || !activeSchedule || !activeDoc) return;
+    const tickPlayback = (): boolean => {
+      if (token !== runToken || state !== "playing" || !activeSchedule || !activeDoc) return false;
       const now = deps.audioEngine.getAudioContext().currentTime;
       scheduleUpcomingNotes();
       scheduleUpcomingBeats();
@@ -508,8 +634,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
 
       if (now < anchorAudioTime - 1e-6) {
         emitFrameForState(anchorScoreSec, "playing");
-        rafId = requestRaf(step);
-        return;
+        return true;
       }
 
       const scoreSec = getCurrentScoreSec();
@@ -524,13 +649,13 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
           activeLoop.loopGap,
           loopEndAudioTime
         );
-        return;
+        return false;
       }
 
       emitSyncForScoreSec(scoreSec);
 
       if (scoreSec >= activeSchedule.totalDurationSec && nextNoteIndex >= activeSchedule.notes.length) {
-        clearRaf();
+        clearTimers();
         activeSchedule = null;
         pausedScoreSec = null;
         lastEmittedBeatKey = null;
@@ -538,14 +663,13 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
         deps.onCursorSync?.(null);
         deps.onFrame?.(null);
         deps.onMetronomeBeat?.(null);
-        return;
+        return false;
       }
 
-      rafId = requestRaf(step);
+      return true;
     };
 
-    clearRaf();
-    rafId = requestRaf(step);
+    startDrivers(tickPlayback);
   };
 
   return {
@@ -562,7 +686,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
 
       if (wasPlaying && resumeDoc && currentScore !== null) {
         runToken += 1;
-        clearRaf();
+        clearTimers();
         deps.audioEngine.stopAll();
         metronomeAudio.cancelPending();
         startPlaybackLoop(resumeDoc, currentScore, undefined, false);
@@ -653,7 +777,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
           nextScore = loopRange.startSec;
         }
         runToken += 1;
-        clearRaf();
+        clearTimers();
         deps.audioEngine.stopAll();
         metronomeAudio.cancelPending();
         startPlaybackLoop(activeDoc, nextScore, undefined, false);
@@ -662,7 +786,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
 
     async playCountIn(scoreDoc: ScoreDocument, measureIndex: number, onComplete: () => void) {
       const token = ++runToken;
-      clearRaf();
+      clearTimers();
       metronomeAudio.cancelPending();
       await deps.audioEngine.prepare();
       if (token !== runToken) return;
@@ -695,27 +819,27 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
 
       emitActiveMetronomeBeat();
 
-      const stepCountIn = () => {
-        if (token !== runToken) return;
+      const tickCountIn = (): boolean => {
+        if (token !== runToken) return false;
         const now = deps.audioEngine.getAudioContext().currentTime;
         emitActiveMetronomeBeat();
         if (now >= endAudioTime - 1e-6) {
-          clearRaf();
+          clearTimers();
           visualBeatTimeline = [];
           lastEmittedBeatKey = null;
           deps.onMetronomeBeat?.(null);
           onComplete();
-          return;
+          return false;
         }
-        rafId = requestRaf(stepCountIn);
+        return true;
       };
 
-      rafId = requestRaf(stepCountIn);
+      startDrivers(tickCountIn);
     },
 
     async play(scoreDoc: ScoreDocument, options?: PlayOptions) {
       const token = ++runToken;
-      clearRaf();
+      clearTimers();
       const prevState = state;
       if (prevState === "playing") {
         deps.audioEngine.stopAll();
@@ -768,7 +892,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       if (state !== "playing") return;
       const scoreSec = getCurrentScoreSec();
       runToken += 1;
-      clearRaf();
+      clearTimers();
       deps.audioEngine.stopAll();
       metronomeAudio.stopAll();
       pausedScoreSec = scoreSec;
@@ -780,7 +904,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
 
     stop() {
       runToken += 1;
-      clearRaf();
+      clearTimers();
       deps.audioEngine.stopAll();
       metronomeAudio.stopAll();
       activeSchedule = null;
@@ -797,6 +921,9 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
 
     dispose() {
       this.stop();
+      if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
       deps.audioEngine.dispose();
     },
   };

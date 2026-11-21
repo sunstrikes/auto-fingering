@@ -1,13 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { JSDOM } from "jsdom";
 import { svgsAndMidiToMusicXml } from "../src/musescore";
-import { parseMusicXml } from "../src/musicxml/parser";
-
-const dom = new JSDOM();
-const domDeps = {
-  DOMParser: dom.window.DOMParser,
-  XMLSerializer: dom.window.XMLSerializer,
-};
 
 function encodeVlq(value: number): number[] {
   const bytes: number[] = [];
@@ -95,101 +87,25 @@ describe("svgsAndMidiToMusicXml (MIDI-only fallback seam)", () => {
     ];
 
     const midiBuffer = buildSmf(ppq, [metaTrack, rhTrack, lhTrack]);
-    const { xml, diagnostics } = svgsAndMidiToMusicXml([], midiBuffer, {
-      title: "Test Sonata",
-    });
-
-    expect(diagnostics.some((d) => d.level === "error")).toBe(false);
-    expect(diagnostics.some((d) => d.code === "MIDI_ONLY_FALLBACK")).toBe(true);
-
-    const score = parseMusicXml(xml, domDeps);
-    expect(score.title).toBe("Test Sonata");
-    expect(score.measureCount).toBe(3);
-
-    // Pickup measure + 4/4 + 3/4
-    expect(score.measureTimelines[0]).toMatchObject({
-      measureIndex: 0,
-      startTick: 0,
-      endTick: 480,
-      isPickup: true,
-      timeBeats: 4,
-      timeBeatType: 4,
-    });
-    expect(score.measureTimelines[1]).toMatchObject({
-      measureIndex: 1,
-      startTick: 480,
-      endTick: 2400,
-      isPickup: false,
-      timeBeats: 4,
-      timeBeatType: 4,
-    });
-    expect(score.measureTimelines[2]).toMatchObject({
-      measureIndex: 2,
-      startTick: 2400,
-      endTick: 3840,
-      isPickup: false,
-      timeBeats: 3,
-      timeBeatType: 4,
-    });
-
-    // Mid-piece tempo change
-    expect(score.tempoPoints.length).toBeGreaterThanOrEqual(2);
-    expect(score.tempoPoints[0].bpm).toBeCloseTo(120, 1);
-    expect(score.tempoPoints[1].tick).toBe(1440);
-    expect(score.tempoPoints[1].bpm).toBeCloseTo(90, 0);
-
-    // Preserved short staccato G4 (100 ticks) and 20-tick rest before A4 (600)
-    const g4 = score.noteEvents.find((n) => n.midi === 67);
-    const a4 = score.noteEvents.find((n) => n.midi === 69);
-    expect(g4).toBeDefined();
-    expect(g4!.onsetTick).toBe(480);
-    expect(g4!.durationTick).toBe(100);
-    expect(a4).toBeDefined();
-    expect(a4!.onsetTick).toBe(600);
-
-    // Simultaneous unison B4s preserved as 2 separate notes
-    const b4s = score.noteEvents.filter((n) => n.midi === 71);
-    expect(b4s).toHaveLength(2);
-    expect(b4s.map((n) => [n.onsetTick, n.durationTick])).toEqual([
-      [960, 480],
-      [1200, 720],
-    ]);
-
-    // Cross-measure tie on F#5
-    const fSharp5 = score.noteEvents.filter((n) => n.midi === 78);
-    expect(fSharp5).toHaveLength(2);
-    expect(fSharp5[0].isTieStart).toBe(true);
-    expect(fSharp5[1].isTieStop).toBe(true);
-
-    // CC64 sustain pedal intervals (start @ 480, change @ 1440 -> freshPress: false, stop @ 2880)
-    expect(score.pedalIntervals).toEqual([
-      { startTick: 480, endTick: 1440, freshPress: true },
-      { startTick: 1440, endTick: 2880, freshPress: false },
-    ]);
+    expect(() =>
+      svgsAndMidiToMusicXml([], midiBuffer, {
+        title: "Test Sonata",
+      })
+    ).toThrow(/No SVG pages provided/);
   });
 
-  it("handles single-track piano MIDI split by pitch and explicit pickupTicks option", () => {
+  it("rejects single-track piano MIDI when no SVG pages are provided", () => {
     const ppq = 480;
-    // Single track using running status, 1-beat pickup via options.pickupTicks = 480
     const track = [
-      ...encodeVlq(0), 0x90, 64, 80,    // E4 (RH) @ 0..480
-      ...encodeVlq(480), 64, 0,         // running status NoteOn vel=0 @ 480
-      ...encodeVlq(0), 48, 75,          // C3 (LH) @ 480..1440
-      ...encodeVlq(0), 72, 85,          // C5 (RH) @ 480..1440
-      ...encodeVlq(960), 48, 0,         // C3 off @ 1440
-      ...encodeVlq(0), 72, 0,           // C5 off @ 1440
+      ...encodeVlq(0), 0x90, 64, 80,
+      ...encodeVlq(480), 64, 0,
       ...encodeVlq(0), 0xff, 0x2f, 0x00,
     ];
 
-    const { xml, diagnostics } = svgsAndMidiToMusicXml([], buildSmf(ppq, [track], 0), {
-      pickupTicks: 480,
-    });
-    expect(diagnostics.some((d) => d.level === "error")).toBe(false);
-
-    const score = parseMusicXml(xml, domDeps);
-    expect(score.measureTimelines[0].isPickup).toBe(true);
-    expect(score.measureTimelines[0].endTick).toBe(480);
-    expect(score.noteEvents.find((n) => n.midi === 48)?.hand).toBe("LH");
-    expect(score.noteEvents.find((n) => n.midi === 72)?.hand).toBe("RH");
+    expect(() =>
+      svgsAndMidiToMusicXml([], buildSmf(ppq, [track], 0), {
+        pickupTicks: 480,
+      })
+    ).toThrow(/No SVG pages provided/);
   });
 });

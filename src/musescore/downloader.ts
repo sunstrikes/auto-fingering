@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
+import {
+  downloadMuseScoreAssetsViaBrowser,
+  downloadMuseScorePdfViaBrowser,
+} from "./browserSession";
 import { svgsAndMidiToMusicXml } from "./index";
 import type { ConversionOptions, ConversionResult } from "./types";
+
+export { svgsToPdfViaBrowser } from "./browserSession";
 
 const DEFAULT_BASE_ORIGIN = "https://musescore.com";
 const FALLBACK_AUTH_SUFFIX = "9654,4e";
@@ -14,15 +20,29 @@ export interface MuseScoreInputTarget {
 export interface MuseScoreDownloadOptions {
   /** Base origin used for numeric IDs and /api/jmuse requests (default: https://musescore.com) */
   baseOrigin?: string;
-  /** Optional browser-session Cookie header sent only to the MuseScore origin */
+  /**
+   * Download transport mode:
+   * - "auto" (default): uses persistent Chrome browser session (msdl method) for remote origins,
+   *   and pure Node fetch for localhost/127.0.0.1 or when fetchImpl is provided.
+   * - "browser": always use persistent Chrome browser session (msdl method).
+   * - "fetch": always use pure Node fetch.
+   */
+  mode?: "auto" | "browser" | "fetch";
+  /** Run Chrome in headless mode when using browser mode (default: false, matching msdl) */
+  headless?: boolean;
+  /** Persistent Chrome profile directory when using browser mode (default: ~/.cache/msdl/profile) */
+  profile?: string;
+  /** Timeout in ms waiting for Cloudflare challenge + score metadata in browser mode (default: 90000) */
+  timeoutMs?: number;
+  /** Optional browser-session Cookie header sent only to the MuseScore origin (fetch mode) */
   cookie?: string;
-  /** Optional extra headers sent only to the MuseScore origin */
+  /** Optional extra headers sent only to the MuseScore origin (fetch mode) */
   headers?: Record<string, string>;
   /** Override jmuse auth suffix instead of extracting from page JS bundles */
   authSuffix?: string;
   /** Maximum pages to fetch when totalPages is unknown (default: 200) */
   maxPages?: number;
-  /** Injectable fetch implementation for testing (defaults to globalThis.fetch) */
+  /** Injectable fetch implementation for testing (forces fetch mode) */
   fetchImpl?: typeof fetch;
 }
 
@@ -434,17 +454,35 @@ async function fetchScoreMetaAndSuffix(
   return { fetchFn, target, scoreOrigin, meta, suffix };
 }
 
+export function shouldUseBrowserMode(
+  scoreOrigin: string,
+  options?: MuseScoreDownloadOptions
+): boolean {
+  if (options?.mode === "browser") return true;
+  if (options?.mode === "fetch" || options?.fetchImpl) return false;
+  const hostname = new URL(scoreOrigin).hostname;
+  return hostname !== "127.0.0.1" && hostname !== "localhost" && hostname !== "::1";
+}
+
 /**
- * Fetch MuseScore page metadata, SVG/PNG page assets, and MIDI buffer using pure Node.js fetch.
+ * Fetch MuseScore page metadata, SVG/PNG page assets, and MIDI buffer.
+ * Defaults to msdl's persistent Chrome browser session for remote origins (to pass Cloudflare),
+ * and Node.js fetch for local test origins or when fetchImpl / mode:"fetch" is specified.
  */
 export async function downloadMuseScoreAssets(
   input: string | number,
   options?: MuseScoreDownloadOptions
 ): Promise<DownloadedMuseScoreAssets> {
-  const { fetchFn, target, scoreOrigin, meta, suffix } = await fetchScoreMetaAndSuffix(
-    input,
-    options
-  );
+  const target = parseMuseScoreInput(input, options?.baseOrigin);
+  const scoreOrigin = options?.baseOrigin
+    ? new URL(options.baseOrigin).origin
+    : new URL(target.scoreUrl).origin;
+
+  if (shouldUseBrowserMode(scoreOrigin, options)) {
+    return downloadMuseScoreAssetsViaBrowser(target.scoreUrl, target.scoreId, options);
+  }
+
+  const { fetchFn, meta, suffix } = await fetchScoreMetaAndSuffix(input, options);
   const maxPages = options?.maxPages ?? DEFAULT_MAX_PAGES;
 
   const pages = await fetchPageAssets({
@@ -488,10 +526,16 @@ export async function downloadMuseScorePdf(
   input: string | number,
   options?: MuseScoreDownloadOptions
 ): Promise<Uint8Array> {
-  const { fetchFn, target, scoreOrigin, meta, suffix } = await fetchScoreMetaAndSuffix(
-    input,
-    options
-  );
+  const target = parseMuseScoreInput(input, options?.baseOrigin);
+  const scoreOrigin = options?.baseOrigin
+    ? new URL(options.baseOrigin).origin
+    : new URL(target.scoreUrl).origin;
+
+  if (shouldUseBrowserMode(scoreOrigin, options)) {
+    return downloadMuseScorePdfViaBrowser(target.scoreUrl, target.scoreId, options);
+  }
+
+  const { fetchFn, meta, suffix } = await fetchScoreMetaAndSuffix(input, options);
   const pdfUrl = await fetchJmuseAssetUrl({
     id: meta.id,
     type: "pdf",

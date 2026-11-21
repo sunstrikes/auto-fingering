@@ -1,3 +1,4 @@
+import { computeTieChainEndByRoot } from "../domain/tieUtils";
 import {
   normalizeAbLoopBounds,
   type AbLoopBounds,
@@ -7,19 +8,79 @@ import {
   type PracticeStep,
   type ScoreDocument,
   type WaitingModeState,
+  type WaitingResetReason,
 } from "../domain/types";
 
 export interface BuildPracticeStepsOptions {
   skipGraceNotes?: boolean;
 }
 
-export interface WaitingNoteOnResult {
+export interface WaitingStepAdvanceResult {
   nextState: WaitingModeState;
   matched: boolean;
   completedStep: PracticeStep | null;
   advancedToStep: PracticeStep | null;
   completedScore: boolean;
   loopWrapped: boolean;
+  faultReason: WaitingResetReason;
+}
+
+export type WaitingNoteOnResult = WaitingStepAdvanceResult;
+
+export interface WaitingNoteOnOptions {
+  /**
+   * Whether the active step requires holding keys for `requiredHoldSec` before advancing.
+   * Defaults to `false` when omitted so pure pitch-matching callers remain instant,
+   * or `true` when `nowSec` / `requiredHoldRatio` is provided.
+   */
+  enforceHoldDuration?: boolean;
+  /**
+   * Current real-time clock in seconds (e.g., `AudioContext.currentTime` or `performance.now() / 1000`).
+   */
+  nowSec?: number;
+  /**
+   * Current playback speed multiplier (`1.0` = native score tempo).
+   */
+  speedMultiplier?: number;
+  /**
+   * Fraction of the step's scaled duration that must be held before advancing (default `0.8`).
+   */
+  requiredHoldRatio?: number;
+}
+
+export interface WaitingNoteOffOptions {
+  /**
+   * Whether the sustain pedal (CC64) is currently depressed; when true, releasing a key
+   * during `isHolding` does not invalidate the hold duration.
+   */
+  sustainPedalPressed?: boolean;
+}
+
+export interface WaitingNoteOffResult {
+  nextState: WaitingModeState;
+  faultReason: WaitingResetReason;
+}
+
+export const DEFAULT_HOLD_DURATION_RATIO = 0.8;
+export const MIN_REQUIRED_HOLD_SEC = 0.06;
+export const MAX_REQUIRED_HOLD_SEC = 4.0;
+
+/**
+ * Computes the required real-time hold duration (in seconds) for a `PracticeStep`
+ * at the given `speedMultiplier` and `holdRatio`.
+ */
+export function computeStepRequiredHoldSec(
+  step: PracticeStep,
+  speedMultiplier = 1.0,
+  holdRatio = DEFAULT_HOLD_DURATION_RATIO
+): number {
+  if (step.isGrace || step.expectedDurationSec <= 0 || holdRatio <= 0) {
+    return 0;
+  }
+  const safeSpeed = Number.isFinite(speedMultiplier) && speedMultiplier > 0 ? speedMultiplier : 1.0;
+  const scaled = (step.expectedDurationSec / safeSpeed) * holdRatio;
+  if (scaled < MIN_REQUIRED_HOLD_SEC) return 0;
+  return Math.min(MAX_REQUIRED_HOLD_SEC, scaled);
 }
 
 /**
@@ -83,6 +144,7 @@ export function buildPracticeSteps(
   options: BuildPracticeStepsOptions = {}
 ): PracticeStep[] {
   const skipGraceNotes = options.skipGraceNotes ?? false;
+  const tieChainEndSecByRootUid = computeTieChainEndByRoot(scoreDoc.noteEvents, "sec");
 
   interface Bucket {
     onsetTick: number;
@@ -125,7 +187,7 @@ export function buildPracticeSteps(
   const preferredHand =
     practiceMode === "rh-only" ? "RH" : practiceMode === "lh-only" ? "LH" : undefined;
 
-  const steps: PracticeStep[] = [];
+  const rawSteps: Array<Omit<PracticeStep, "expectedDurationSec">> = [];
   for (const bucket of sortedBuckets) {
     const expectedNotes: NoteEvent[] = [];
     const accompanimentNotes: NoteEvent[] = [];
@@ -144,8 +206,8 @@ export function buildPracticeSteps(
       (a, b) => a - b
     );
 
-    steps.push({
-      stepIndex: steps.length,
+    rawSteps.push({
+      stepIndex: rawSteps.length,
       onsetTick: bucket.onsetTick,
       onsetSec: bucket.onsetSec,
       measureIndex: bucket.measureIndex,
@@ -164,78 +226,70 @@ export function buildPracticeSteps(
     });
   }
 
-  return steps;
+  return rawSteps.map((raw, idx) => {
+    if (raw.isGrace) {
+      return { ...raw, expectedDurationSec: 0 };
+    }
+    let minNoteDurationSec = Number.POSITIVE_INFINITY;
+    for (const note of raw.expectedNotes) {
+      const tieEndSec = tieChainEndSecByRootUid.get(note.noteUid);
+      const effectiveDur =
+        tieEndSec !== undefined
+          ? Math.max(note.durationSec, tieEndSec - note.onsetSec)
+          : note.durationSec;
+      if (effectiveDur > 0 && effectiveDur < minNoteDurationSec) {
+        minNoteDurationSec = effectiveDur;
+      }
+    }
+    if (!Number.isFinite(minNoteDurationSec)) {
+      minNoteDurationSec = 0.25;
+    }
+
+    // Cap required duration by the score time until the next non-grace step so a long held note
+    // in one hand never blocks the player from advancing to the next beat in the other hand.
+    let nextStepOnsetSec: number | null = null;
+    for (let j = idx + 1; j < rawSteps.length; j++) {
+      if (rawSteps[j].onsetSec > raw.onsetSec + 1e-5) {
+        nextStepOnsetSec = rawSteps[j].onsetSec;
+        break;
+      }
+    }
+    const interOnsetGapSec =
+      nextStepOnsetSec !== null ? Math.max(0, nextStepOnsetSec - raw.onsetSec) : minNoteDurationSec;
+    const expectedDurationSec = Math.max(0, Math.min(minNoteDurationSec, interOnsetGapSec));
+
+    return {
+      ...raw,
+      expectedDurationSec,
+    };
+  });
 }
 
 /**
  * Creates a fresh `WaitingModeState` positioned at `startStepIndex`,
- * clearing `hitMidis` and `wrongMidis` so held keys never bleed across steps.
+ * clearing `hitMidis`, `wrongMidis`, and any hold/taint flags so held keys never bleed across steps.
  */
 export function createWaitingModeState(startStepIndex = 0): WaitingModeState {
   return {
     currentStepIndex: Math.max(0, startStepIndex),
     hitMidis: new Set<number>(),
     wrongMidis: new Set<number>(),
+    activeStepMidis: new Set<number>(),
+    tainted: false,
+    lastResetReason: null,
+    isHolding: false,
+    holdProgress: 0,
+    requiredHoldSec: 0,
+    holdStartedAtSec: null,
   };
 }
 
-/**
- * Processes a `NoteOn` event against the active `PracticeStep` using cumulative
- * hit matching. Unexpected pitches are flagged in `wrongMidis` without clearing
- * already-hit pitches; completing all expected pitches resets `hitMidis` on advance.
- */
-export function handleWaitingNoteOn(
+function advanceCompletedStep(
   state: WaitingModeState,
   steps: PracticeStep[],
-  midi: number,
+  step: PracticeStep,
   abLoop?: AbLoopBounds | null
-): WaitingNoteOnResult {
-  const step = steps[state.currentStepIndex];
-  if (!step) {
-    return {
-      nextState: state,
-      matched: false,
-      completedStep: null,
-      advancedToStep: null,
-      completedScore: false,
-      loopWrapped: false,
-    };
-  }
-
-  if (!step.expectedMidis.includes(midi)) {
-    const nextWrong = new Set(state.wrongMidis);
-    nextWrong.add(midi);
-    return {
-      nextState: {
-        ...state,
-        wrongMidis: nextWrong,
-      },
-      matched: false,
-      completedStep: null,
-      advancedToStep: null,
-      completedScore: false,
-      loopWrapped: false,
-    };
-  }
-
-  const nextHit = new Set(state.hitMidis);
-  nextHit.add(midi);
-
-  const isStepComplete = step.expectedMidis.every((expected) => nextHit.has(expected));
-  if (!isStepComplete) {
-    return {
-      nextState: {
-        ...state,
-        hitMidis: nextHit,
-      },
-      matched: true,
-      completedStep: null,
-      advancedToStep: null,
-      completedScore: false,
-      loopWrapped: false,
-    };
-  }
-
+): WaitingStepAdvanceResult {
   const loopRange = findAbLoopStepRange(steps, abLoop);
   if (loopRange && state.currentStepIndex === loopRange.endStepIndex) {
     return {
@@ -245,6 +299,7 @@ export function handleWaitingNoteOn(
       advancedToStep: steps[loopRange.startStepIndex],
       completedScore: false,
       loopWrapped: true,
+      faultReason: null,
     };
   }
 
@@ -257,6 +312,7 @@ export function handleWaitingNoteOn(
       advancedToStep: steps[nextIndex],
       completedScore: false,
       loopWrapped: false,
+      faultReason: null,
     };
   }
 
@@ -267,24 +323,291 @@ export function handleWaitingNoteOn(
     advancedToStep: null,
     completedScore: true,
     loopWrapped: false,
+    faultReason: null,
   };
 }
 
 /**
- * Clears a released pitch from `wrongMidis` while preserving cumulative `hitMidis`
- * within the current step.
+ * Processes a `NoteOn` event against the active `PracticeStep` under **Absolute Strictness**:
+ * 1. Pressing any unexpected pitch taints the current step (`tainted = true`), clears `hitMidis`,
+ *    cancels any in-progress duration hold, and requires ALL pressed keys (`activeStepMidis`)
+ *    to be released before retrying the step.
+ * 2. When `options.enforceHoldDuration` is enabled and the step has a positive `requiredHoldSec`,
+ *    completing all expected pitches enters the `isHolding` phase (`holdProgress` 0 -> 1) and
+ *    advances only once held for `requiredHoldSec` without wrong notes or early release.
+ */
+export function handleWaitingNoteOn(
+  state: WaitingModeState,
+  steps: PracticeStep[],
+  midi: number,
+  abLoop?: AbLoopBounds | null,
+  options: WaitingNoteOnOptions = {}
+): WaitingNoteOnResult {
+  const step = steps[state.currentStepIndex];
+  if (!step) {
+    return {
+      nextState: state,
+      matched: false,
+      completedStep: null,
+      advancedToStep: null,
+      completedScore: false,
+      loopWrapped: false,
+      faultReason: null,
+    };
+  }
+
+  const nextActive = new Set(state.activeStepMidis);
+  nextActive.add(midi);
+
+  const isExpected = step.expectedMidis.includes(midi);
+
+  // Absolute strictness: any wrong note immediately taints the step and invalidates prior hits
+  if (!isExpected) {
+    const nextWrong = new Set(state.wrongMidis);
+    nextWrong.add(midi);
+    return {
+      nextState: {
+        ...state,
+        hitMidis: new Set<number>(),
+        wrongMidis: nextWrong,
+        activeStepMidis: nextActive,
+        tainted: true,
+        lastResetReason: "wrong-note",
+        isHolding: false,
+        holdProgress: 0,
+        requiredHoldSec: 0,
+        holdStartedAtSec: null,
+      },
+      matched: false,
+      completedStep: null,
+      advancedToStep: null,
+      completedScore: false,
+      loopWrapped: false,
+      faultReason: "wrong-note",
+    };
+  }
+
+  // If the step is still tainted (user has not released all keys from a failed attempt)
+  // or any wrong key is still held down, block hit accumulation until full release.
+  if (state.tainted || state.wrongMidis.size > 0) {
+    return {
+      nextState: {
+        ...state,
+        hitMidis: new Set<number>(),
+        activeStepMidis: nextActive,
+        tainted: true,
+        isHolding: false,
+        holdProgress: 0,
+      },
+      matched: false,
+      completedStep: null,
+      advancedToStep: null,
+      completedScore: false,
+      loopWrapped: false,
+      faultReason: null,
+    };
+  }
+
+  const nextHit = new Set(state.hitMidis);
+  nextHit.add(midi);
+
+  const isStepComplete = step.expectedMidis.every((expected) => nextHit.has(expected));
+  if (!isStepComplete) {
+    return {
+      nextState: {
+        ...state,
+        hitMidis: nextHit,
+        activeStepMidis: nextActive,
+        lastResetReason: null,
+      },
+      matched: true,
+      completedStep: null,
+      advancedToStep: null,
+      completedScore: false,
+      loopWrapped: false,
+      faultReason: null,
+    };
+  }
+
+  const enforceHold = options.enforceHoldDuration ?? false;
+  const requiredHoldSec = enforceHold
+    ? computeStepRequiredHoldSec(
+        step,
+        options.speedMultiplier ?? 1.0,
+        options.requiredHoldRatio ?? DEFAULT_HOLD_DURATION_RATIO
+      )
+    : 0;
+
+  if (requiredHoldSec > 0) {
+    const nowSec = options.nowSec ?? 0;
+    const holdStartedAtSec = state.isHolding && state.holdStartedAtSec !== null ? state.holdStartedAtSec : nowSec;
+    return {
+      nextState: {
+        ...state,
+        hitMidis: nextHit,
+        activeStepMidis: nextActive,
+        tainted: false,
+        lastResetReason: null,
+        isHolding: true,
+        holdProgress: 0,
+        requiredHoldSec,
+        holdStartedAtSec,
+      },
+      matched: true,
+      completedStep: null,
+      advancedToStep: null,
+      completedScore: false,
+      loopWrapped: false,
+      faultReason: null,
+    };
+  }
+
+  return advanceCompletedStep(state, steps, step, abLoop);
+}
+
+/**
+ * Advances an in-progress `isHolding` step according to the elapsed real time (`nowSec`).
+ * Once `nowSec - holdStartedAtSec >= requiredHoldSec`, the step completes and advances.
+ */
+export function advanceWaitingHoldProgress(
+  state: WaitingModeState,
+  steps: PracticeStep[],
+  nowSec: number,
+  abLoop?: AbLoopBounds | null
+): WaitingStepAdvanceResult {
+  const step = steps[state.currentStepIndex];
+  if (!step || !state.isHolding || state.tainted || state.holdStartedAtSec === null) {
+    return {
+      nextState: state,
+      matched: false,
+      completedStep: null,
+      advancedToStep: null,
+      completedScore: false,
+      loopWrapped: false,
+      faultReason: null,
+    };
+  }
+
+  const elapsed = Math.max(0, nowSec - state.holdStartedAtSec);
+  if (state.requiredHoldSec <= 0 || elapsed + 1e-4 >= state.requiredHoldSec) {
+    return advanceCompletedStep(state, steps, step, abLoop);
+  }
+
+  const progress = Math.max(0, Math.min(1, elapsed / state.requiredHoldSec));
+  if (Math.abs(progress - state.holdProgress) < 1e-4) {
+    return {
+      nextState: state,
+      matched: true,
+      completedStep: null,
+      advancedToStep: null,
+      completedScore: false,
+      loopWrapped: false,
+      faultReason: null,
+    };
+  }
+
+  return {
+    nextState: {
+      ...state,
+      holdProgress: progress,
+    },
+    matched: true,
+    completedStep: null,
+    advancedToStep: null,
+    completedScore: false,
+    loopWrapped: false,
+    faultReason: null,
+  };
+}
+
+/**
+ * Processes a `NoteOff` event with detailed fault reporting:
+ * - Releases the pitch from `wrongMidis` and `activeStepMidis`.
+ * - Under Absolute Strictness, if `tainted` is true, `tainted` clears ONLY when all keys in
+ *   `activeStepMidis` have been released (`nextActive.size === 0`).
+ * - If a required chord pitch is released before all chord notes are pressed, it is removed from
+ *   `hitMidis` so chords must be held simultaneously.
+ * - If the step is currently in `isHolding` (waiting for duration completion) and an expected key
+ *   is released early (while sustain pedal is NOT pressed), the hold fails with `"early-release"`
+ *   and taints the step (requiring full release and re-strike).
+ */
+export function handleWaitingNoteOffWithResult(
+  state: WaitingModeState,
+  midi: number,
+  options: WaitingNoteOffOptions = {}
+): WaitingNoteOffResult {
+  const nextWrong = new Set(state.wrongMidis);
+  nextWrong.delete(midi);
+
+  const nextActive = new Set(state.activeStepMidis);
+  nextActive.delete(midi);
+
+  // If currently holding for duration verification and a target key is released early without sustain pedal
+  if (state.isHolding && state.hitMidis.has(midi) && !options.sustainPedalPressed) {
+    const stillHasHeldKeys = nextActive.size > 0;
+    return {
+      nextState: {
+        ...state,
+        hitMidis: new Set<number>(),
+        wrongMidis: nextWrong,
+        activeStepMidis: nextActive,
+        tainted: stillHasHeldKeys,
+        lastResetReason: "early-release",
+        isHolding: false,
+        holdProgress: 0,
+        requiredHoldSec: 0,
+        holdStartedAtSec: null,
+      },
+      faultReason: "early-release",
+    };
+  }
+
+  // If the step was tainted by a wrong note or prior early release, keep it tainted until ALL keys are released
+  if (state.tainted) {
+    const stillTainted = nextActive.size > 0 || nextWrong.size > 0;
+    return {
+      nextState: {
+        ...state,
+        hitMidis: new Set<number>(),
+        wrongMidis: nextWrong,
+        activeStepMidis: nextActive,
+        tainted: stillTainted,
+        lastResetReason: stillTainted ? state.lastResetReason : null,
+        isHolding: false,
+        holdProgress: 0,
+        requiredHoldSec: 0,
+        holdStartedAtSec: null,
+      },
+      faultReason: null,
+    };
+  }
+
+  // Normal simultaneous chord requirement: releasing a hit note before the step completes removes it from hitMidis
+  const nextHit = new Set(state.hitMidis);
+  if (!state.isHolding && nextHit.has(midi)) {
+    nextHit.delete(midi);
+  }
+
+  return {
+    nextState: {
+      ...state,
+      hitMidis: nextHit,
+      wrongMidis: nextWrong,
+      activeStepMidis: nextActive,
+    },
+    faultReason: null,
+  };
+}
+
+/**
+ * Convenience wrapper around `handleWaitingNoteOffWithResult` returning `nextState`.
  */
 export function handleWaitingNoteOff(
   state: WaitingModeState,
-  midi: number
+  midi: number,
+  options: WaitingNoteOffOptions = {}
 ): WaitingModeState {
-  if (!state.wrongMidis.has(midi)) return state;
-  const nextWrong = new Set(state.wrongMidis);
-  nextWrong.delete(midi);
-  return {
-    ...state,
-    wrongMidis: nextWrong,
-  };
+  return handleWaitingNoteOffWithResult(state, midi, options).nextState;
 }
 
 /**

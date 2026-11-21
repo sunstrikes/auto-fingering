@@ -376,3 +376,9 @@ export interface ScoreTimelineMetadata {
 3. **Web MIDI 注入测试**：通过 Mock `MIDIAccess` 验证热插拔连接/断开状态同步、`NoteOn`/`NoteOff`（含 `velocity=0` 等价 `NoteOff`）解析，以及 `midiLocalSound` 开关在等待/非等待下的本地发声隔离。
 4. **`Waiting Mode` 状态机**：验证双手同拍跨手合并步进、和弦先后落键累计命中、重复同音防穿透、`Tie Continuation` 自动免弹、错音标红不清空已命中、倚音等待/跳过开关、单手 `Practice Mode` 伴奏手自动发声，以及暂停状态弹对当前音直接唤醒开播。
 5. **`A-B Loop` 门禁**：验证整小节 `[A..B]` 区间（含 `B < A` 自动规范）、直接跳回 A 小节与开启 `gapMeasure` 时插入 1 小节空拍再循环的行为，以及与 `Waiting Mode` 组合循环的连续性。
+
+### 7.4 可选预训练指法先验（`src/prior/`，P2 软先验与物理否决）验收门禁
+1. **默认关闭与零开销**：默认指法风格为 `classic`（启发式），关闭时不下载任何模型权重文件，求解结果与纯启发式基准 100% 一致。
+2. **纯 TS 前向对齐**：`src/prior/lumikeyTransformer.ts` 对 `@lumikey/piano-fingering-model` 导出的左右手权重（`public/models/lumikey-prior-{left,right}.bin`）在 26×5 特征下的输出 logits 与 ONNX 参考图最大误差 `< 1e-3`。
+3. **物理与锚点一票否决不变量**：先验仅作为封顶附加代价项 `priorCost(slice, cand) = λ · Σ min(cap, -logP[note][finger])`（默认 `cap = 6.0`）进入候选重排，永不参与 `generateSliceCandidates` 过滤；无论 `λ` 如何调节，`Finger Anchor` 保持率 100%、不出现同手和弦重指冲突、不越过 `S`/`M`/`L` 最大跨度、不新增 `unreachable-span` 或 `anchor-conflict` 警告；模型加载失败或抛错时静默回退至经典启发式求解。
+4. **合规与降级开关**：支持构建期通过 `VITE_BUNDLE_PRIOR=0` 禁用内置权重并在设置面板填入自定义模型 URL（详见 [ADR-0003](./docs/adr/0003-pretrained-fingering-prior.md) 与 [NOTICE](./NOTICE)）。

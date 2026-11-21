@@ -397,9 +397,26 @@ export function createPianoAudioEngine(deps?: PianoAudioDeps): PianoAudioEngine 
     return synthPiano;
   };
 
+  const resumeContextIfNeeded = async (ctx: AudioContext): Promise<void> => {
+    const ctxState = ctx.state as string;
+    if ((ctxState === "suspended" || ctxState === "interrupted") && typeof ctx.resume === "function") {
+      try {
+        await ctx.resume();
+      } catch {
+        // proceed even if resume is restricted in tests or autoplay-blocked environments
+      }
+    }
+  };
+
   const prepare = async (): Promise<"samples" | "synth"> => {
-    if (status === "samples" && smplrPiano) return "samples";
-    if (status === "synth") return "synth";
+    if (status === "samples" && smplrPiano) {
+      await resumeContextIfNeeded(ensureAudioContext());
+      return "samples";
+    }
+    if (status === "synth") {
+      await resumeContextIfNeeded(ensureAudioContext());
+      return "synth";
+    }
     if (preparePromise) return preparePromise;
 
     const myToken = ++loadToken;
@@ -407,13 +424,7 @@ export function createPianoAudioEngine(deps?: PianoAudioDeps): PianoAudioEngine 
 
     preparePromise = (async () => {
       const ctx = ensureAudioContext();
-      if (ctx.state === "suspended" && typeof ctx.resume === "function") {
-        try {
-          await ctx.resume();
-        } catch {
-          // proceed to fallback even if resume is restricted in tests
-        }
-      }
+      await resumeContextIfNeeded(ctx);
       if (myToken !== loadToken) {
         return status === "samples" ? "samples" : "synth";
       }

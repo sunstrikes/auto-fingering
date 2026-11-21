@@ -10,6 +10,7 @@ import {
   type HandSpanProfile,
   type PracticeMode,
   type PracticeStep,
+  type PriorMode,
   type ScoreDocument,
   type ScoreRepairOption,
   type ScoreRepairSuggestion,
@@ -17,13 +18,28 @@ import {
   type WaitingModeState,
 } from "./domain/types";
 import {
+  advanceWaitingHoldProgress,
   buildPracticeSteps,
   createWaitingModeState,
   doesNoteOnMatchPausedStep,
   findAbLoopStepRange,
-  handleWaitingNoteOff,
+  handleWaitingNoteOffWithResult,
   handleWaitingNoteOn,
+  type WaitingStepAdvanceResult,
 } from "./practice/waitingMode";
+import {
+  buildMeasureErrorSummaries,
+  buildPracticeRepeatRecommendations,
+  createPracticeAnalyticsState,
+  evaluatePracticeProgression,
+  MASTERY_REQUIRED_CLEAN_PASSES,
+  recordPracticeStepCompleted,
+  recordPracticeStepFault,
+  resetMeasureCleanStreak,
+  type PracticeAnalyticsState,
+  type PracticeRepeatRecommendation,
+} from "./practice/practiceAnalytics";
+import { useScreenWakeLock } from "./practice/useScreenWakeLock";
 import type { MxlContainer } from "./musicxml/mxl";
 import { parseMusicXml } from "./musicxml/parser";
 import {
@@ -33,6 +49,7 @@ import {
 } from "./musicxml/repairWriter";
 import { exportScoreOutput, loadScoreInput, type ExportFormat } from "./musicxml/scoreSession";
 import { applyAnchorOverridesToSlices, localResolveFingering } from "./solver/localResolve";
+import type { PriorLoadProgress } from "./prior/loader";
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
 import { computeNextAnchorState, useStudioStore } from "./store/useStudioStore";
 import { buildMeasureRiskSummaries, type MeasureGeometry } from "./components/MarginRiskGutter";
@@ -140,8 +157,20 @@ export default function App({
   const [activeMetronomeBeat, setActiveMetronomeBeat] = useState<MetronomeBeatEvent | null>(null);
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("both");
   const [waitingModeEnabled, setWaitingModeEnabled] = useState<boolean>(false);
+  useScreenWakeLock(playbackState === "playing" || waitingModeEnabled);
   const [skipGraceNotes, setSkipGraceNotes] = useState<boolean>(false);
+  const [strictHoldDurationEnabled, setStrictHoldDurationEnabled] = useState<boolean>(false);
   const [waitingState, setWaitingState] = useState<WaitingModeState>(() => createWaitingModeState(0));
+  const waitingStateRef = useRef<WaitingModeState>(waitingState);
+  waitingStateRef.current = waitingState;
+  const setWaitingStateSync = (next: WaitingModeState) => {
+    waitingStateRef.current = next;
+    setWaitingState(next);
+  };
+  const [practiceAnalytics, setPracticeAnalytics] = useState<PracticeAnalyticsState>(() =>
+    createPracticeAnalyticsState()
+  );
+  const [practiceReportOpen, setPracticeReportOpen] = useState<boolean>(false);
   const [abLoop, setAbLoop] = useState<AbLoopBounds>(() => createDefaultAbLoopBounds(0));
   const waitingLoopGapActiveRef = useRef<boolean>(false);
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
@@ -168,7 +197,10 @@ export default function App({
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [showStatusBar, setShowStatusBar] = useState<boolean>(true);
   const [showPianoOverhead, setShowPianoOverhead] = useState<boolean>(false);
-  const [showFullPalm, setShowFullPalm] = useState<boolean>(false);
+  const [showFullPalm, setShowFullPalm] = useState<boolean>(true);
+  const [priorLoading, setPriorLoading] = useState<boolean>(false);
+  const [priorProgress, setPriorProgress] = useState<PriorLoadProgress | null>(null);
+  const [priorFallbackReason, setPriorFallbackReason] = useState<string | null>(null);
   const [midiLocalSound, setMidiLocalSound] = useState<boolean>(false);
   const [midiState, setMidiState] = useState<MidiConnectionState>({
     status: "unsupported",
@@ -190,6 +222,9 @@ export default function App({
   const singleStaffHand = useStudioStore((s) => s.singleStaffHand);
   const handSpanProfile = useStudioStore((s) => s.handSpanProfile);
   const ignoreExistingFingerings = useStudioStore((s) => s.ignoreExistingFingerings);
+  const priorMode = useStudioStore((s) => s.priorMode);
+  const priorLambda = useStudioStore((s) => s.priorLambda);
+  const customModelBaseUrl = useStudioStore((s) => s.customModelBaseUrl);
   const scoreDoc = useStudioStore((s) => s.scoreDoc);
   const renderedXml = useStudioStore((s) => s.renderedXml);
   const solveResult = useStudioStore((s) => s.solveResult);
@@ -304,7 +339,7 @@ export default function App({
         return next;
       });
       if (waitingModeEnabled) {
-        setWaitingState((prev) => handleWaitingNoteOff(prev, event.midi));
+        processWaitingNoteOff(event.midi);
       }
       return;
     }
@@ -360,9 +395,36 @@ export default function App({
           ignoreAnchors
         );
 
-    const result = await solverClientRef.current.solve(slicesToSolve, profile, {
-      ignoreExistingFingerings: resetHistory ? ignoreAnchors : false,
-    });
+    const isModelAssist = store.priorMode === "model-assist";
+    if (isModelAssist) {
+      setPriorLoading(true);
+      setPriorFallbackReason(null);
+    }
+
+    let result;
+    try {
+      result = await solverClientRef.current.solve(slicesToSolve, profile, {
+        ignoreExistingFingerings: resetHistory ? ignoreAnchors : false,
+        ...(isModelAssist
+          ? {
+              priorMode: store.priorMode,
+              lambda: store.priorLambda,
+              ...(store.customModelBaseUrl ? { customModelBaseUrl: store.customModelBaseUrl } : {}),
+              onPriorProgress: (prog) => setPriorProgress(prog),
+            }
+          : {}),
+      });
+    } finally {
+      if (isModelAssist) {
+        setPriorLoading(false);
+      }
+    }
+
+    if (result.priorFallbackReason) {
+      setPriorFallbackReason(result.priorFallbackReason);
+    } else if (isModelAssist && result.priorUsed) {
+      setPriorFallbackReason(null);
+    }
 
     store.setSolvedScore({
       scoreDoc: nextDoc,
@@ -378,6 +440,8 @@ export default function App({
       setAbLoop(nextLoop);
       setAbPickStep("idle");
       setAbPickStartMeasure(null);
+      setPracticeAnalytics(createPracticeAnalyticsState());
+      setPracticeReportOpen(false);
       playbackEngineRef.current?.setAbLoop(nextLoop);
     }
   };
@@ -508,6 +572,61 @@ export default function App({
     }
   };
 
+  const handlePriorModeChange = (nextMode: PriorMode) => {
+    useStudioStore.getState().setPriorMode(nextMode);
+    setPriorFallbackReason(null);
+    if (nextMode === "model-assist" && !rawXmlText && solverClientRef.current?.preloadPrior) {
+      setPriorLoading(true);
+      void solverClientRef.current
+        .preloadPrior({
+          customModelBaseUrl: useStudioStore.getState().customModelBaseUrl || undefined,
+          onProgress: (prog) => setPriorProgress(prog),
+        })
+        .catch((err) => {
+          setPriorFallbackReason(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          setPriorLoading(false);
+        });
+      return;
+    }
+    if (rawXmlText) {
+      void reSolveScore(
+        rawXmlText,
+        isSingleStaff,
+        singleStaffHand,
+        handSpanProfile,
+        ignoreExistingFingerings
+      );
+    }
+  };
+
+  const handlePriorLambdaChange = (nextLambda: number) => {
+    useStudioStore.getState().setPriorLambda(nextLambda);
+    if (rawXmlText && useStudioStore.getState().priorMode === "model-assist") {
+      void reSolveScore(
+        rawXmlText,
+        isSingleStaff,
+        singleStaffHand,
+        handSpanProfile,
+        ignoreExistingFingerings
+      );
+    }
+  };
+
+  const handleCustomModelBaseUrlChange = (nextUrl: string) => {
+    useStudioStore.getState().setCustomModelBaseUrl(nextUrl);
+    if (rawXmlText && useStudioStore.getState().priorMode === "model-assist") {
+      void reSolveScore(
+        rawXmlText,
+        isSingleStaff,
+        singleStaffHand,
+        handSpanProfile,
+        ignoreExistingFingerings
+      );
+    }
+  };
+
   const runLocalAnchorUpdate = async (
     noteUid: string,
     override: AnchorOverride | null
@@ -526,6 +645,7 @@ export default function App({
 
     setIsResolving(true);
     try {
+      const isModelAssist = store.priorMode === "model-assist";
       const input = {
         onsetSlices: store.scoreDoc.onsetSlices,
         profile: store.handSpanProfile,
@@ -535,6 +655,15 @@ export default function App({
         anchors: nextAnchors,
         removedRawAnchorUids: nextRemoved,
         ignoreExistingFingerings: store.ignoreExistingFingerings,
+        ...(isModelAssist
+          ? {
+              priorMode: store.priorMode,
+              lambda: store.priorLambda,
+              ...(store.customModelBaseUrl
+                ? { customModelBaseUrl: store.customModelBaseUrl }
+                : {}),
+            }
+          : {}),
       };
       const result = solverClientRef.current.resolveLocal
         ? await solverClientRef.current.resolveLocal(input)
@@ -654,6 +783,213 @@ export default function App({
         : [],
     [scoreDoc, effectivePracticeMode, skipGraceNotes]
   );
+
+  const measureErrorsByIndex = useMemo(
+    () => buildMeasureErrorSummaries(practiceAnalytics),
+    [practiceAnalytics]
+  );
+
+  const repeatRecommendations = useMemo(
+    () =>
+      buildPracticeRepeatRecommendations(practiceAnalytics, {
+        measureCount,
+        currentSpeed: playbackSpeed,
+        currentPracticeMode: effectivePracticeMode,
+        isSingleStaff,
+        warnings: solveResult?.warnings ?? [],
+      }),
+    [
+      practiceAnalytics,
+      measureCount,
+      playbackSpeed,
+      effectivePracticeMode,
+      isSingleStaff,
+      solveResult?.warnings,
+    ]
+  );
+
+  const totalPracticeFaults = useMemo(() => {
+    let total = 0;
+    for (const s of measureErrorsByIndex.values()) {
+      total += s.totalErrors;
+    }
+    return total;
+  }, [measureErrorsByIndex]);
+
+  const practiceAccuracyPercent = useMemo(() => {
+    if (practiceAnalytics.totalStepsCompleted === 0) return 100;
+    return Math.round(
+      (practiceAnalytics.firstTryCleanSteps / practiceAnalytics.totalStepsCompleted) * 100
+    );
+  }, [practiceAnalytics.totalStepsCompleted, practiceAnalytics.firstTryCleanSteps]);
+
+  const practiceProgression = useMemo(
+    () =>
+      evaluatePracticeProgression(practiceAnalytics, {
+        measureCount,
+        abLoop,
+        activeMeasureIndex: cursorTarget?.measureIndex ?? selectedMeasureIndex,
+        currentSpeed: playbackSpeed,
+        targetSpeed: 1.0,
+        currentPracticeMode: effectivePracticeMode,
+        isSingleStaff,
+      }),
+    [
+      practiceAnalytics,
+      measureCount,
+      abLoop,
+      cursorTarget?.measureIndex,
+      selectedMeasureIndex,
+      playbackSpeed,
+      effectivePracticeMode,
+      isSingleStaff,
+    ]
+  );
+
+  const handleAdvanceProgressionMeasures = (
+    startMeasureIndex: number,
+    endMeasureIndex: number
+  ) => {
+    if (!scoreDoc) return;
+    const nextLoop = normalizeAbLoopBounds(
+      {
+        startMeasureIndex,
+        endMeasureIndex,
+        enabled: true,
+        loopGap: abLoop.loopGap,
+      },
+      measureCount
+    );
+    setAbLoop(nextLoop);
+    setAbPickStep("idle");
+    setAbPickStartMeasure(null);
+    playbackEngineRef.current?.setAbLoop(nextLoop);
+
+    const nextSteps = buildPracticeSteps(scoreDoc, effectivePracticeMode, { skipGraceNotes });
+    const range = findAbLoopStepRange(nextSteps, nextLoop);
+    const startIdx = range ? range.startStepIndex : 0;
+
+    if (!waitingModeEnabled) {
+      setWaitingModeEnabled(true);
+      setMidiLocalSound(false);
+    }
+    cancelWaitingLoopGapIfActive(false);
+    setWaitingState(createWaitingModeState(startIdx));
+    setPlaybackState("playing");
+    playbackEngineRef.current?.setMetronomePaused(true);
+    syncToPracticeStep(nextSteps[startIdx] ?? null, "playing");
+    setPracticeReportOpen(false);
+  };
+
+  const handleStepUpProgressionHand = () => {
+    if (!scoreDoc) return;
+    setPracticeMode("both");
+    setPracticeAnalytics((prev) =>
+      resetMeasureCleanStreak(
+        prev,
+        practiceProgression.startMeasureIndex,
+        practiceProgression.endMeasureIndex
+      )
+    );
+    const nextSteps = buildPracticeSteps(scoreDoc, "both", { skipGraceNotes });
+    const range = abLoop.enabled ? findAbLoopStepRange(nextSteps, abLoop) : null;
+    const startIdx = range
+      ? range.startStepIndex
+      : Math.max(
+          0,
+          nextSteps.findIndex((s) => s.measureIndex >= practiceProgression.startMeasureIndex)
+        );
+    cancelWaitingLoopGapIfActive(false);
+    setWaitingState(createWaitingModeState(startIdx));
+    setPlaybackState("playing");
+    playbackEngineRef.current?.setMetronomePaused(true);
+    syncToPracticeStep(nextSteps[startIdx] ?? null, "playing");
+    setPracticeReportOpen(false);
+  };
+
+  const handleStepUpProgressionSpeed = () => {
+    if (!scoreDoc) return;
+    const targetSpd = practiceProgression.recommendedNextSpeedMultiplier ?? 1.0;
+    setPlaybackSpeed(targetSpd);
+    playbackEngineRef.current?.setSpeed(targetSpd);
+    setPracticeAnalytics((prev) =>
+      resetMeasureCleanStreak(
+        prev,
+        practiceProgression.startMeasureIndex,
+        practiceProgression.endMeasureIndex
+      )
+    );
+    const range = abLoop.enabled ? findAbLoopStepRange(practiceSteps, abLoop) : null;
+    const startIdx = range
+      ? range.startStepIndex
+      : Math.max(
+          0,
+          practiceSteps.findIndex((s) => s.measureIndex >= practiceProgression.startMeasureIndex)
+        );
+    cancelWaitingLoopGapIfActive(false);
+    setWaitingState(createWaitingModeState(startIdx));
+    setPlaybackState("playing");
+    playbackEngineRef.current?.setMetronomePaused(true);
+    syncToPracticeStep(practiceSteps[startIdx] ?? null, "playing");
+    setPracticeReportOpen(false);
+  };
+
+  const handleApplyRepeatRecommendation = (
+    rec: PracticeRepeatRecommendation,
+    options: { applySpeedAndMode?: boolean } = {}
+  ) => {
+    if (!scoreDoc) return;
+    const nextMode =
+      options.applySpeedAndMode && rec.recommendedPracticeMode
+        ? rec.recommendedPracticeMode
+        : effectivePracticeMode;
+
+    if (options.applySpeedAndMode && rec.recommendedPracticeMode && !isSingleStaff) {
+      setPracticeMode(rec.recommendedPracticeMode);
+    }
+    if (options.applySpeedAndMode && rec.recommendedSpeedMultiplier !== null) {
+      setPlaybackSpeed(rec.recommendedSpeedMultiplier);
+      playbackEngineRef.current?.setSpeed(rec.recommendedSpeedMultiplier);
+    }
+    if (options.applySpeedAndMode && rec.recommendMetronome && !metronomeEnabled) {
+      setMetronomeEnabled(true);
+      playbackEngineRef.current?.setMetronomeEnabled(true);
+    }
+
+    const nextLoop = normalizeAbLoopBounds(
+      {
+        startMeasureIndex: rec.startMeasureIndex,
+        endMeasureIndex: rec.endMeasureIndex,
+        enabled: true,
+        loopGap: abLoop.loopGap,
+      },
+      measureCount
+    );
+    setAbLoop(nextLoop);
+    setAbPickStep("idle");
+    setAbPickStartMeasure(null);
+    playbackEngineRef.current?.setAbLoop(nextLoop);
+
+    const nextSteps = buildPracticeSteps(scoreDoc, nextMode, { skipGraceNotes });
+    const range = findAbLoopStepRange(nextSteps, nextLoop);
+    const startIdx = range ? range.startStepIndex : 0;
+
+    if (!waitingModeEnabled) {
+      setWaitingModeEnabled(true);
+      setMidiLocalSound(false);
+    }
+    cancelWaitingLoopGapIfActive(false);
+    setWaitingState(createWaitingModeState(startIdx));
+    setPlaybackState("playing");
+    playbackEngineRef.current?.setMetronomePaused(true);
+    syncToPracticeStep(nextSteps[startIdx] ?? null, "playing");
+    setPracticeReportOpen(false);
+  };
+
+  const handleResetPracticeAnalytics = () => {
+    setPracticeAnalytics(createPracticeAnalyticsState());
+    setPracticeReportOpen(false);
+  };
 
   const scoreMetronomeBeats = useMemo(
     () => (scoreDoc ? buildMetronomeBeats(scoreDoc) : []),
@@ -807,10 +1143,22 @@ export default function App({
       nextRemoved,
       store.ignoreExistingFingerings
     );
+    const isModelAssist = store.priorMode === "model-assist";
     const nextResult = await solverClientRef.current.solve(
       slicesToSolve,
       store.handSpanProfile,
-      { ignoreExistingFingerings: false }
+      {
+        ignoreExistingFingerings: false,
+        ...(isModelAssist
+          ? {
+              priorMode: store.priorMode,
+              lambda: store.priorLambda,
+              ...(store.customModelBaseUrl
+                ? { customModelBaseUrl: store.customModelBaseUrl }
+                : {}),
+            }
+          : {}),
+      }
     );
     store.applyScoreRepair({
       rawXmlText: nextRawXml,
@@ -1001,13 +1349,76 @@ export default function App({
     setPopoverOpen(true);
   };
 
+  const getWaitingClockSec = (): number => {
+    const audio = audioEngineRef.current;
+    if (audio) {
+      try {
+        return audio.getAudioContext().currentTime;
+      } catch {
+        // fallback below
+      }
+    }
+    return (globalThis.performance?.now?.() ?? Date.now()) / 1000;
+  };
+
+  const applyWaitingAdvanceSideEffects = (result: WaitingStepAdvanceResult) => {
+    if (!result.completedStep) return;
+
+    const passCompleted = result.completedScore || result.loopWrapped;
+    const nowSec = getWaitingClockSec();
+    setPracticeAnalytics((prev) => {
+      const next = recordPracticeStepCompleted(prev, {
+        completedStep: result.completedStep,
+        passCompleted,
+        nowSec,
+        speedMultiplier: playbackSpeed,
+      });
+      const achievedMasteryStreak = Object.values(next.measureCleanStreakByIndex).some(
+        (s) => s >= MASTERY_REQUIRED_CLEAN_PASSES
+      );
+      if (
+        passCompleted &&
+        (Object.keys(next.stepStatsByIndex).length > 0 || achievedMasteryStreak)
+      ) {
+        setPracticeReportOpen(true);
+      }
+      return next;
+    });
+
+    playAccompanimentNotes(result.completedStep);
+    if (result.loopWrapped && result.advancedToStep) {
+      if (abLoop.loopGap && scoreDoc && playbackEngineRef.current) {
+        waitingLoopGapActiveRef.current = true;
+        const norm = normalizeAbLoopBounds(abLoop, scoreDoc.measureCount);
+        syncToPracticeStep(result.advancedToStep, "playing");
+        void playbackEngineRef.current.playCountIn(scoreDoc, norm.startMeasureIndex, () => {
+          if (!waitingLoopGapActiveRef.current) return;
+          waitingLoopGapActiveRef.current = false;
+          playbackEngineRef.current?.setMetronomePaused(true);
+        });
+      } else {
+        triggerStepAdvanceMetronome(result.advancedToStep);
+        syncToPracticeStep(result.advancedToStep, "playing");
+      }
+    } else if (result.advancedToStep) {
+      triggerStepAdvanceMetronome(result.advancedToStep);
+      syncToPracticeStep(result.advancedToStep, "playing");
+    } else if (result.completedScore) {
+      setPlaybackState("stopped");
+      playbackEngineRef.current?.setMetronomePaused(false);
+      setActiveMetronomeBeat(null);
+      syncToPracticeStep(null, "stopped");
+    }
+  };
+
   const processWaitingNoteOn = (midi: number) => {
     if (!waitingModeEnabled || practiceSteps.length === 0) return;
     if (waitingLoopGapActiveRef.current) return;
 
+    const currentWaiting = waitingStateRef.current;
     let isPlayingNow = playbackState === "playing";
     if (playbackState === "paused") {
-      const currentStep = practiceSteps[waitingState.currentStepIndex];
+      const currentStep = practiceSteps[currentWaiting.currentStepIndex];
       if (!doesNoteOnMatchPausedStep(currentStep, midi)) {
         return;
       }
@@ -1019,47 +1430,113 @@ export default function App({
 
     if (!isPlayingNow) return;
 
-    const result = handleWaitingNoteOn(waitingState, practiceSteps, midi, abLoop);
-    setWaitingState(result.nextState);
+    const activeStep = practiceSteps[currentWaiting.currentStepIndex];
+    const result = handleWaitingNoteOn(currentWaiting, practiceSteps, midi, abLoop, {
+      enforceHoldDuration: strictHoldDurationEnabled,
+      nowSec: getWaitingClockSec(),
+      speedMultiplier: playbackSpeed,
+    });
+    setWaitingStateSync(result.nextState);
 
-    if (result.completedStep) {
-      playAccompanimentNotes(result.completedStep);
-      if (result.loopWrapped && result.advancedToStep) {
-        if (abLoop.loopGap && scoreDoc && playbackEngineRef.current) {
-          waitingLoopGapActiveRef.current = true;
-          const norm = normalizeAbLoopBounds(abLoop, scoreDoc.measureCount);
-          syncToPracticeStep(result.advancedToStep, "playing");
-          void playbackEngineRef.current.playCountIn(scoreDoc, norm.startMeasureIndex, () => {
-            if (!waitingLoopGapActiveRef.current) return;
-            waitingLoopGapActiveRef.current = false;
-            playbackEngineRef.current?.setMetronomePaused(true);
-          });
-        } else {
-          triggerStepAdvanceMetronome(result.advancedToStep);
-          syncToPracticeStep(result.advancedToStep, "playing");
-        }
-      } else if (result.advancedToStep) {
-        triggerStepAdvanceMetronome(result.advancedToStep);
-        syncToPracticeStep(result.advancedToStep, "playing");
-      } else if (result.completedScore) {
-        setPlaybackState("stopped");
-        playbackEngineRef.current?.setMetronomePaused(false);
-        setActiveMetronomeBeat(null);
-        syncToPracticeStep(null, "stopped");
-      }
+    if (result.faultReason === "wrong-note") {
+      setPracticeAnalytics((prev) =>
+        recordPracticeStepFault(prev, activeStep, "wrong-note", midi)
+      );
+    }
+
+    applyWaitingAdvanceSideEffects(result);
+  };
+
+  const processWaitingNoteOff = (midi: number) => {
+    if (!waitingModeEnabled || practiceSteps.length === 0) return;
+    const currentWaiting = waitingStateRef.current;
+    const activeStep = practiceSteps[currentWaiting.currentStepIndex];
+    const res = handleWaitingNoteOffWithResult(currentWaiting, midi, {
+      sustainPedalPressed,
+    });
+    setWaitingStateSync(res.nextState);
+    if (res.faultReason === "early-release") {
+      setPracticeAnalytics((prev) =>
+        recordPracticeStepFault(prev, activeStep, "early-release", midi)
+      );
     }
   };
+
+  useEffect(() => {
+    if (
+      !waitingModeEnabled ||
+      playbackState !== "playing" ||
+      !waitingState.isHolding ||
+      waitingState.tainted
+    ) {
+      return;
+    }
+
+    const reqRaf =
+      audioDeps?.requestAnimationFrame ??
+      ((cb: FrameRequestCallback) => globalThis.requestAnimationFrame(cb));
+    const cancelRaf =
+      audioDeps?.cancelAnimationFrame ??
+      ((id: number) => globalThis.cancelAnimationFrame(id));
+
+    let rafId = 0;
+    let cancelled = false;
+
+    const tick = () => {
+      if (cancelled) return;
+      const nowSec = getWaitingClockSec();
+      const currentWaiting = waitingStateRef.current;
+      const result = advanceWaitingHoldProgress(currentWaiting, practiceSteps, nowSec, abLoop);
+      if (result.nextState !== currentWaiting) {
+        setWaitingStateSync(result.nextState);
+      }
+      if (result.completedStep) {
+        applyWaitingAdvanceSideEffects(result);
+        return;
+      }
+      rafId = reqRaf(tick);
+    };
+
+    rafId = reqRaf(tick);
+    return () => {
+      cancelled = true;
+      if (rafId) cancelRaf(rafId);
+    };
+  }, [
+    waitingModeEnabled,
+    playbackState,
+    waitingState,
+    practiceSteps,
+    abLoop,
+    audioDeps,
+  ]);
+  const togglePlayPauseRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     const activeQwertyMidis = new Map<string, number>();
 
     const onKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      const targetEl = e.target as HTMLElement | null;
+      const tag = targetEl?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || targetEl?.isContentEditable) return;
       if (e.key === "Escape") {
         setPopoverOpen(false);
         setDiffDropdownOpen(false);
         setRepairPanelOpen(false);
+        setPracticeReportOpen(false);
         setSettingsOpen(false);
+        return;
+      }
+      if (
+        (e.code === "Space" || e.key === " ") &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        if (!e.repeat) {
+          togglePlayPauseRef.current();
+        }
         return;
       }
       if (
@@ -1204,6 +1681,14 @@ export default function App({
       return;
     }
     playbackEngineRef.current?.pause();
+  };
+
+  togglePlayPauseRef.current = () => {
+    if (playbackState === "playing") {
+      handlePause();
+    } else {
+      handlePlay();
+    }
   };
 
   const handleStop = () => {
@@ -1540,6 +2025,22 @@ export default function App({
                 <strong>换指提示:</strong> {solveResult.transitionCues.length}
               </span>
             )}
+            {solveResult?.priorUsed && (
+              <span
+                data-testid="prior-used-badge"
+                className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700"
+              >
+                模型辅助 (λ={priorLambda.toFixed(2)})
+              </span>
+            )}
+            {priorFallbackReason && (
+              <span
+                data-testid="status-prior-fallback-badge"
+                className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800"
+              >
+                模型先验已回退经典求解
+              </span>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -1617,6 +2118,250 @@ export default function App({
                     onDismissSuggestion={handleDismissRepair}
                     onClose={() => setRepairPanelOpen(false)}
                   />
+                )}
+              </div>
+            )}
+
+            {(totalPracticeFaults > 0 || practiceAnalytics.completedPasses > 0) && (
+              <div className="relative">
+                <button
+                  type="button"
+                  data-testid="practice-report-toggle-btn"
+                  onClick={() => {
+                    setPracticeReportOpen((v) => !v);
+                    setRepairPanelOpen(false);
+                    setDiffDropdownOpen(false);
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${
+                    repeatRecommendations.length > 0
+                      ? "border-rose-300 bg-rose-50 text-rose-800 hover:bg-rose-100"
+                      : "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      repeatRecommendations.length > 0 ? "bg-rose-500" : "bg-emerald-500"
+                    }`}
+                  />
+                  练习诊断 · 已练 {practiceAnalytics.completedPasses} 遍 · 一次准确率 {practiceAccuracyPercent}%
+                  {practiceProgression.isCleanStreakMet
+                    ? " · 🎉 已达标可推进"
+                    : ` · 通关进度 ${practiceProgression.cleanStreak}/${practiceProgression.requiredCleanPasses} 遍`}
+                  {repeatRecommendations.length > 0
+                    ? ` · ${repeatRecommendations.length} 处易错段`
+                    : ""}
+                </button>
+
+                {practiceReportOpen && (
+                  <div
+                    data-testid="practice-report-dropdown"
+                    className="absolute right-0 top-7 z-40 w-80 max-w-[92vw] rounded-xl border border-slate-200 bg-white p-3 shadow-xl sm:w-96"
+                  >
+                    <div className="mb-2 flex items-center justify-between border-b border-slate-100 pb-1.5">
+                      <div>
+                        <div className="text-xs font-semibold text-slate-900">
+                          多遍练习失误统计与重复练习建议
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          已完成 {practiceAnalytics.completedPasses} 遍 · 累计失误 {totalPracticeFaults} 次 · 一次准确率{" "}
+                          {practiceAccuracyPercent}%
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          data-testid="practice-report-reset-btn"
+                          onClick={handleResetPracticeAnalytics}
+                          className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 hover:bg-slate-100"
+                        >
+                          重置统计
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="practice-report-close-btn"
+                          onClick={() => setPracticeReportOpen(false)}
+                          className="rounded px-1 text-slate-400 hover:text-slate-700"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Active Segment Mastery & Next-Measure Gate Card */}
+                    <div
+                      data-testid="practice-progression-card"
+                      data-progression-stage={practiceProgression.stage}
+                      data-clean-streak={String(practiceProgression.cleanStreak)}
+                      className={`mb-2.5 rounded-lg border p-2.5 text-[11px] ${
+                        practiceProgression.isCleanStreakMet
+                          ? "border-emerald-300 bg-emerald-50/80 text-emerald-950"
+                          : "border-indigo-200 bg-indigo-50/60 text-slate-800"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold">
+                          {practiceProgression.headline}
+                        </span>
+                        <span
+                          aria-label="连续零失误遍数进度"
+                          className="inline-flex shrink-0 items-center gap-1"
+                        >
+                          {Array.from(
+                            { length: practiceProgression.requiredCleanPasses },
+                            (_, i) => (
+                              <span
+                                key={i}
+                                className={`h-2 w-3.5 rounded-sm ${
+                                  i < practiceProgression.cleanStreak
+                                    ? "bg-emerald-500"
+                                    : "bg-slate-200"
+                                }`}
+                              />
+                            )
+                          )}
+                        </span>
+                      </div>
+                      <p className="mt-1 leading-relaxed opacity-90">
+                        {practiceProgression.detail}
+                      </p>
+
+                      {practiceProgression.isCleanStreakMet && (
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          {practiceProgression.stage === "step-up-hand" && (
+                            <button
+                              type="button"
+                              data-testid="progression-restore-hands-btn"
+                              onClick={handleStepUpProgressionHand}
+                              className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700"
+                            >
+                              一键切回「双手合练」
+                            </button>
+                          )}
+                          {practiceProgression.stage === "step-up-speed" && (
+                            <button
+                              type="button"
+                              data-testid="progression-restore-speed-btn"
+                              onClick={handleStepUpProgressionSpeed}
+                              className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700"
+                            >
+                              一键提速至{" "}
+                              {Number(
+                                (
+                                  practiceProgression.recommendedNextSpeedMultiplier ?? 1
+                                ).toFixed(2)
+                              )}
+                              x
+                            </button>
+                          )}
+                          {practiceProgression.canAdvanceToNextMeasure &&
+                            practiceProgression.nextStartMeasureIndex !== null &&
+                            practiceProgression.nextEndMeasureIndex !== null && (
+                              <>
+                                <button
+                                  type="button"
+                                  data-testid="progression-next-measure-btn"
+                                  onClick={() =>
+                                    handleAdvanceProgressionMeasures(
+                                      practiceProgression.nextStartMeasureIndex!,
+                                      practiceProgression.nextEndMeasureIndex!
+                                    )
+                                  }
+                                  className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                                    practiceProgression.stage === "ready-next-measure"
+                                      ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                                      : "border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-100"
+                                  }`}
+                                >
+                                  进入第 {practiceProgression.nextStartMeasureIndex + 1}
+                                  {practiceProgression.nextEndMeasureIndex >
+                                  practiceProgression.nextStartMeasureIndex
+                                    ? `–${practiceProgression.nextEndMeasureIndex + 1}`
+                                    : ""}{" "}
+                                  小节 →
+                                </button>
+                                {practiceProgression.bridgeStartMeasureIndex !== null &&
+                                  practiceProgression.bridgeEndMeasureIndex !== null && (
+                                    <button
+                                      type="button"
+                                      data-testid="progression-bridge-measure-btn"
+                                      onClick={() =>
+                                        handleAdvanceProgressionMeasures(
+                                          practiceProgression.bridgeStartMeasureIndex!,
+                                          practiceProgression.bridgeEndMeasureIndex!
+                                        )
+                                      }
+                                      className="rounded-md border border-emerald-300 bg-white px-2 py-1 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100"
+                                    >
+                                      跨小节衔接 (第{" "}
+                                      {practiceProgression.bridgeStartMeasureIndex + 1}–
+                                      {practiceProgression.bridgeEndMeasureIndex + 1} 小节)
+                                    </button>
+                                  )}
+                              </>
+                            )}
+                        </div>
+                      )}
+                    </div>
+
+                    {repeatRecommendations.length === 0 ? (
+                      <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-2.5 text-[11px] text-emerald-800">
+                        本轮练习全部一次通过，未发现错音或时值保持不足小节！
+                      </div>
+                    ) : (
+                      <div className="max-h-72 space-y-2 overflow-y-auto">
+                        {repeatRecommendations.map((rec, idx) => (
+                          <div
+                            key={rec.id}
+                            data-testid={`practice-recommendation-${idx}`}
+                            className="rounded-lg border border-rose-200 bg-rose-50/40 p-2.5 text-[11px]"
+                          >
+                            <div className="flex items-center justify-between gap-2 font-semibold text-slate-900">
+                              <span>
+                                #{idx + 1} {rec.headline}
+                              </span>
+                            </div>
+                            <p className="mt-1 leading-relaxed text-slate-600">
+                              {rec.prescription}
+                            </p>
+                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                data-testid={`practice-rec-loop-btn-${idx}`}
+                                onClick={() =>
+                                  handleApplyRepeatRecommendation(rec, {
+                                    applySpeedAndMode: false,
+                                  })
+                                }
+                                className="rounded-md bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-indigo-700"
+                              >
+                                循环第 {rec.startMeasureIndex + 1}
+                                {rec.endMeasureIndex > rec.startMeasureIndex
+                                  ? `–${rec.endMeasureIndex + 1}`
+                                  : ""}{" "}
+                                小节
+                              </button>
+                              {(rec.recommendedSpeedMultiplier !== null ||
+                                rec.recommendedPracticeMode !== null ||
+                                rec.recommendMetronome) && (
+                                <button
+                                  type="button"
+                                  data-testid={`practice-rec-guided-btn-${idx}`}
+                                  onClick={() =>
+                                    handleApplyRepeatRecommendation(rec, {
+                                      applySpeedAndMode: true,
+                                    })
+                                  }
+                                  className="rounded-md border border-rose-300 bg-white px-2 py-1 text-[11px] font-medium text-rose-800 hover:bg-rose-100"
+                                >
+                                  一键应用建议并循环
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -1756,6 +2501,7 @@ export default function App({
         measureCount={measureCount}
         measureTimelines={scoreDoc?.measureTimelines ?? []}
         measureRisks={measureRisks}
+        measureErrorsByIndex={measureErrorsByIndex}
         measureGeometry={measureGeometry}
         layoutMode={layoutMode}
         activeMeasureIndex={cursorTarget?.measureIndex ?? selectedMeasureIndex}
@@ -1798,6 +2544,10 @@ export default function App({
           hitMidis={waitingState.hitMidis}
           pressedMidis={pressedMidis}
           sustainPedalPressed={sustainPedalPressed}
+          waitingTainted={waitingState.tainted}
+          waitingResetReason={waitingState.lastResetReason}
+          waitingIsHolding={waitingState.isHolding}
+          waitingHoldProgress={waitingState.holdProgress}
           onSelectSlice={handleSelectSlice}
           onVirtualNoteOn={(midi, velocity = 96) =>
             handleMidiInputEvent({
@@ -1834,10 +2584,17 @@ export default function App({
         loopGapEnabled={abLoop.loopGap}
         metronomeVolume={metronomeVolume}
         skipGraceNotes={skipGraceNotes}
+        strictHoldDurationEnabled={strictHoldDurationEnabled}
         showStatusBar={showStatusBar}
         showPianoOverhead={showPianoOverhead}
         showFullPalm={showFullPalm}
         handSpanProfile={handSpanProfile}
+        priorMode={priorMode}
+        priorLambda={priorLambda}
+        priorLoading={priorLoading}
+        priorProgress={priorProgress}
+        priorFallbackReason={priorFallbackReason}
+        customModelBaseUrl={customModelBaseUrl}
         onSelectDevice={(deviceId) => midiControllerRef.current?.setSelectedDeviceId(deviceId)}
         onToggleLocalSound={setMidiLocalSound}
         onChangePianoTimbre={(nextTimbre) => {
@@ -1871,10 +2628,17 @@ export default function App({
         onToggleLoopGap={handleToggleLoopGap}
         onChangeMetronomeVolume={handleChangeMetronomeVolume}
         onToggleSkipGraceNotes={handleToggleSkipGraceNotes}
+        onToggleStrictHoldDuration={() => {
+          setStrictHoldDurationEnabled((prev) => !prev);
+          setWaitingState((prev) => createWaitingModeState(prev.currentStepIndex));
+        }}
         onToggleShowStatusBar={() => setShowStatusBar((v) => !v)}
         onToggleShowPianoOverhead={() => setShowPianoOverhead((v) => !v)}
         onToggleShowFullPalm={() => setShowFullPalm((v) => !v)}
         onChangeHandSpanProfile={handleProfileChange}
+        onChangePriorMode={handlePriorModeChange}
+        onChangePriorLambda={handlePriorLambdaChange}
+        onChangeCustomModelBaseUrl={handleCustomModelBaseUrlChange}
         onClose={() => setSettingsOpen(false)}
       />
     </div>

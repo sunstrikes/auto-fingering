@@ -1,3 +1,6 @@
+import type { FingeringPrior, PriorMode, PriorTable } from "../prior/types";
+
+export type { FingeringPrior, PriorMode, PriorTable };
 export type Hand = "RH" | "LH";
 export type Finger = 1 | 2 | 3 | 4 | 5;
 export type SpanPreset = "S" | "M" | "L";
@@ -97,6 +100,14 @@ export interface HandPosition {
 
 export interface SolveOptions {
   ignoreExistingFingerings?: boolean;
+  /** Precomputed soft prior table (single-pass). */
+  prior?: PriorTable | null;
+  /** Pluggable FingeringPrior model (runs up to 2 teacher-forced rounds). */
+  priorModel?: FingeringPrior | null;
+  /** Soft prior strength multiplier `lambda >= 0` (default `0.85`). */
+  priorLambda?: number;
+  /** Per-note cap on `-logProb` before scaling by `lambda` (default `6.0`). */
+  priorPerNoteCap?: number;
 }
 
 export type ScoreRepairStrategy =
@@ -175,6 +186,8 @@ export interface SolveResult {
   solveTimeMs: number;
   repairSuggestions?: ScoreRepairSuggestion[];
   earlyReleasesByNoteUid?: Record<string, HeldNoteRelease>;
+  priorUsed?: boolean;
+  priorFallbackReason?: string;
 }
 
 export interface TempoPoint {
@@ -219,6 +232,8 @@ export interface ScoreDocument {
 
 export type PracticeMode = "both" | "rh-only" | "lh-only";
 
+export type WaitingResetReason = "wrong-note" | "early-release" | null;
+
 export interface PracticeStep {
   stepIndex: number;
   onsetTick: number;
@@ -230,12 +245,49 @@ export interface PracticeStep {
   expectedNotes: NoteEvent[];
   accompanimentNotes: NoteEvent[];
   primarySliceId: string | null;
+  /**
+   * Minimum score-time duration (in seconds at 1.0x speed) among target notes in this step,
+   * honoring tie chains when applicable (`0` for grace notes).
+   */
+  expectedDurationSec: number;
 }
 
 export interface WaitingModeState {
   currentStepIndex: number;
   hitMidis: Set<number>;
   wrongMidis: Set<number>;
+  /**
+   * Keys touched during the current step that are still physically held down.
+   * When `tainted` is true, all keys in `activeStepMidis` must be released (`NoteOff`)
+   * before a fresh clean attempt on this step is accepted.
+   */
+  activeStepMidis: Set<number>;
+  /**
+   * Absolute strictness flag: set to `true` when any wrong note is pressed or when
+   * a required target key is released early before completing the step/hold duration.
+   */
+  tainted: boolean;
+  /**
+   * Most recent reason the current step was invalidated (`"wrong-note"` | `"early-release"` | `null`).
+   */
+  lastResetReason: WaitingResetReason;
+  /**
+   * Whether all `expectedMidis` are currently held cleanly and awaiting hold duration completion.
+   */
+  isHolding: boolean;
+  /**
+   * Normalized hold completion progress `[0..1]` while waiting for duration gate.
+   */
+  holdProgress: number;
+  /**
+   * Required real-time hold duration in seconds for the active step (`0` when instant).
+   */
+  requiredHoldSec: number;
+  /**
+   * Timestamp (in seconds, e.g., `AudioContext.currentTime` or `performance.now() / 1000`)
+   * when all expected notes in the current step were cleanly pressed.
+   */
+  holdStartedAtSec: number | null;
 }
 
 export interface AbLoopBounds {

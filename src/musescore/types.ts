@@ -47,13 +47,11 @@ export interface RawMidiData {
 }
 
 export type ConversionWarningCode =
-  | "MIDI_ONLY_FALLBACK"
-  | "SVG_NO_SYSTEMS_FALLBACK"
   | "PNG_PAGE_SKIPPED"
   | "INVALID_SVG_PAGE_SKIPPED"
   | "PREVIEW_TRUNCATED"
   | "MEASURE_COUNT_MISMATCH"
-  | "LOW_CONFIDENCE_MEASURE_FALLBACK"
+  | "LOW_CONFIDENCE_MEASURE"
   | "ALIGNMENT_ALTER_OUT_OF_RANGE";
 
 export interface ConversionDiagnostic {
@@ -69,7 +67,6 @@ export interface ConversionDiagnostics extends Array<ConversionDiagnostic> {
   svgPagesParsed: number;
   pngPagesSkipped: number;
   measuresAligned: number;
-  fallbackMeasures: number;
   alignmentConfidence: number;
   warnings: ConversionDiagnostic[];
 }

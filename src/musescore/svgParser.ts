@@ -455,6 +455,35 @@ function cyToDiatonicPitch(
   return { step, octave };
 }
 
+function expandPathSubpaths(shape: RawSvgShape): RawSvgShape[] {
+  if (shape.tag !== "path" || (shape.subpathCount ?? 1) <= 1 || !shape.attrs.d) {
+    return [shape];
+  }
+  const parts = shape.attrs.d
+    .split(/(?=M)/)
+    .map((p) => p.trim())
+    .filter((p) => p.startsWith("M"));
+  if (parts.length <= 1) {
+    return [shape];
+  }
+  const expanded: RawSvgShape[] = [];
+  for (const part of parts) {
+    const pts = extractPathPoints(part, shape.matrix);
+    const bbox = computeBBox(pts);
+    if (!bbox) continue;
+    expanded.push({
+      tag: shape.tag,
+      classes: shape.classes,
+      matrix: shape.matrix,
+      attrs: { ...shape.attrs, d: part },
+      points: pts,
+      bbox,
+      subpathCount: 1,
+    });
+  }
+  return expanded.length > 0 ? expanded : [shape];
+}
+
 function buildStavesAndSystems(
   shapes: RawSvgShape[],
   viewBoxWidth: number
@@ -462,7 +491,8 @@ function buildStavesAndSystems(
   systems: SvgSystem[];
   staffLineShapes: Set<RawSvgShape>;
 } {
-  let lineShapes = shapes.filter((s) => s.classes.has("StaffLines"));
+  const rawStaffLineShapes = shapes.filter((s) => s.classes.has("StaffLines"));
+  let lineShapes = rawStaffLineShapes.flatMap(expandPathSubpaths);
   if (lineShapes.length === 0) {
     // Geometric fallback: horizontal lines spanning >= 20% of page width
     lineShapes = shapes.filter(
@@ -473,7 +503,7 @@ function buildStavesAndSystems(
     );
   }
 
-  const staffLineShapes = new Set(lineShapes);
+  const staffLineShapes = new Set([...rawStaffLineShapes, ...lineShapes]);
   const sortedLines = [...lineShapes].sort((a, b) => a.bbox.cy - b.bbox.cy);
 
   // Group consecutive 5 lines with consistent spacing and overlapping x-range
@@ -588,8 +618,20 @@ interface BarlineCluster {
 
 function assignMeasuresFromBarlines(shapes: RawSvgShape[], systems: SvgSystem[]): Set<RawSvgShape> {
   const usedBarlines = new Set<RawSvgShape>();
-  const semanticBars = shapes.filter((s) => s.classes.has("BarLine") && s.tag === "polyline");
-  const semanticDots = shapes.filter((s) => s.classes.has("BarLine") && s.tag === "path");
+  const rawBarLineShapes = shapes.filter((s) => s.classes.has("BarLine"));
+  const expandedBarLines = rawBarLineShapes.flatMap(expandPathSubpaths);
+  const semanticBars = expandedBarLines.filter(
+    (s) =>
+      s.tag === "polyline" ||
+      s.tag === "line" ||
+      (s.tag === "path" && s.bbox.height > s.bbox.width * 2)
+  );
+  const semanticDots = expandedBarLines.filter(
+    (s) => s.tag === "path" && s.bbox.height <= s.bbox.width * 2
+  );
+  for (const raw of rawBarLineShapes) {
+    usedBarlines.add(raw);
+  }
 
   // Pre-collect note/rest shapes to detect empty clef/key/time header regions before a forward repeat
   const noteOrRestShapes = shapes.filter(

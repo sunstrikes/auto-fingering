@@ -24,9 +24,9 @@ interface TestServer {
 }
 
 async function startFixtureServer(): Promise<TestServer> {
-  const svg0 = readFileSync(resolve(FIXTURE_DIR, "04-partial-preview-p1.svg"));
+  const svg0 = readFileSync(resolve(FIXTURE_DIR, "07-oracle-single-staff-p1.svg"));
   const png1 = readFileSync(resolve(FIXTURE_DIR, "05-png-asset-p1.png"));
-  const midiBuf = readFileSync(resolve(FIXTURE_DIR, "04-partial-preview.mid"));
+  const midiBuf = readFileSync(resolve(FIXTURE_DIR, "07-oracle-single-staff.mid"));
   const scoreId = 246810;
   const suffix = "cli_suf";
 
@@ -124,7 +124,7 @@ describe("MuseScore CLI entry point", () => {
     }
   });
 
-  it("writes .musicxml and prints structured diagnostic summary (svgPagesParsed, pngPagesSkipped, measuresAligned, fallbackMeasures, warnings)", async () => {
+  it("writes .musicxml and prints structured diagnostic summary (svgPagesParsed, pngPagesSkipped, measuresAligned, warnings)", async () => {
     const server = await startFixtureServer();
     servers.push(server);
     const dir = mkdtempSync(resolve(tmpdir(), "ms-cli-"));
@@ -149,7 +149,6 @@ describe("MuseScore CLI entry point", () => {
     expect(output).toContain("svgPagesParsed");
     expect(output).toContain("pngPagesSkipped");
     expect(output).toContain("measuresAligned");
-    expect(output).toContain("fallbackMeasures");
     expect(output).toContain("warnings");
     expect(output).toContain("PNG_PAGE_SKIPPED");
 
@@ -185,7 +184,6 @@ describe("MuseScore CLI entry point", () => {
     expect(summary.svgPagesParsed).toBe(1);
     expect(summary.pngPagesSkipped).toBe(1);
     expect(typeof summary.measuresAligned).toBe("number");
-    expect(typeof summary.fallbackMeasures).toBe("number");
     expect(Array.isArray(summary.warnings)).toBe(true);
 
     const mxlBytes = readFileSync(outPath);
@@ -241,8 +239,8 @@ describe("MuseScore CLI entry point", () => {
 
   it("downloads optional PDF when --pdf <path> is provided", async () => {
     const pdfPayload = new TextEncoder().encode("%PDF-1.4\n%%EOF\n");
-    const svg0 = readFileSync(resolve(FIXTURE_DIR, "04-partial-preview-p1.svg"));
-    const midiBuf = readFileSync(resolve(FIXTURE_DIR, "04-partial-preview.mid"));
+    const svg0 = readFileSync(resolve(FIXTURE_DIR, "07-oracle-single-staff-p1.svg"));
+    const midiBuf = readFileSync(resolve(FIXTURE_DIR, "07-oracle-single-staff.mid"));
     const scoreId = 246810;
     const suffix = "cli_pdf";
 
@@ -334,5 +332,90 @@ describe("MuseScore CLI entry point", () => {
     expect(readFileSync(pdfPath, "utf8")).toContain("%PDF-1.4");
     const summary = JSON.parse(stdout.join(""));
     expect(summary.pdfPath).toBe(pdfPath);
+  });
+
+  it("exposes msdl-compatible browser options (--headless, --profile, --fetch) in --help and supports --fetch", async () => {
+    const helpStdout: string[] = [];
+    const helpCode = await runCli(["--help"], {
+      stdout: (m) => helpStdout.push(m),
+      stderr: () => {},
+    });
+    expect(helpCode).toBe(0);
+    const helpText = helpStdout.join("");
+    expect(helpText).toContain("--headless");
+    expect(helpText).toContain("--profile");
+    expect(helpText).toContain("--fetch");
+
+    const server = await startFixtureServer();
+    servers.push(server);
+    const dir = mkdtempSync(resolve(tmpdir(), "ms-cli-fetch-"));
+    tempDirs.push(dir);
+    const outPath = resolve(dir, "fetch.musicxml");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    const code = await runCli(
+      [`${server.origin}/scores/246810`, "-o", outPath, "--fetch", "--json"],
+      {
+        stdout: (m) => stdout.push(m),
+        stderr: (m) => stderr.push(m),
+      }
+    );
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(readFileSync(outPath, "utf8")).toContain("<score-partwise");
+  });
+
+  it("supports standalone --pdf output without requiring -o / MusicXML conversion", async () => {
+    const scoreId = 556677;
+    const suffix = "pdf_only";
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (url.pathname === `/scores/${scoreId}`) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(`<meta property="al:ios:url" content="musescore://score/${scoreId}"><meta property="og:title" content="PDF Only">`);
+        return;
+      }
+      if (url.pathname === "/api/jmuse" && url.searchParams.get("type") === "pdf") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ info: { url: "/cdn/only.pdf" } }));
+        return;
+      }
+      if (url.pathname === "/cdn/only.pdf") {
+        res.writeHead(200, { "content-type": "application/pdf" });
+        res.end(Buffer.from("%PDF-1.4\n%standalone\n%%EOF\n"));
+        return;
+      }
+      res.writeHead(404);
+      res.end("not found");
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("Expected numeric port");
+    const origin = `http://127.0.0.1:${addr.port}`;
+    servers.push({
+      origin,
+      close: () => new Promise<void>((r, j) => server.close((e) => (e ? j(e) : r()))),
+    });
+
+    const dir = mkdtempSync(resolve(tmpdir(), "ms-cli-pdf-only-"));
+    tempDirs.push(dir);
+    const pdfPath = resolve(dir, "standalone.pdf");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    const code = await runCli(
+      [`${origin}/scores/${scoreId}`, "--pdf", pdfPath, "--json"],
+      {
+        stdout: (m) => stdout.push(m),
+        stderr: (m) => stderr.push(m),
+      }
+    );
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(readFileSync(pdfPath, "utf8")).toContain("%PDF-1.4");
+    expect(JSON.parse(stdout.join("")).pdfPath).toBe(pdfPath);
+    void suffix;
   });
 });

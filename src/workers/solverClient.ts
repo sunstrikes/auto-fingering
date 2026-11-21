@@ -3,9 +3,11 @@ import type {
   Finger,
   HandSpanProfile,
   OnsetSlice,
+  PriorMode,
   SolveOptions,
   SolveResult,
 } from "../domain/types";
+import type { PriorLoadProgress } from "../prior/loader";
 import type { WorkerRequest, WorkerResponse } from "./protocol";
 
 export class SolverCancelledError extends Error {
@@ -22,6 +24,13 @@ export interface WorkerLike {
   terminate(): void;
 }
 
+export interface SolverClientSolveOptions extends SolveOptions {
+  priorMode?: PriorMode;
+  lambda?: number;
+  customModelBaseUrl?: string;
+  onPriorProgress?: (progress: PriorLoadProgress) => void;
+}
+
 export interface LocalResolveClientInput {
   onsetSlices: OnsetSlice[];
   profile: HandSpanProfile;
@@ -31,20 +40,29 @@ export interface LocalResolveClientInput {
   anchors: Record<string, AnchorOverride>;
   removedRawAnchorUids?: string[];
   ignoreExistingFingerings?: boolean;
+  priorMode?: PriorMode;
+  lambda?: number;
+  customModelBaseUrl?: string;
+  onPriorProgress?: (progress: PriorLoadProgress) => void;
 }
 
 export interface SolverClient {
   solve(
     onsetSlices: OnsetSlice[],
     profile: HandSpanProfile,
-    options?: SolveOptions
+    options?: SolverClientSolveOptions
   ): Promise<SolveResult>;
   resolveLocal?(input: LocalResolveClientInput): Promise<SolveResult>;
+  preloadPrior?(options?: {
+    customModelBaseUrl?: string;
+    onProgress?: (progress: PriorLoadProgress) => void;
+  }): Promise<void>;
   dispose(): void;
 }
 
 interface PendingRequest {
   requestId: number;
+  onProgress?: (progress: PriorLoadProgress) => void;
   resolve: (result: SolveResult) => void;
   reject: (err: unknown) => void;
 }
@@ -74,10 +92,29 @@ export function createSolverClient(
         if (!activeRequest || resp.requestId !== activeRequest.requestId) {
           return;
         }
+        if ("type" in resp && resp.type === "prior-progress") {
+          activeRequest.onProgress?.({
+            loadedBytes: resp.loadedBytes,
+            totalBytes: resp.totalBytes,
+          });
+          return;
+        }
         const pending = activeRequest;
         activeRequest = null;
         if (resp.ok) {
-          pending.resolve(resp.result);
+          if ("result" in resp) {
+            pending.resolve(resp.result);
+          } else {
+            pending.resolve({
+              fingerByNoteUid: {},
+              handPositions: [],
+              transitionCues: [],
+              warnings: [],
+              repairedAnchorUids: [],
+              solveTimeMs: 0,
+              priorUsed: true,
+            });
+          }
         } else {
           pending.reject(new Error(resp.error));
         }
@@ -93,7 +130,10 @@ export function createSolverClient(
     return worker;
   }
 
-  function dispatch(buildRequest: (requestId: number) => WorkerRequest): Promise<SolveResult> {
+  function dispatch(
+    buildRequest: (requestId: number) => WorkerRequest,
+    onProgress?: (progress: PriorLoadProgress) => void
+  ): Promise<SolveResult> {
     if (activeRequest) {
       const superseded = activeRequest;
       activeRequest = null;
@@ -104,7 +144,7 @@ export function createSolverClient(
     const w = ensureWorker();
 
     return new Promise<SolveResult>((resolve, reject) => {
-      activeRequest = { requestId, resolve, reject };
+      activeRequest = { requestId, onProgress, resolve, reject };
       w.postMessage(buildRequest(requestId));
     });
   }
@@ -113,29 +153,60 @@ export function createSolverClient(
     solve(
       onsetSlices: OnsetSlice[],
       profile: HandSpanProfile,
-      options?: SolveOptions
+      options?: SolverClientSolveOptions
     ): Promise<SolveResult> {
-      return dispatch((requestId) => ({
-        requestId,
-        onsetSlices,
-        profile,
-        ignoreExistingFingerings: options?.ignoreExistingFingerings,
-      }));
+      return dispatch(
+        (requestId) => ({
+          requestId,
+          onsetSlices,
+          profile,
+          ignoreExistingFingerings: options?.ignoreExistingFingerings,
+          ...(options?.priorMode ? { priorMode: options.priorMode } : {}),
+          ...(options?.lambda !== undefined ? { lambda: options.lambda } : {}),
+          ...(options?.customModelBaseUrl
+            ? { customModelBaseUrl: options.customModelBaseUrl }
+            : {}),
+        }),
+        options?.onPriorProgress
+      );
     },
 
     resolveLocal(input: LocalResolveClientInput): Promise<SolveResult> {
-      return dispatch((requestId) => ({
-        type: "local-resolve",
-        requestId,
-        onsetSlices: input.onsetSlices,
-        profile: input.profile,
-        priorFingerByNoteUid: input.priorFingerByNoteUid,
-        targetNoteUid: input.targetNoteUid,
-        override: input.override,
-        anchors: input.anchors,
-        removedRawAnchorUids: input.removedRawAnchorUids,
-        ignoreExistingFingerings: input.ignoreExistingFingerings,
-      }));
+      return dispatch(
+        (requestId) => ({
+          type: "local-resolve",
+          requestId,
+          onsetSlices: input.onsetSlices,
+          profile: input.profile,
+          priorFingerByNoteUid: input.priorFingerByNoteUid,
+          targetNoteUid: input.targetNoteUid,
+          override: input.override,
+          anchors: input.anchors,
+          removedRawAnchorUids: input.removedRawAnchorUids,
+          ignoreExistingFingerings: input.ignoreExistingFingerings,
+          ...(input.priorMode ? { priorMode: input.priorMode } : {}),
+          ...(input.lambda !== undefined ? { lambda: input.lambda } : {}),
+          ...(input.customModelBaseUrl
+            ? { customModelBaseUrl: input.customModelBaseUrl }
+            : {}),
+        }),
+        input.onPriorProgress
+      );
+    },
+
+    async preloadPrior(options): Promise<void> {
+      await dispatch(
+        (requestId) => ({
+          type: "load-prior",
+          requestId,
+          onsetSlices: [],
+          profile: { preset: "M", avoidThumbOnBlack: true, preferStablePosition: false },
+          ...(options?.customModelBaseUrl
+            ? { customModelBaseUrl: options.customModelBaseUrl }
+            : {}),
+        }),
+        options?.onProgress
+      );
     },
 
     dispose() {
