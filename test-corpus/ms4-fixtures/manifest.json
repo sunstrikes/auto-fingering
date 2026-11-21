@@ -1,0 +1,89 @@
+{
+  "generator": "MuseScore Studio 4.7.6",
+  "fixtures": [
+    {
+      "id": "01-grand-staff",
+      "title": "Grand Staff Arpeggio & Chords",
+      "totalPages": 1,
+      "pages": [
+        { "path": "01-grand-staff-p1.svg", "format": "svg" }
+      ],
+      "midiPath": "01-grand-staff.mid",
+      "expectedClasses": [
+        "StaffLines",
+        "BarLine",
+        "Note",
+        "Stem",
+        "Beam",
+        "Clef",
+        "TimeSig",
+        "Bracket"
+      ]
+    },
+    {
+      "id": "02-fingerings",
+      "title": "Grand Staff with Partial Fingerings",
+      "totalPages": 1,
+      "pages": [
+        { "path": "02-fingerings-p1.svg", "format": "svg" }
+      ],
+      "midiPath": "02-fingerings.mid",
+      "expectedClasses": [
+        "StaffLines",
+        "BarLine",
+        "Note",
+        "Stem",
+        "Beam",
+        "Fingering"
+      ]
+    },
+    {
+      "id": "03-repeats-span",
+      "title": "Repeats, Volta, Slurs, Ties, Dynamics, Articulations, Hairpins & Pedal",
+      "totalPages": 1,
+      "pages": [
+        { "path": "03-repeats-span-p1.svg", "format": "svg" }
+      ],
+      "midiPath": "03-repeats-span.mid",
+      "expectedClasses": [
+        "StaffLines",
+        "BarLine",
+        "Note",
+        "Stem",
+        "Fingering",
+        "SlurSegment",
+        "TieSegment",
+        "Dynamic",
+        "Articulation",
+        "HairpinSegment",
+        "PedalSegment",
+        "VoltaSegment",
+        "Arpeggio"
+      ]
+    },
+    {
+      "id": "04-partial-preview",
+      "title": "Partial Preview Truncation (Page 1 of 2)",
+      "totalPages": 2,
+      "pages": [
+        { "path": "04-partial-preview-p1.svg", "format": "svg" }
+      ],
+      "midiPath": "04-partial-preview.mid",
+      "expectedClasses": [
+        "StaffLines",
+        "BarLine",
+        "Note",
+        "Stem"
+      ]
+    },
+    {
+      "id": "05-png-asset",
+      "title": "PNG-Served Page Asset",
+      "totalPages": 1,
+      "pages": [
+        { "path": "05-png-asset-p1.png", "format": "png" }
+      ],
+      "midiPath": null
+    }
+  ]
+}
