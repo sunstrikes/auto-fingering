@@ -1,4 +1,4 @@
-import type { ArticulationType, BuildPitch, DynamicMarking } from "./types";
+import type { ArticulationType, BuildOrnament, BuildPitch, DynamicMarking } from "./types";
 import { classifyFingeringPath, parseFingeringText } from "./fingeringClassifier";
 
 export interface BBox {
@@ -69,6 +69,7 @@ export interface SvgSystem {
   systemIndex: number;
   staves: SvgStaff[];
   clefs: SvgClef[];
+  midMeasureClefs: SvgClef[];
   measures: SvgMeasureRegion[];
   minY: number;
   maxY: number;
@@ -84,6 +85,8 @@ export interface SvgNotehead {
   bbox: BBox;
   step: BuildPitch["step"];
   octave: number;
+  octaveShift?: number;
+  ornament?: BuildOrnament;
   stemId: number | null;
   stemDir: "up" | "down" | null;
   beamGroupId: number | null;
@@ -184,6 +187,18 @@ export interface SvgHairpin {
   bbox: BBox;
 }
 
+export interface SvgOctaveShift {
+  id: number;
+  systemIndex: number;
+  staff: 1 | 2;
+  size: 8 | 15;
+  directionType: "down" | "up";
+  shiftOctaves: number;
+  startX: number;
+  endX: number;
+  bbox: BBox;
+}
+
 export interface ParsedSvgPage {
   pageIndex: number;
   viewBox: { x: number; y: number; width: number; height: number };
@@ -198,6 +213,7 @@ export interface ParsedSvgPage {
   articulations: SvgArticulation[];
   dynamics: SvgDynamic[];
   hairpins: SvgHairpin[];
+  octaveShifts: SvgOctaveShift[];
   keySigCount: number;
   timeSigCount: number;
 }
@@ -269,6 +285,7 @@ interface RawSvgShape {
   attrs: Record<string, string>;
   points: Array<[number, number]>;
   bbox: BBox;
+  subpathCount?: number;
   textContent?: string;
 }
 
@@ -591,6 +608,9 @@ function scanSvgShapes(svgText: string): {
           .filter(Boolean)
       );
 
+      const subpathCount =
+        tag === "path" && attrs.d ? (attrs.d.match(/[Mm]/g) ?? []).length : 1;
+
       shapes.push({
         tag,
         classes,
@@ -598,6 +618,7 @@ function scanSvgShapes(svgText: string): {
         attrs,
         points: pts,
         bbox,
+        subpathCount,
       });
     }
   }
@@ -704,6 +725,7 @@ function buildStavesAndSystems(
           systemIndex: systems.length,
           staves: currentStaves,
           clefs: [],
+          midMeasureClefs: [],
           measures: [],
           minY: currentStaves[0].topY,
           maxY: currentStaves[currentStaves.length - 1].bottomY,
@@ -718,6 +740,7 @@ function buildStavesAndSystems(
       systemIndex: systems.length,
       staves: currentStaves,
       clefs: [],
+      midMeasureClefs: [],
       measures: [],
       minY: currentStaves[0].topY,
       maxY: currentStaves[currentStaves.length - 1].bottomY,
@@ -931,6 +954,11 @@ function assignMeasuresFromBarlines(shapes: RawSvgShape[], systems: SvgSystem[])
   return usedBarlines;
 }
 
+function classifyClefSign(clefShape: RawSvgShape, staffSpace: number): "G" | "F" {
+  const heightRatio = clefShape.bbox.height / staffSpace;
+  return heightRatio >= 4.2 ? "G" : "F";
+}
+
 function parseVoltaNumbersFromText(text: string): number[] {
   const nums = (text.match(/\d+/g) ?? []).map(Number).filter((n) => n >= 1 && n <= 16);
   return Array.from(new Set(nums));
@@ -1075,16 +1103,20 @@ function assignClefs(shapes: RawSvgShape[], systems: SvgSystem[]): void {
   for (const sys of systems) {
     for (const staff of sys.staves) {
       const ss = staff.staffSpace;
-      const candidates = clefShapes.filter(
-        (c) =>
-          c.bbox.cy >= staff.topY - ss * 2 &&
-          c.bbox.cy <= staff.bottomY + ss * 2 &&
-          c.bbox.minX <= staff.minX + ss * 6
-      );
-      if (candidates.length > 0) {
-        const c = candidates[0];
-        const heightRatio = c.bbox.height / ss;
-        const sign: "G" | "F" = heightRatio >= 4.8 ? "G" : "F";
+      const staffClefs = clefShapes
+        .filter(
+          (c) =>
+            c.bbox.cy >= staff.topY - ss * 2 &&
+            c.bbox.cy <= staff.bottomY + ss * 2 &&
+            c.bbox.maxX >= staff.minX - ss * 2 &&
+            c.bbox.minX <= staff.maxX + ss * 2
+        )
+        .sort((a, b) => a.bbox.cx - b.bbox.cx);
+
+      const initialCandidates = staffClefs.filter((c) => c.bbox.minX <= staff.minX + ss * 6);
+      if (initialCandidates.length > 0) {
+        const c = initialCandidates[0];
+        const sign = classifyClefSign(c, ss);
         sys.clefs.push({
           staff: staff.staffNumber,
           sign,
@@ -1109,8 +1141,31 @@ function assignClefs(shapes: RawSvgShape[], systems: SvgSystem[]): void {
           },
         });
       }
+
+      for (const c of staffClefs) {
+        if (c.bbox.minX > staff.minX + ss * 6) {
+          const sign = classifyClefSign(c, ss);
+          sys.midMeasureClefs.push({
+            staff: staff.staffNumber,
+            sign,
+            line: sign === "G" ? 2 : 4,
+            bbox: c.bbox,
+          });
+        }
+      }
+    }
+    sys.midMeasureClefs.sort((a, b) => a.bbox.cx - b.bbox.cx);
+  }
+}
+
+function activeClefSignAt(sys: SvgSystem, staffNumber: 1 | 2, cx: number): "G" | "F" {
+  let sign = sys.clefs.find((c) => c.staff === staffNumber)?.sign ?? (staffNumber === 1 ? "G" : "F");
+  for (const mc of sys.midMeasureClefs) {
+    if (mc.staff === staffNumber && mc.bbox.cx <= cx) {
+      sign = mc.sign;
     }
   }
+  return sign;
 }
 
 function findMeasureIndex(cx: number, sys: SvgSystem): number {
@@ -1148,6 +1203,143 @@ class UnionFind {
   }
 }
 
+function extractOctaveShifts(shapes: RawSvgShape[], systems: SvgSystem[]): SvgOctaveShift[] {
+  const segShapes = shapes.filter((s) => s.classes.has("OttavaSegment"));
+  if (segShapes.length === 0) return [];
+
+  interface AnnotatedSeg {
+    shape: RawSvgShape;
+    systemIndex: number;
+    staff: 1 | 2;
+    staffSpace: number;
+    isAbove: boolean;
+  }
+
+  const annotated: AnnotatedSeg[] = [];
+  for (const shape of segShapes) {
+    const sysIdx = findNearestSystemIndex(shape.bbox.cy, systems);
+    const sys = systems[sysIdx];
+    const staff = findNearestStaff(shape.bbox.cy, sys);
+    const isAbove = shape.bbox.cy < (staff.topY + staff.bottomY) / 2;
+    annotated.push({
+      shape,
+      systemIndex: sysIdx,
+      staff: staff.staffNumber,
+      staffSpace: staff.staffSpace,
+      isAbove,
+    });
+  }
+
+  annotated.sort(
+    (a, b) =>
+      a.systemIndex - b.systemIndex ||
+      a.staff - b.staff ||
+      Number(b.isAbove) - Number(a.isAbove) ||
+      a.shape.bbox.minX - b.shape.bbox.minX
+  );
+
+  const groups: AnnotatedSeg[][] = [];
+  for (const item of annotated) {
+    const prevGroup = groups[groups.length - 1];
+    if (prevGroup) {
+      const last = prevGroup[prevGroup.length - 1];
+      const groupMaxX = Math.max(...prevGroup.map((g) => g.shape.bbox.maxX));
+      if (
+        last.systemIndex === item.systemIndex &&
+        last.staff === item.staff &&
+        last.isAbove === item.isAbove &&
+        item.shape.bbox.minX <= groupMaxX + item.staffSpace * 2.5
+      ) {
+        prevGroup.push(item);
+        continue;
+      }
+    }
+    groups.push([item]);
+  }
+
+  return groups.map((group, id) => {
+    const first = group[0];
+    const pathSegs = group.filter((g) => g.shape.tag === "path");
+    let size: 8 | 15 = 8;
+    for (const p of pathSegs) {
+      const aspect = p.shape.bbox.width / Math.max(1, p.shape.bbox.height);
+      if (aspect >= 1.1) {
+        size = 15;
+        break;
+      }
+    }
+    const directionType: "down" | "up" = first.isAbove ? "down" : "up";
+    const shiftOctaves = first.isAbove ? (size === 15 ? 2 : 1) : size === 15 ? -2 : -1;
+    const minX = Math.min(...group.map((g) => g.shape.bbox.minX));
+    const minY = Math.min(...group.map((g) => g.shape.bbox.minY));
+    const maxX = Math.max(...group.map((g) => g.shape.bbox.maxX));
+    const maxY = Math.max(...group.map((g) => g.shape.bbox.maxY));
+    return {
+      id,
+      systemIndex: first.systemIndex,
+      staff: first.staff,
+      size,
+      directionType,
+      shiftOctaves,
+      startX: minX,
+      endX: maxX,
+      bbox: {
+        minX,
+        minY,
+        maxX,
+        maxY,
+        cx: (minX + maxX) / 2,
+        cy: (minY + maxY) / 2,
+        width: maxX - minX,
+        height: maxY - minY,
+      },
+    };
+  });
+}
+
+function attachOrnamentsToNoteheads(
+  shapes: RawSvgShape[],
+  systems: SvgSystem[],
+  noteheads: SvgNotehead[]
+): void {
+  const ornamentShapes = shapes.filter((s) => s.classes.has("Ornament"));
+  const tremoloShapes = shapes.filter((s) => s.classes.has("TremoloSingleChord"));
+
+  const attach = (shape: RawSvgShape, ornament: BuildOrnament): void => {
+    const sysIdx = findNearestSystemIndex(shape.bbox.cy, systems);
+    const sys = systems[sysIdx];
+    const staff = findNearestStaff(shape.bbox.cy, sys);
+    const ss = staff.staffSpace;
+    let bestNote: SvgNotehead | null = null;
+    let bestDist = Infinity;
+    for (const n of noteheads) {
+      if (n.systemIndex !== sysIdx || n.staff !== staff.staffNumber) continue;
+      const dx = Math.abs(n.cx - shape.bbox.cx);
+      if (dx > ss * 1.5) continue;
+      const dy = Math.abs(n.cy - shape.bbox.cy);
+      const dist = dx * 2 + dy * 0.25;
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestNote = n;
+      }
+    }
+    if (bestNote && !bestNote.ornament) {
+      bestNote.ornament = ornament;
+    }
+  };
+
+  for (const s of ornamentShapes) {
+    const aspect = s.bbox.width / Math.max(1, s.bbox.height);
+    const kind: "trill" | "turn" = s.subpathCount === 1 && aspect >= 1.35 ? "turn" : "trill";
+    attach(s, { kind });
+  }
+
+  for (const s of tremoloShapes) {
+    const marks = Math.max(1, Math.min(3, s.subpathCount || 2));
+    attach(s, { kind: "tremolo", marks });
+  }
+}
+
 /**
  * Semantic-first MuseScore 4 SVG parser with transform matrix flattening,
  * per-staff `staffSpace` calibration, and MS4 geometric fallback when semantic classes are absent.
@@ -1171,6 +1363,7 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
       articulations: [],
       dynamics: [],
       hairpins: [],
+      octaveShifts: [],
       keySigCount: 0,
       timeSigCount: 0,
     };
@@ -1178,6 +1371,7 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
 
   const usedBarlines = assignMeasuresFromBarlines(shapes, systems);
   assignClefs(shapes, systems);
+  const octaveShifts = extractOctaveShifts(shapes, systems);
   assignVoltasAndNavMarkers(shapes, systems);
 
   const keySigCount = shapes.filter((s) => s.classes.has("KeySig")).length;
@@ -1308,8 +1502,8 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
     const sys = systems[sysIdx];
     const staff = findNearestStaff(s.bbox.cy, sys);
     const ss = staff.staffSpace;
-    const clef = sys.clefs.find((c) => c.staff === staff.staffNumber);
-    const { step, octave } = cyToDiatonicPitch(s.bbox.cy, staff, clef?.sign ?? "G");
+    const clefSign = activeClefSignAt(sys, staff.staffNumber, s.bbox.cx);
+    const { step, octave } = cyToDiatonicPitch(s.bbox.cy, staff, clefSign);
 
     // Find matching stem
     let matchedStem: SvgStem | null = null;
@@ -1344,6 +1538,13 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
       refHeight > 0 &&
       s.bbox.width <= refWidth * 0.82 &&
       s.bbox.height <= refHeight * 0.85;
+    const coveringOctaveShift = octaveShifts.find(
+      (o) =>
+        o.systemIndex === sysIdx &&
+        o.staff === staff.staffNumber &&
+        s.bbox.cx >= o.startX - ss * 0.5 &&
+        s.bbox.cx <= o.endX + ss * 0.5
+    );
 
     return {
       id,
@@ -1355,6 +1556,7 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
       bbox: s.bbox,
       step,
       octave,
+      octaveShift: coveringOctaveShift ? coveringOctaveShift.shiftOctaves : undefined,
       stemId: matchedStem ? matchedStem.id : null,
       stemDir,
       beamGroupId: matchedStem ? matchedStem.beamGroupId : null,
@@ -1519,6 +1721,8 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
     };
   });
 
+  attachOrnamentsToNoteheads(shapes, systems, noteheads);
+
   return {
     pageIndex,
     viewBox,
@@ -1533,6 +1737,7 @@ export function parseMs4Svg(svgText: string, pageIndex = 0): ParsedSvgPage {
     articulations,
     dynamics,
     hairpins,
+    octaveShifts,
     keySigCount,
     timeSigCount,
   };

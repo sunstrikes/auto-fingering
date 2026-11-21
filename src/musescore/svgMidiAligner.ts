@@ -13,18 +13,22 @@ import type {
   SvgArc,
   SvgArpeggio,
   SvgArticulation,
+  SvgClef,
   SvgDynamic,
   SvgFingering,
   SvgNavMarker,
   SvgNotehead,
+  SvgOctaveShift,
   SvgVolta,
 } from "./svgParser";
 import type {
   BuildAttributes,
+  BuildClefEvent,
   BuildDynamicEvent,
   BuildMeasure,
   BuildNavMarker,
   BuildNote,
+  BuildOctaveShiftEvent,
   BuildPitch,
   ConversionDiagnostic,
   ConversionOptions,
@@ -47,6 +51,10 @@ export function diatonicToMidi(step: BuildPitch["step"], octave: number): number
   return (octave + 1) * 12 + DIATONIC_SEMITONES[step];
 }
 
+function soundingOctave(svg: SvgNotehead): number {
+  return svg.octave + (svg.octaveShift ?? 0);
+}
+
 interface SvgMeasureData {
   pageIndex: number;
   systemIndex: number;
@@ -57,6 +65,8 @@ interface SvgMeasureData {
   maxX: number;
   noteheads: SvgNotehead[];
   arcs: SvgArc[];
+  midMeasureClefs: SvgClef[];
+  octaveShifts: SvgOctaveShift[];
   repeatStart?: boolean;
   repeatStop?: boolean;
   volta?: SvgVolta;
@@ -103,6 +113,7 @@ function collectSvgMeasures(pages: ParsedSvgPage[]): {
       const sysDynamics = page.dynamics.filter(
         (d) => d.systemIndex === sys.systemIndex
       );
+      const sysOctaveShifts = page.octaveShifts.filter((o) => o.systemIndex === sys.systemIndex);
 
       for (const m of sys.measures) {
         const mNotes = sysNotes.filter((n) => n.measureIndex === m.measureIndex);
@@ -117,6 +128,12 @@ function collectSvgMeasures(pages: ParsedSvgPage[]): {
         const mDynamics = sysDynamics.filter(
           (d) => d.measureIndex === m.measureIndex
         );
+        const mClefs = sys.midMeasureClefs.filter(
+          (c) => c.bbox.cx >= m.minX && c.bbox.cx <= m.maxX
+        );
+        const mOctaves = sysOctaveShifts.filter(
+          (o) => o.endX >= m.minX - ss * 0.5 && o.startX <= m.maxX + ss * 0.5
+        );
         measures.push({
           pageIndex: page.pageIndex,
           systemIndex: sys.systemIndex,
@@ -127,6 +144,8 @@ function collectSvgMeasures(pages: ParsedSvgPage[]): {
           maxX: m.maxX,
           noteheads: mNotes,
           arcs: mArcs,
+          midMeasureClefs: mClefs,
+          octaveShifts: mOctaves,
           repeatStart: m.repeatStart,
           repeatStop: m.repeatStop,
           volta: m.volta,
@@ -294,7 +313,7 @@ function pairColumnWithSlice(
     diff: number;
   }> = [];
   for (const s of svgNotes) {
-    const dMidi = diatonicToMidi(s.step, s.octave);
+    const dMidi = diatonicToMidi(s.step, soundingOctave(s));
     for (const m of remainingMidi) {
       candidates.push({ svg: s, midi: m, diff: Math.abs(dMidi - m.pitch) });
     }
@@ -384,6 +403,101 @@ function attachMeasureFingerings(
       }
     }
   }
+}
+
+function consumeOrnamentBurst(
+  col: VisualColumn,
+  midiSlices: MidiOnsetSlice[],
+  startSliceIdx: number,
+  remainingCols: number,
+  ppq: number,
+  spanEndTick: number
+): {
+  nextSliceIdx: number;
+  ornamentOverrides: Map<number, { principalMidi: RawMidiNote; burstEndTick: number }>;
+  extraMidiCount: number;
+} {
+  const ornNotes = col.noteheads.filter((n) => n.ornament !== undefined);
+  const ornamentOverrides = new Map<number, { principalMidi: RawMidiNote; burstEndTick: number }>();
+  if (ornNotes.length === 0 || midiSlices.length - startSliceIdx <= remainingCols) {
+    return { nextSliceIdx: startSliceIdx + 1, ornamentOverrides, extraMidiCount: 0 };
+  }
+
+  const maxBurstNoteDur = Math.round(ppq * 0.45);
+  const maxTurnTailDur = Math.round(ppq * 0.75);
+  const firstSlice = midiSlices[startSliceIdx];
+  const burstNotesBySvg = new Map<number, RawMidiNote[]>();
+  for (const s of ornNotes) {
+    burstNotesBySvg.set(s.id, []);
+  }
+
+  const matchesAnyOrnament = (m: RawMidiNote): SvgNotehead | null => {
+    let best: SvgNotehead | null = null;
+    let bestDiff = Infinity;
+    for (const s of ornNotes) {
+      const hostMidi = diatonicToMidi(s.step, soundingOctave(s));
+      const diff = Math.abs(m.pitch - hostMidi);
+      if (diff <= 2 && diff < bestDiff) {
+        bestDiff = diff;
+        best = s;
+      }
+    }
+    return best;
+  };
+
+  let sawTailNote = false;
+  for (const m of firstSlice.notes) {
+    if (m.durationTick <= maxTurnTailDur) {
+      const host = matchesAnyOrnament(m);
+      if (host) {
+        burstNotesBySvg.get(host.id)!.push(m);
+        if (m.durationTick > maxBurstNoteDur) sawTailNote = true;
+      }
+    }
+  }
+
+  let k = startSliceIdx + 1;
+  while (!sawTailNote && k < midiSlices.length && midiSlices.length - k > remainingCols - 1) {
+    const sl = midiSlices[k];
+    const allMatchBurst =
+      sl.notes.length > 0 &&
+      sl.notes.every((m) => m.durationTick <= maxTurnTailDur && matchesAnyOrnament(m) !== null);
+    if (!allMatchBurst) break;
+    for (const m of sl.notes) {
+      const host = matchesAnyOrnament(m);
+      if (host) {
+        burstNotesBySvg.get(host.id)!.push(m);
+        if (m.durationTick > maxBurstNoteDur) sawTailNote = true;
+      }
+    }
+    k++;
+  }
+
+  let extraMidiCount = 0;
+  for (const s of ornNotes) {
+    const burst = burstNotesBySvg.get(s.id) ?? [];
+    if (burst.length === 0) continue;
+    extraMidiCount += Math.max(0, burst.length - 1);
+    const hostMidi = diatonicToMidi(s.step, soundingOctave(s));
+    let principal = burst[0];
+    let bestDiff = Math.abs(principal.pitch - hostMidi);
+    for (const m of burst) {
+      const d = Math.abs(m.pitch - hostMidi);
+      if (d < bestDiff) {
+        bestDiff = d;
+        principal = m;
+      }
+    }
+    const lastBurst = burst[burst.length - 1];
+    let burstEndTick =
+      k < midiSlices.length ? midiSlices[k].startTick : Math.min(spanEndTick, lastBurst.endTick);
+    if (k >= midiSlices.length && spanEndTick - burstEndTick <= Math.round(ppq / 8)) {
+      burstEndTick = spanEndTick;
+    }
+    ornamentOverrides.set(s.id, { principalMidi: principal, burstEndTick });
+  }
+
+  return { nextSliceIdx: k, ornamentOverrides, extraMidiCount };
 }
 
 /**
@@ -878,13 +992,14 @@ export function alignSvgsAndMidi(
       const matches = pairColumnWithSlice(firstCol.noteheads, continuingMidiNotes);
       const allValid =
         matches.length === continuingMidiNotes.length &&
-        matches.every((p) => Math.abs(p.midi.pitch - diatonicToMidi(p.svg.step, p.svg.octave)) <= 2);
+        matches.every((p) => Math.abs(p.midi.pitch - diatonicToMidi(p.svg.step, soundingOctave(p.svg))) <= 2);
 
       if (allValid && visualCols.length > midiSlices.length) {
         colOffset = 1;
         for (const { svg, midi } of matches) {
           const hv = handVoiceMap.get(svg.id) ?? { staff: svg.staff, voice: svg.staff === 1 ? "1" : "2" };
-          const dMidi = diatonicToMidi(svg.step, svg.octave);
+          const sOct = soundingOctave(svg);
+          const dMidi = diatonicToMidi(svg.step, sOct);
           const alter = midi.pitch - dMidi;
           const segEnd = Math.min(span.endTick, midi.endTick);
           const dur = Math.max(1, segEnd - span.startTick);
@@ -900,7 +1015,7 @@ export function alignSvgsAndMidi(
             pitch: {
               step: svg.step,
               alter: alter !== 0 ? alter : undefined,
-              octave: svg.octave,
+              octave: sOct,
             },
             duration: dur,
             voice: hv.voice,
@@ -933,6 +1048,7 @@ export function alignSvgsAndMidi(
     // 2. Align remaining visual columns with MIDI onset slices linearly
     let sliceIdx = 0;
     let pendingGraceSnapStart: number | null = null;
+    let ornamentExtraMidiCount = 0;
     for (let cIdx = colOffset; cIdx < visualCols.length; cIdx++) {
       const col = visualCols[cIdx];
       const isGraceCol = col.noteheads.every((n) => n.isGrace);
@@ -954,7 +1070,8 @@ export function alignSvgsAndMidi(
               const segEnd = Math.min(span.endTick, prevPair.midi.endTick);
               const dur = Math.max(1, segEnd - (span.startTick + prevEndOffset));
               const { type, dots } = durationToTypeAndDots(dur, ppq);
-              const dMidi = diatonicToMidi(svg.step, svg.octave);
+              const sOct = soundingOctave(svg);
+              const dMidi = diatonicToMidi(svg.step, sOct);
               const alter = prevPair.midi.pitch - dMidi;
 
               prevPair.buildNote.tieStart = true;
@@ -964,7 +1081,7 @@ export function alignSvgsAndMidi(
                 pitch: {
                   step: svg.step,
                   alter: alter !== 0 ? alter : undefined,
-                  octave: svg.octave,
+                  octave: sOct,
                 },
                 duration: dur,
                 voice: hv.voice,
@@ -991,9 +1108,11 @@ export function alignSvgsAndMidi(
         (a) => a.cx <= col.cx && col.cx - a.cx <= svgM.staffSpace * 2.5
       );
 
-      const slice = midiSlices[sliceIdx];
+      const startSliceIdx = sliceIdx;
+      const slice = midiSlices[startSliceIdx];
       let sliceNotesForCol = slice.notes;
       let arpeggioBaseStartTick: number | null = null;
+      let ornamentOverrides = new Map<number, { principalMidi: RawMidiNote; burstEndTick: number }>();
 
       if (isGraceCol && slice.notes.length > col.noteheads.length) {
         // Simultaneous grace + principal note at same startTick: consume shortest note(s) for grace column
@@ -1017,7 +1136,17 @@ export function alignSvgsAndMidi(
         }
         sliceNotesForCol = collapsed;
       } else {
-        sliceIdx++;
+        const burst = consumeOrnamentBurst(
+          col,
+          midiSlices,
+          startSliceIdx,
+          remainingCols,
+          ppq,
+          span.endTick
+        );
+        ornamentOverrides = burst.ornamentOverrides;
+        ornamentExtraMidiCount += burst.extraMidiCount;
+        sliceIdx = burst.nextSliceIdx;
       }
 
       const pairs = pairColumnWithSlice(col.noteheads, sliceNotesForCol);
@@ -1042,16 +1171,19 @@ export function alignSvgsAndMidi(
       if (!isGraceCol) pendingGraceSnapStart = null;
 
       for (const { svg, midi } of pairs) {
+        const ornOverride = ornamentOverrides.get(svg.id);
+        const resolvedMidi = ornOverride ? ornOverride.principalMidi : midi;
         const hv = handVoiceMap.get(svg.id) ?? { staff: svg.staff, voice: svg.staff === 1 ? "1" : "2" };
-        const dMidi = diatonicToMidi(svg.step, svg.octave);
-        const alter = midi.pitch - dMidi;
+        const sOct = soundingOctave(svg);
+        const dMidi = diatonicToMidi(svg.step, sOct);
+        const alter = resolvedMidi.pitch - dMidi;
         if (Math.abs(alter) > 2) {
           alterAnomalyCount++;
           diagnostics.push({
             level: "warning",
             code: "ALIGNMENT_ALTER_OUT_OF_RANGE",
             measureNumber,
-            message: `Alignment anomaly in measure ${measureNumber}: visual ${svg.step}${svg.octave} paired with MIDI ${midi.pitch} yields alter=${alter}.`,
+            message: `Alignment anomaly in measure ${measureNumber}: visual ${svg.step}${sOct} paired with MIDI ${resolvedMidi.pitch} yields alter=${alter}.`,
           });
         }
 
@@ -1105,16 +1237,18 @@ export function alignSvgsAndMidi(
             svg.cy >= a.minY - svgM.staffSpace * 0.8 &&
             svg.cy <= a.maxY + svgM.staffSpace * 0.8
         );
-        const maxSegEnd = Math.min(span.endTick, midi.endTick);
+        const maxSegEnd = ornOverride
+          ? Math.min(span.endTick, ornOverride.burstEndTick)
+          : Math.min(span.endTick, midi.endTick);
         // If there's an outgoing tie arc inside the measure and no new NoteOn, split duration before nextSliceStart/maxSegEnd
         let segEnd = maxSegEnd;
-        if (hasOutgoingSameMeasureArc && visualCols.length > midiSlices.length) {
+        if (!ornOverride && hasOutgoingSameMeasureArc && visualCols.length > midiSlices.length) {
           const upperBound = Math.min(maxSegEnd, nextSliceStart > segStart ? nextSliceStart : maxSegEnd);
           segEnd = Math.max(segStart + 1, Math.round((segStart + upperBound) / 2));
         }
         const dur = Math.max(1, segEnd - segStart);
         const { type, dots } = durationToTypeAndDots(dur, ppq);
-        const crossMeasureTie = midi.endTick > span.endTick;
+        const crossMeasureTie = !ornOverride && midi.endTick > span.endTick;
 
         const bn: BuildNote = {
           kind: "note",
@@ -1122,7 +1256,7 @@ export function alignSvgsAndMidi(
           pitch: {
             step: svg.step,
             alter: alter !== 0 ? alter : undefined,
-            octave: svg.octave,
+            octave: sOct,
           },
           duration: dur,
           voice: hv.voice,
@@ -1132,6 +1266,7 @@ export function alignSvgsAndMidi(
           tieStart: crossMeasureTie || undefined,
           stem: svg.stemDir ?? undefined,
           arpeggiate: isArpeggiated || undefined,
+          ornament: svg.ornament,
         };
         buildNotes.push(bn);
         pairedBySvgId.set(svg.id, { midi, buildNote: bn });
@@ -1200,9 +1335,55 @@ export function alignSvgsAndMidi(
         staff: maxStaves,
       }));
 
-    const expectedMidiCount = newMidiNotes.length + continuingMidiNotes.length;
-    const svgCount = svgM.noteheads.length;
+    const clefs: BuildClefEvent[] = [];
+    const sortedSvgNotes = [...svgM.noteheads].sort((a, b) => a.cx - b.cx);
+    for (const mc of svgM.midMeasureClefs) {
+      const nextNote =
+        sortedSvgNotes.find((n) => n.staff === mc.staff && n.cx >= mc.bbox.cx && pairedBySvgId.has(n.id)) ??
+        sortedSvgNotes.find((n) => n.cx >= mc.bbox.cx && pairedBySvgId.has(n.id));
+      const tickOffset = nextNote ? (pairedBySvgId.get(nextNote.id)?.buildNote.onsetOffset ?? 0) : span.duration;
+      clefs.push({
+        tickOffset,
+        staff: mc.staff,
+        sign: mc.sign,
+        line: mc.line,
+      });
+    }
+
+    const octaveShifts: BuildOctaveShiftEvent[] = [];
+    for (const os of svgM.octaveShifts) {
+      const covered = sortedSvgNotes.filter(
+        (n) =>
+          n.staff === os.staff &&
+          n.cx >= os.startX - svgM.staffSpace * 0.5 &&
+          n.cx <= os.endX + svgM.staffSpace * 0.5 &&
+          pairedBySvgId.has(n.id)
+      );
+      if (covered.length === 0) continue;
+      const firstBn = pairedBySvgId.get(covered[0].id)!.buildNote;
+      const lastBn = pairedBySvgId.get(covered[covered.length - 1].id)!.buildNote;
+      const startOffset = Math.max(0, firstBn.onsetOffset ?? 0);
+      const stopOffset = Math.min(span.duration, (lastBn.onsetOffset ?? 0) + lastBn.duration);
+      octaveShifts.push({
+        tickOffset: startOffset,
+        type: os.directionType,
+        size: os.size,
+        staff: os.staff,
+      });
+      octaveShifts.push({
+        tickOffset: stopOffset,
+        type: "stop",
+        size: os.size,
+        staff: os.staff,
+      });
+    }
+
     const pairedCount = buildNotes.filter((n) => n.kind === "note").length;
+    const expectedMidiCount = Math.max(
+      ornamentExtraMidiCount > 0 ? pairedCount : 0,
+      newMidiNotes.length + continuingMidiNotes.length - ornamentExtraMidiCount
+    );
+    const svgCount = svgM.noteheads.length;
     let measureConfidence = 1;
     if (expectedMidiCount === 0 && svgCount === 0) {
       measureConfidence = 1;
@@ -1278,6 +1459,8 @@ export function alignSvgsAndMidi(
           number: span.implicit && printedIdx === 0 ? "0" : String(printedIdx + 1),
           implicit: (span.implicit && printedIdx === 0) || undefined,
           duration: span.duration,
+          clefs: clefs.length > 0 ? clefs : undefined,
+          octaveShifts: octaveShifts.length > 0 ? octaveShifts : undefined,
           tempos: tempos.length > 0 ? tempos : undefined,
           pedals: pedals.length > 0 ? pedals : undefined,
           dynamics: dynamics.length > 0 ? dynamics : undefined,

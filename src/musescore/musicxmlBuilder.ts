@@ -1,8 +1,10 @@
 import type {
   BuildAttributes,
+  BuildClefEvent,
   BuildMeasure,
   BuildNavMarker,
   BuildNote,
+  BuildOctaveShiftEvent,
   BuildWedgeEvent,
   DynamicMarking,
   ScoreBuildModel,
@@ -75,6 +77,29 @@ function renderPedalDirection(type: "start" | "change" | "stop", staff: 1 | 2): 
     `          <pedal type="${type}" line="yes"/>`,
     "        </direction-type>",
     `        <staff>${staff}</staff>`,
+    "      </direction>",
+  ];
+}
+
+function renderClefAttributes(clef: BuildClefEvent): string[] {
+  return [
+    "      <attributes>",
+    `        <clef number="${clef.staff}">`,
+    `          <sign>${clef.sign}</sign>`,
+    `          <line>${clef.line}</line>`,
+    "        </clef>",
+    "      </attributes>",
+  ];
+}
+
+function renderOctaveShiftDirection(ev: BuildOctaveShiftEvent): string[] {
+  const placement = ev.type === "down" ? ' placement="above"' : ev.type === "up" ? ' placement="below"' : "";
+  return [
+    `      <direction${placement}>`,
+    "        <direction-type>",
+    `          <octave-shift type="${ev.type}" size="${ev.size}"/>`,
+    "        </direction-type>",
+    `        <staff>${ev.staff}</staff>`,
     "      </direction>",
   ];
 }
@@ -168,6 +193,7 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
     (note.slurStarts?.length ?? 0) > 0 ||
     (note.articulations?.length ?? 0) > 0 ||
     note.arpeggiate ||
+    note.ornament !== undefined ||
     note.fingering !== undefined;
   if (hasNotations) {
     lines.push("        <notations>");
@@ -188,6 +214,17 @@ function renderNote(note: BuildNote, includeStaff: boolean): string[] {
     }
     for (const num of note.slurStarts ?? []) {
       lines.push(`          <slur type="start" number="${num}"/>`);
+    }
+    if (note.ornament) {
+      lines.push("          <ornaments>");
+      if (note.ornament.kind === "trill") {
+        lines.push("            <trill-mark/>");
+      } else if (note.ornament.kind === "turn") {
+        lines.push("            <turn/>");
+      } else if (note.ornament.kind === "tremolo") {
+        lines.push(`            <tremolo type="single">${note.ornament.marks}</tremolo>`);
+      }
+      lines.push("          </ornaments>");
     }
     if (note.fingering !== undefined) {
       lines.push("          <technical>");
@@ -302,6 +339,18 @@ function renderMeasure(measure: BuildMeasure, staves: 1 | 2): string[] {
   }
 
   const pendingDirections: MeasureDirection[] = [];
+  for (const c of measure.clefs ?? []) {
+    pendingDirections.push({
+      tickOffset: c.tickOffset,
+      lines: renderClefAttributes(c),
+    });
+  }
+  for (const os of measure.octaveShifts ?? []) {
+    pendingDirections.push({
+      tickOffset: os.tickOffset,
+      lines: renderOctaveShiftDirection(os),
+    });
+  }
   for (const t of measure.tempos ?? []) {
     pendingDirections.push({
       tickOffset: t.tickOffset,
