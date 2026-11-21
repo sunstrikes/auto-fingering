@@ -97,7 +97,7 @@ export interface BuildNote {
   tieStart?: boolean;
   tieStop?: boolean;
   stem?: "up" | "down";
-  fingering?: number;
+  fingering?: number | string;
   arpeggiate?: boolean;
   measureRest?: boolean;
 }
