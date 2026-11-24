@@ -122,6 +122,8 @@ The regression corpus lives in [`test-corpus/`](test-corpus/) and enforces the a
 - practice behavior: metronome/count-in, proportional tempo scaling, Web MIDI parsing, waiting-mode state machine and A-B looping all have dedicated suites.
 - performance budgets keep the SPEC values locally; on shared CI runners they are scaled by `PERF_BUDGET_SCALE` (default `3`) to absorb hardware jitter. Override the variable locally to reproduce the strict gate.
 
+M1 browser smoke check: start the studio with `npm run dev`, then run `node scripts/check-m1-browser.mjs` in another terminal. It needs a local Chrome installation (`CHROME_PATH` can override the executable) and verifies Waiting Mode with simulated MIDI, cached `.mxl` reload, repair undo/redo, and both backup modes in isolated browser contexts. Set `STUDIO_URL` to use a different local address.
+
 ## Deployment
 
 This is a purely static SPA: run `npm run build` and serve `dist/` from any static host. There is no server-side code and no SPA route fallback needed (the app only uses the root path).
