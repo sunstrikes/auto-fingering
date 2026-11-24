@@ -32,10 +32,9 @@ import {
   buildPracticeRepeatRecommendations,
   createPracticeAnalyticsState,
   evaluatePracticeProgression,
-  MASTERY_REQUIRED_CLEAN_PASSES,
   recordPracticeStepCompleted,
   recordPracticeStepFault,
-  resetMeasureCleanStreak,
+  resetCurrentPracticePass,
   type PracticeAnalyticsState,
   type PracticeRepeatRecommendation,
 } from "./practice/practiceAnalytics";
@@ -94,6 +93,7 @@ import {
   type MetronomeBeatEvent,
 } from "./audio/metronome";
 import {
+  clampSpeedMultiplier,
   createPlaybackEngine,
   type CursorSyncTarget,
   type PlaybackEngine,
@@ -159,6 +159,7 @@ export default function App({
   const [waitingModeEnabled, setWaitingModeEnabled] = useState<boolean>(false);
   useScreenWakeLock(playbackState === "playing" || waitingModeEnabled);
   const [skipGraceNotes, setSkipGraceNotes] = useState<boolean>(false);
+  const [absoluteStrictnessEnabled, setAbsoluteStrictnessEnabled] = useState(false);
   const [strictHoldDurationEnabled, setStrictHoldDurationEnabled] = useState<boolean>(false);
   const [waitingState, setWaitingState] = useState<WaitingModeState>(() => createWaitingModeState(0));
   const waitingStateRef = useRef<WaitingModeState>(waitingState);
@@ -167,10 +168,21 @@ export default function App({
     waitingStateRef.current = next;
     setWaitingState(next);
   };
+  const [flashedWrongMidis, setFlashedWrongMidis] = useState<Set<number>>(() => new Set());
+  const wrongKeyFlashTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const timers = wrongKeyFlashTimers.current;
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
+
   const [practiceAnalytics, setPracticeAnalytics] = useState<PracticeAnalyticsState>(() =>
     createPracticeAnalyticsState()
   );
   const [practiceReportOpen, setPracticeReportOpen] = useState<boolean>(false);
+  const [handsRejoinSpeed, setHandsRejoinSpeed] = useState<{ from: number; to: number } | null>(null);
   const [abLoop, setAbLoop] = useState<AbLoopBounds>(() => createDefaultAbLoopBounds(0));
   const waitingLoopGapActiveRef = useRef<boolean>(false);
   const [audioStatus, setAudioStatus] = useState<AudioEngineStatus>("idle");
@@ -441,6 +453,7 @@ export default function App({
       setAbPickStep("idle");
       setAbPickStartMeasure(null);
       setPracticeAnalytics(createPracticeAnalyticsState());
+      setHandsRejoinSpeed(null);
       setPracticeReportOpen(false);
       playbackEngineRef.current?.setAbLoop(nextLoop);
     }
@@ -881,16 +894,38 @@ export default function App({
     setPracticeReportOpen(false);
   };
 
+  const changePracticeMode = (mode: PracticeMode) => {
+    if (isSingleStaff || mode === effectivePracticeMode) return;
+    if (mode === "both") {
+      const compensatedSpeed = clampSpeedMultiplier(playbackSpeed * 0.88);
+      setPlaybackSpeed(compensatedSpeed);
+      playbackEngineRef.current?.setSpeed(compensatedSpeed);
+      setHandsRejoinSpeed({ from: playbackSpeed, to: compensatedSpeed });
+    } else {
+      setHandsRejoinSpeed(null);
+    }
+    setPracticeMode(mode);
+    setPracticeAnalytics(resetCurrentPracticePass);
+  };
+
+  const handlePracticeModeChange = (mode: PracticeMode) => {
+    if (mode === effectivePracticeMode || isSingleStaff) return;
+    changePracticeMode(mode);
+    if (!scoreDoc || !waitingModeEnabled) return;
+    const nextSteps = buildPracticeSteps(scoreDoc, mode, { skipGraceNotes });
+    const range = findAbLoopStepRange(nextSteps, abLoop);
+    const measure = cursorTarget?.measureIndex ?? selectedMeasureIndex ?? 0;
+    const nextIndex = range?.startStepIndex ?? Math.max(0, nextSteps.findIndex((step) => step.measureIndex >= measure));
+    cancelWaitingLoopGapIfActive(playbackState === "playing");
+    setWaitingStateSync(createWaitingModeState(nextIndex));
+    if (playbackState !== "stopped") {
+      syncToPracticeStep(nextSteps[nextIndex] ?? null, playbackState);
+    }
+  };
+
   const handleStepUpProgressionHand = () => {
     if (!scoreDoc) return;
-    setPracticeMode("both");
-    setPracticeAnalytics((prev) =>
-      resetMeasureCleanStreak(
-        prev,
-        practiceProgression.startMeasureIndex,
-        practiceProgression.endMeasureIndex
-      )
-    );
+    changePracticeMode("both");
     const nextSteps = buildPracticeSteps(scoreDoc, "both", { skipGraceNotes });
     const range = abLoop.enabled ? findAbLoopStepRange(nextSteps, abLoop) : null;
     const startIdx = range
@@ -912,13 +947,7 @@ export default function App({
     const targetSpd = practiceProgression.recommendedNextSpeedMultiplier ?? 1.0;
     setPlaybackSpeed(targetSpd);
     playbackEngineRef.current?.setSpeed(targetSpd);
-    setPracticeAnalytics((prev) =>
-      resetMeasureCleanStreak(
-        prev,
-        practiceProgression.startMeasureIndex,
-        practiceProgression.endMeasureIndex
-      )
-    );
+    setPracticeAnalytics(resetCurrentPracticePass);
     const range = abLoop.enabled ? findAbLoopStepRange(practiceSteps, abLoop) : null;
     const startIdx = range
       ? range.startStepIndex
@@ -945,7 +974,7 @@ export default function App({
         : effectivePracticeMode;
 
     if (options.applySpeedAndMode && rec.recommendedPracticeMode && !isSingleStaff) {
-      setPracticeMode(rec.recommendedPracticeMode);
+      changePracticeMode(rec.recommendedPracticeMode);
     }
     if (options.applySpeedAndMode && rec.recommendedSpeedMultiplier !== null) {
       setPlaybackSpeed(rec.recommendedSpeedMultiplier);
@@ -988,6 +1017,7 @@ export default function App({
 
   const handleResetPracticeAnalytics = () => {
     setPracticeAnalytics(createPracticeAnalyticsState());
+    setHandsRejoinSpeed(null);
     setPracticeReportOpen(false);
   };
 
@@ -1366,24 +1396,15 @@ export default function App({
 
     const passCompleted = result.completedScore || result.loopWrapped;
     const nowSec = getWaitingClockSec();
-    setPracticeAnalytics((prev) => {
-      const next = recordPracticeStepCompleted(prev, {
+    setPracticeAnalytics((prev) =>
+      recordPracticeStepCompleted(prev, {
         completedStep: result.completedStep,
         passCompleted,
         nowSec,
         speedMultiplier: playbackSpeed,
-      });
-      const achievedMasteryStreak = Object.values(next.measureCleanStreakByIndex).some(
-        (s) => s >= MASTERY_REQUIRED_CLEAN_PASSES
-      );
-      if (
-        passCompleted &&
-        (Object.keys(next.stepStatsByIndex).length > 0 || achievedMasteryStreak)
-      ) {
-        setPracticeReportOpen(true);
-      }
-      return next;
-    });
+        practiceMode: effectivePracticeMode,
+      })
+    );
 
     playAccompanimentNotes(result.completedStep);
     if (result.loopWrapped && result.advancedToStep) {
@@ -1432,6 +1453,7 @@ export default function App({
 
     const activeStep = practiceSteps[currentWaiting.currentStepIndex];
     const result = handleWaitingNoteOn(currentWaiting, practiceSteps, midi, abLoop, {
+      absoluteStrictness: absoluteStrictnessEnabled,
       enforceHoldDuration: strictHoldDurationEnabled,
       nowSec: getWaitingClockSec(),
       speedMultiplier: playbackSpeed,
@@ -1439,6 +1461,20 @@ export default function App({
     setWaitingStateSync(result.nextState);
 
     if (result.faultReason === "wrong-note") {
+      if (!absoluteStrictnessEnabled) {
+        // Keep quick grazes visible even if NoteOn and NoteOff render together.
+        const timers = wrongKeyFlashTimers.current;
+        clearTimeout(timers.get(midi));
+        setFlashedWrongMidis((prev) => new Set(prev).add(midi));
+        timers.set(midi, setTimeout(() => {
+          timers.delete(midi);
+          setFlashedWrongMidis((prev) => {
+            const next = new Set(prev);
+            next.delete(midi);
+            return next;
+          });
+        }, 180));
+      }
       setPracticeAnalytics((prev) =>
         recordPracticeStepFault(prev, activeStep, "wrong-note", midi)
       );
@@ -1452,6 +1488,8 @@ export default function App({
     const currentWaiting = waitingStateRef.current;
     const activeStep = practiceSteps[currentWaiting.currentStepIndex];
     const res = handleWaitingNoteOffWithResult(currentWaiting, midi, {
+      absoluteStrictness: absoluteStrictnessEnabled,
+      enforceHoldDuration: strictHoldDurationEnabled,
       sustainPedalPressed,
     });
     setWaitingStateSync(res.nextState);
@@ -1887,10 +1925,7 @@ export default function App({
                     data-testid={`practice-mode-${mode}`}
                     aria-pressed={isActive}
                     disabled={isLockedOut}
-                    onClick={() => {
-                      setPracticeMode(mode);
-                      setWaitingState(createWaitingModeState(0));
-                    }}
+                    onClick={() => handlePracticeModeChange(mode)}
                     className={`whitespace-nowrap rounded-md px-2 py-1 transition ${
                       isActive
                         ? "bg-white text-slate-900 shadow-xs"
@@ -2122,11 +2157,12 @@ export default function App({
               </div>
             )}
 
-            {(totalPracticeFaults > 0 || practiceAnalytics.completedPasses > 0) && (
+            {(totalPracticeFaults > 0 || practiceAnalytics.completedPasses > 0 || handsRejoinSpeed) && (
               <div className="relative">
                 <button
                   type="button"
                   data-testid="practice-report-toggle-btn"
+                  aria-expanded={practiceReportOpen}
                   onClick={() => {
                     setPracticeReportOpen((v) => !v);
                     setRepairPanelOpen(false);
@@ -2143,10 +2179,11 @@ export default function App({
                       repeatRecommendations.length > 0 ? "bg-rose-500" : "bg-emerald-500"
                     }`}
                   />
-                  练习诊断 · 已练 {practiceAnalytics.completedPasses} 遍 · 一次准确率 {practiceAccuracyPercent}%
-                  {practiceProgression.isCleanStreakMet
-                    ? " · 🎉 已达标可推进"
-                    : ` · 通关进度 ${practiceProgression.cleanStreak}/${practiceProgression.requiredCleanPasses} 遍`}
+                  练习状态 · 已练 {practiceAnalytics.completedPasses} 遍 · 一次准确率 {practiceAccuracyPercent}%
+                  {handsRejoinSpeed && " · 合手调速"}
+                  {practiceProgression.isFluent
+                    ? " · 已流畅"
+                    : ""}
                   {repeatRecommendations.length > 0
                     ? ` · ${repeatRecommendations.length} 处易错段`
                     : ""}
@@ -2160,7 +2197,7 @@ export default function App({
                     <div className="mb-2 flex items-center justify-between border-b border-slate-100 pb-1.5">
                       <div>
                         <div className="text-xs font-semibold text-slate-900">
-                          多遍练习失误统计与重复练习建议
+                          练习进展与建议
                         </div>
                         <div className="text-[11px] text-slate-500">
                           已完成 {practiceAnalytics.completedPasses} 遍 · 累计失误 {totalPracticeFaults} 次 · 一次准确率{" "}
@@ -2187,125 +2224,121 @@ export default function App({
                       </div>
                     </div>
 
-                    {/* Active Segment Mastery & Next-Measure Gate Card */}
+                    {handsRejoinSpeed && (
+                      <p className="mb-2 rounded-lg bg-slate-50 p-2 text-[11px] text-slate-700">
+                        切回双手时自动补偿 −12%：{Number(handsRejoinSpeed.from.toFixed(2))}x → {Number(handsRejoinSpeed.to.toFixed(2))}x（受最低速度限制）。
+                      </p>
+                    )}
+
+                    {/* Optional suggestions for the active exercise range */}
                     <div
                       data-testid="practice-progression-card"
                       data-progression-stage={practiceProgression.stage}
-                      data-clean-streak={String(practiceProgression.cleanStreak)}
                       className={`mb-2.5 rounded-lg border p-2.5 text-[11px] ${
-                        practiceProgression.isCleanStreakMet
+                        practiceProgression.isFluent
                           ? "border-emerald-300 bg-emerald-50/80 text-emerald-950"
                           : "border-indigo-200 bg-indigo-50/60 text-slate-800"
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-semibold">
-                          {practiceProgression.headline}
-                        </span>
-                        <span
-                          aria-label="连续零失误遍数进度"
-                          className="inline-flex shrink-0 items-center gap-1"
-                        >
-                          {Array.from(
-                            { length: practiceProgression.requiredCleanPasses },
-                            (_, i) => (
-                              <span
-                                key={i}
-                                className={`h-2 w-3.5 rounded-sm ${
-                                  i < practiceProgression.cleanStreak
-                                    ? "bg-emerald-500"
-                                    : "bg-slate-200"
-                                }`}
-                              />
-                            )
-                          )}
-                        </span>
-                      </div>
+                      <div className="font-semibold">{practiceProgression.headline}</div>
                       <p className="mt-1 leading-relaxed opacity-90">
                         {practiceProgression.detail}
                       </p>
 
-                      {practiceProgression.isCleanStreakMet && (
-                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                          {practiceProgression.stage === "step-up-hand" && (
-                            <button
-                              type="button"
-                              data-testid="progression-restore-hands-btn"
-                              onClick={handleStepUpProgressionHand}
-                              className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700"
-                            >
-                              一键切回「双手合练」
-                            </button>
-                          )}
-                          {practiceProgression.stage === "step-up-speed" && (
-                            <button
-                              type="button"
-                              data-testid="progression-restore-speed-btn"
-                              onClick={handleStepUpProgressionSpeed}
-                              className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700"
-                            >
-                              一键提速至{" "}
-                              {Number(
-                                (
-                                  practiceProgression.recommendedNextSpeedMultiplier ?? 1
-                                ).toFixed(2)
-                              )}
-                              x
-                            </button>
-                          )}
-                          {practiceProgression.canAdvanceToNextMeasure &&
-                            practiceProgression.nextStartMeasureIndex !== null &&
-                            practiceProgression.nextEndMeasureIndex !== null && (
-                              <>
-                                <button
-                                  type="button"
-                                  data-testid="progression-next-measure-btn"
-                                  onClick={() =>
-                                    handleAdvanceProgressionMeasures(
-                                      practiceProgression.nextStartMeasureIndex!,
-                                      practiceProgression.nextEndMeasureIndex!
-                                    )
-                                  }
-                                  className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
-                                    practiceProgression.stage === "ready-next-measure"
-                                      ? "bg-emerald-600 text-white hover:bg-emerald-700"
-                                      : "border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-100"
-                                  }`}
-                                >
-                                  进入第 {practiceProgression.nextStartMeasureIndex + 1}
-                                  {practiceProgression.nextEndMeasureIndex >
-                                  practiceProgression.nextStartMeasureIndex
-                                    ? `–${practiceProgression.nextEndMeasureIndex + 1}`
-                                    : ""}{" "}
-                                  小节 →
-                                </button>
-                                {practiceProgression.bridgeStartMeasureIndex !== null &&
-                                  practiceProgression.bridgeEndMeasureIndex !== null && (
-                                    <button
-                                      type="button"
-                                      data-testid="progression-bridge-measure-btn"
-                                      onClick={() =>
-                                        handleAdvanceProgressionMeasures(
-                                          practiceProgression.bridgeStartMeasureIndex!,
-                                          practiceProgression.bridgeEndMeasureIndex!
-                                        )
-                                      }
-                                      className="rounded-md border border-emerald-300 bg-white px-2 py-1 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100"
-                                    >
-                                      跨小节衔接 (第{" "}
-                                      {practiceProgression.bridgeStartMeasureIndex + 1}–
-                                      {practiceProgression.bridgeEndMeasureIndex + 1} 小节)
-                                    </button>
-                                  )}
-                              </>
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        {practiceProgression.stage === "step-up-hand" && (
+                          <button
+                            type="button"
+                            data-testid="progression-restore-hands-btn"
+                            onClick={handleStepUpProgressionHand}
+                            className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700"
+                          >
+                            一键切回「双手合练」
+                          </button>
+                        )}
+                        {practiceProgression.stage === "step-up-speed" && (
+                          <button
+                            type="button"
+                            data-testid="progression-restore-speed-btn"
+                            onClick={handleStepUpProgressionSpeed}
+                            className="rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-700"
+                          >
+                            一键提速至{" "}
+                            {Number(
+                              (
+                                practiceProgression.recommendedNextSpeedMultiplier ?? 1
+                              ).toFixed(2)
                             )}
-                        </div>
-                      )}
+                            x
+                          </button>
+                        )}
+                        {practiceProgression.canAdvanceToNextMeasure &&
+                          practiceProgression.nextStartMeasureIndex !== null &&
+                          practiceProgression.nextEndMeasureIndex !== null && (
+                            <>
+                              <button
+                                type="button"
+                                data-testid="progression-next-measure-btn"
+                                onClick={() =>
+                                  handleAdvanceProgressionMeasures(
+                                    practiceProgression.nextStartMeasureIndex!,
+                                    practiceProgression.nextEndMeasureIndex!
+                                  )
+                                }
+                                className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                                  practiceProgression.stage === "ready-next-measure"
+                                    ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                                    : "border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-100"
+                                }`}
+                              >
+                                进入第 {practiceProgression.nextStartMeasureIndex + 1}
+                                {practiceProgression.nextEndMeasureIndex >
+                                practiceProgression.nextStartMeasureIndex
+                                  ? `–${practiceProgression.nextEndMeasureIndex + 1}`
+                                  : ""}{" "}
+                                小节 →
+                              </button>
+                              {practiceProgression.bridgeStartMeasureIndex !== null &&
+                                practiceProgression.bridgeEndMeasureIndex !== null && (
+                                  <button
+                                    type="button"
+                                    data-testid="progression-bridge-measure-btn"
+                                    onClick={() =>
+                                      handleAdvanceProgressionMeasures(
+                                        practiceProgression.bridgeStartMeasureIndex!,
+                                        practiceProgression.bridgeEndMeasureIndex!
+                                      )
+                                    }
+                                    className="rounded-md border border-emerald-300 bg-white px-2 py-1 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100"
+                                  >
+                                    跨小节衔接 (第{" "}
+                                    {practiceProgression.bridgeStartMeasureIndex + 1}–
+                                    {practiceProgression.bridgeEndMeasureIndex + 1} 小节)
+                                  </button>
+                                )}
+                            </>
+                          )}
+                      </div>
                     </div>
+
+                    {practiceProgression.sectionPaceSuggestions.length > 0 && (
+                      <div className="mb-2.5 rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-[11px] text-slate-700">
+                        <div className="font-semibold">分段速度建议</div>
+                        <ul className="mt-1 max-h-24 space-y-0.5 overflow-y-auto">
+                          {practiceProgression.sectionPaceSuggestions.map((section) => (
+                            <li key={section.startMeasureIndex}>
+                              第 {section.startMeasureIndex + 1}
+                              {section.endMeasureIndex > section.startMeasureIndex ? `–${section.endMeasureIndex + 1}` : ""}
+                              小节可从 {section.practicedSpeed}x 试着提至 {section.suggestedSpeed}x
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
 
                     {repeatRecommendations.length === 0 ? (
                       <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-2.5 text-[11px] text-emerald-800">
-                        本轮练习全部一次通过，未发现错音或时值保持不足小节！
+                        目前没有需要单独重练的易错段。
                       </div>
                     ) : (
                       <div className="max-h-72 space-y-2 overflow-y-auto">
@@ -2540,7 +2573,9 @@ export default function App({
           practiceMode={effectivePracticeMode}
           showOverhead={showPianoOverhead}
           showFullPalm={showFullPalm}
-          wrongMidis={waitingState.wrongMidis}
+          wrongMidis={waitingModeEnabled && !absoluteStrictnessEnabled && flashedWrongMidis.size > 0
+            ? new Set([...waitingState.wrongMidis, ...flashedWrongMidis])
+            : waitingState.wrongMidis}
           hitMidis={waitingState.hitMidis}
           pressedMidis={pressedMidis}
           sustainPedalPressed={sustainPedalPressed}
@@ -2584,6 +2619,7 @@ export default function App({
         loopGapEnabled={abLoop.loopGap}
         metronomeVolume={metronomeVolume}
         skipGraceNotes={skipGraceNotes}
+        absoluteStrictnessEnabled={absoluteStrictnessEnabled}
         strictHoldDurationEnabled={strictHoldDurationEnabled}
         showStatusBar={showStatusBar}
         showPianoOverhead={showPianoOverhead}
@@ -2628,9 +2664,13 @@ export default function App({
         onToggleLoopGap={handleToggleLoopGap}
         onChangeMetronomeVolume={handleChangeMetronomeVolume}
         onToggleSkipGraceNotes={handleToggleSkipGraceNotes}
+        onToggleAbsoluteStrictness={() => {
+          setAbsoluteStrictnessEnabled((prev) => !prev);
+          setWaitingStateSync(createWaitingModeState(waitingStateRef.current.currentStepIndex));
+        }}
         onToggleStrictHoldDuration={() => {
           setStrictHoldDurationEnabled((prev) => !prev);
-          setWaitingState((prev) => createWaitingModeState(prev.currentStepIndex));
+          setWaitingStateSync(createWaitingModeState(waitingStateRef.current.currentStepIndex));
         }}
         onToggleShowStatusBar={() => setShowStatusBar((v) => !v)}
         onToggleShowPianoOverhead={() => setShowPianoOverhead((v) => !v)}
