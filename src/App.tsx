@@ -46,11 +46,18 @@ import {
   applyScoreRepairToXml,
   type BatchScoreRepairSelection,
 } from "./musicxml/repairWriter";
-import { exportScoreOutput, loadScoreInput, type ExportFormat } from "./musicxml/scoreSession";
+import { exportScoreOutput, loadScoreInput, type ExportFormat, type LoadedScoreSession } from "./musicxml/scoreSession";
 import { applyAnchorOverridesToSlices, localResolveFingering } from "./solver/localResolve";
 import type { PriorLoadProgress } from "./prior/loader";
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
-import { computeNextAnchorState, useStudioStore } from "./store/useStudioStore";
+import { computeNextAnchorState, useStudioStore, type StudioState, type StudioSnapshot } from "./store/useStudioStore";
+import { GLOBAL_WORKSPACE, type PracticeStoragePort, type WorkspacePrefs } from "./persistence/storagePort";
+import {
+  applyDraft, newPieceProfile, readCachedScore, remapAnchorState, resolvePieceOpen, type AnchorState, type OpenChoice,
+} from "./persistence/studioPersistence";
+import { usePracticePersistence } from "./persistence/usePracticePersistence";
+import { getScoreIdentity } from "./persistence/fingerprint";
+import { PracticeBackupPanel, ScoreOpenChoice } from "./components/PracticeBackupPanel";
 import { buildMeasureRiskSummaries, type MeasureGeometry } from "./components/MarginRiskGutter";
 import { NoteAnchorPopover, type PopoverAnchorRect } from "./components/NoteAnchorPopover";
 import { ScoreRepairPanel } from "./components/ScoreRepairPanel";
@@ -136,6 +143,7 @@ export interface AppProps {
   scoreRendererFactory?: ScoreRendererFactory;
   audioDeps?: AppAudioDeps;
   midiDeps?: AppMidiDeps;
+  practiceStorage?: PracticeStoragePort | null;
 }
 
 export default function App({
@@ -143,6 +151,7 @@ export default function App({
   scoreRendererFactory,
   audioDeps,
   midiDeps,
+  practiceStorage,
 }: AppProps) {
   const solverClientRef = useRef<SolverClient | null>(null);
   const audioEngineRef = useRef<PianoAudioEngine | null>(null);
@@ -250,6 +259,26 @@ export default function App({
   const selectedMeasureIndex = useStudioStore((s) => s.selectedMeasureIndex);
   const status = useStudioStore((s) => s.status);
   const errorMsg = useStudioStore((s) => s.errorMsg);
+
+  const durablePrefs = useMemo(() => ({
+    handSpanProfile, speedMultiplier: playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
+    absoluteStrictnessEnabled, strictHoldDurationEnabled,
+  }), [handSpanProfile, playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
+    absoluteStrictnessEnabled, strictHoldDurationEnabled]);
+  const persistence = usePracticePersistence(practiceStorage, durablePrefs, playbackState === "playing");
+  const openSequence = useRef(0);
+  const [backupOpen, setBackupOpen] = useState(false);
+  const [openChoice, setOpenChoice] = useState<OpenChoice | null>(null);
+  const decision = useRef<((answer: boolean) => void) | null>(null);
+  const answerOpenChoice = (answer: boolean) => {
+    decision.current?.(answer);
+    decision.current = null;
+    setOpenChoice(null);
+  };
+  const chooseScoreOpen = (choice: OpenChoice) => new Promise<boolean>((resolve) => {
+    decision.current = resolve;
+    setOpenChoice(choice);
+  });
 
   const [library, setLibrary] = useState<string[]>([]);
   const refreshLibrary = async () => {
@@ -383,29 +412,14 @@ export default function App({
     };
   }, [midiDeps]);
 
-  const solveAndRender = async (
-    nextDoc: ScoreDocument,
-    nextRawXml: string,
-    nextFileName: string,
-    nextFormat: ExportFormat,
-    nextMxl: MxlContainer | undefined,
-    profile: HandSpanProfile,
-    ignoreAnchors: boolean,
-    resetHistory: boolean
+  const solveScore = async (
+    score: ScoreDocument, profile: HandSpanProfile, ignoreAnchors: boolean, state: AnchorState,
   ) => {
-    if (!solverClientRef.current) return;
-    playbackEngineRef.current?.stop();
+    const client = solverClientRef.current;
+    if (!client) throw new SolverCancelledError();
     const store = useStudioStore.getState();
     store.setStatus("正在计算指法...");
-
-    const slicesToSolve = resetHistory
-      ? nextDoc.onsetSlices
-      : applyAnchorOverridesToSlices(
-          nextDoc.onsetSlices,
-          store.anchors,
-          store.removedRawAnchorUids,
-          ignoreAnchors
-        );
+    const slicesToSolve = applyAnchorOverridesToSlices(score.onsetSlices, state.anchors, state.removedRawAnchorUids, ignoreAnchors);
 
     const isModelAssist = store.priorMode === "model-assist";
     if (isModelAssist) {
@@ -415,8 +429,8 @@ export default function App({
 
     let result;
     try {
-      result = await solverClientRef.current.solve(slicesToSolve, profile, {
-        ignoreExistingFingerings: resetHistory ? ignoreAnchors : false,
+      result = await client.solve(slicesToSolve, profile, {
+        ignoreExistingFingerings: false,
         ...(isModelAssist
           ? {
               priorMode: store.priorMode,
@@ -438,6 +452,21 @@ export default function App({
       setPriorFallbackReason(null);
     }
 
+    return result;
+  };
+
+  const solveAndRender = async (
+    nextDoc: ScoreDocument,
+    nextRawXml: string,
+    nextFileName: string,
+    nextFormat: ExportFormat,
+    nextMxl: MxlContainer | undefined,
+    profile: HandSpanProfile,
+    ignoreAnchors: boolean,
+  ) => {
+    playbackEngineRef.current?.stop();
+    const store = useStudioStore.getState();
+    const result = await solveScore(nextDoc, profile, ignoreAnchors, store);
     store.setSolvedScore({
       scoreDoc: nextDoc,
       rawXmlText: nextRawXml,
@@ -445,18 +474,143 @@ export default function App({
       fileName: nextFileName,
       exportFormat: nextFormat,
       solveResult: result,
-      resetHistory,
     });
-    if (resetHistory) {
-      const nextLoop = createDefaultAbLoopBounds(nextDoc.measureCount);
-      setAbLoop(nextLoop);
-      setAbPickStep("idle");
-      setAbPickStartMeasure(null);
-      setPracticeAnalytics(createPracticeAnalyticsState());
-      setHandsRejoinSpeed(null);
-      setPracticeReportOpen(false);
-      playbackEngineRef.current?.setAbLoop(nextLoop);
+  };
+
+  const openScoreSession = async (
+    session: LoadedScoreSession, name: string, generation: number, cachedPrefs?: WorkspacePrefs,
+  ) => {
+    const { storage } = persistence;
+    const store = useStudioStore.getState();
+    const current = () => {
+      if (openSequence.current !== generation) throw new SolverCancelledError();
+    };
+    current();
+    let identity: Awaited<ReturnType<typeof resolvePieceOpen>> | undefined;
+    if (storage) {
+      // A file should still open if browser storage is unavailable or blocked.
+      try {
+        await persistence.persistCurrent();
+        current();
+        identity = await resolvePieceOpen(storage, session.scoreDoc, chooseScoreOpen, cachedPrefs);
+      } catch (error) {
+        if (cachedPrefs || error instanceof SolverCancelledError) throw error;
+      }
     }
+    current();
+    const saved = identity?.prefs;
+    const profile = saved?.handSpanProfile ?? store.handSpanProfile;
+    const ignore = saved?.ignoreExistingFingerings ?? store.ignoreExistingFingerings;
+    const score = session.scoreDoc.isSingleStaff && saved?.singleStaffHand &&
+      session.scoreDoc.defaultSingleStaffHand !== saved.singleStaffHand
+      ? parseMusicXml(session.rawXmlText, { singleStaffHandOverride: saved.singleStaffHand }) : session.scoreDoc;
+    const state = applyDraft(score, identity?.draft);
+    const result = await solveScore(score, profile, ignore, state);
+    const repair = cachedPrefs?.repairEdge;
+    let restoredHistory: StudioState["history"] | undefined;
+    if (storage && repair) {
+      try {
+        const other = await readCachedScore(storage, repair.otherCacheKey, cachedPrefs);
+        current();
+        if (other) {
+          const otherScore = other.session.scoreDoc;
+          const anchors = applyDraft(otherScore, repair.otherDraft);
+          const solved = await solveScore(otherScore, profile, ignore, anchors);
+          const snapshot: StudioSnapshot = { rawXmlText: other.session.rawXmlText, scoreDoc: otherScore, ...anchors,
+            solveResult: solved, fingerByNoteUid: solved.fingerByNoteUid, lastDiff: [] };
+          restoredHistory = repair.direction === "undo" ? { past: [snapshot], future: [] } : { past: [], future: [snapshot] };
+        }
+      } catch (error) {
+        if (error instanceof SolverCancelledError) throw error;
+        // Missing or damaged alternate must not prevent reopening the active score.
+      }
+    }
+    current();
+    const loop = saved?.abLoop ? normalizeAbLoopBounds(saved.abLoop, score.measureCount)
+      : createDefaultAbLoopBounds(score.measureCount);
+    if (saved?.speedMultiplier !== undefined) {
+      const speed = clampSpeedMultiplier(saved.speedMultiplier);
+      setPlaybackSpeed(speed);
+      playbackEngineRef.current?.setSpeed(speed);
+    }
+    if (saved?.practiceMode) setPracticeMode(saved.practiceMode);
+    if (saved?.absoluteStrictnessEnabled !== undefined) setAbsoluteStrictnessEnabled(saved.absoluteStrictnessEnabled);
+    if (saved?.strictHoldDurationEnabled !== undefined) setStrictHoldDurationEnabled(saved.strictHoldDurationEnabled);
+    store.setHandSpanProfile(profile);
+    store.setIgnoreExistingFingerings(ignore);
+    setAbLoop(loop);
+    setAbPickStep("idle");
+    setAbPickStartMeasure(null);
+    setPracticeAnalytics(createPracticeAnalyticsState());
+    setHandsRejoinSpeed(null);
+    setPracticeReportOpen(false);
+    playbackEngineRef.current?.setAbLoop(loop);
+    if (storage) persistence.activate(identity?.profile ?? newPieceProfile(score), saved?.freePracticeMinutes);
+    store.setSolvedScore({ scoreDoc: score, rawXmlText: session.rawXmlText, mxlContainer: session.mxlContainer,
+      fileName: name, exportFormat: session.sourceFormat, solveResult: result, resetHistory: true,
+      restored: { ...state, history: restoredHistory } });
+  };
+
+  const restoreLastScore = async (generation: number) => {
+    const { storage } = persistence;
+    if (!storage) return;
+    const last = await storage.get("workspacePrefs", GLOBAL_WORKSPACE);
+    if (!last?.lastOpenedPieceId || generation !== openSequence.current) return;
+    const prefs = await storage.get("workspacePrefs", last.lastOpenedPieceId);
+    if (!prefs?.scoreFingerprint || generation !== openSequence.current) return;
+    const cached = await readCachedScore(storage, prefs.scoreFingerprint, prefs);
+    if (!cached || generation !== openSequence.current) return;
+    await openScoreSession(cached.session, cached.blob.fileName, generation, prefs);
+  };
+  const restoreRef = useRef(restoreLastScore);
+  restoreRef.current = restoreLastScore;
+  useEffect(() => {
+    if (!persistence.storage) return;
+    const generation = ++openSequence.current;
+    void restoreRef.current(generation).catch((error) => {
+      if (generation === openSequence.current && !(error instanceof SolverCancelledError)) {
+        useStudioStore.getState().setStatus("暂时无法恢复缓存乐谱，请重新上传乐谱");
+      }
+    });
+    return () => { ++openSequence.current; };
+  }, [persistence.storage]);
+
+  const handleBackupImported = async () => {
+    if (!useStudioStore.getState().scoreDoc) {
+      const generation = ++openSequence.current;
+      try { await restoreLastScore(generation); } catch (error) {
+        if (!(error instanceof SolverCancelledError)) {
+          useStudioStore.getState().setStatus("练习数据已导入，请重新上传乐谱");
+        }
+      }
+    }
+  };
+
+  const handleArchivePiece = async () => {
+    const { storage } = persistence;
+    const active = persistence.getActive();
+    const state = useStudioStore.getState();
+    if (!storage || !active || !state.rawXmlText || !state.scoreDoc) return;
+    playbackEngineRef.current?.stop();
+    await persistence.persistCurrent();
+    const score = parseMusicXml(state.rawXmlText, { singleStaffHandOverride: state.singleStaffHand });
+    const identity = getScoreIdentity(score);
+    const restarted = newPieceProfile(score, identity);
+    const result = await solveScore(score, state.handSpanProfile, state.ignoreExistingFingerings, applyDraft(score));
+    const now = Date.now();
+    await storage.commit({
+      pieceProfiles: [{ ...active.profile, archivedAtMs: now }, restarted],
+      workspacePrefs: [
+        { ...durablePrefs, scopeKey: restarted.pieceId, scoreFingerprint: identity.fingerprint, freePracticeMinutes: 0, updatedAtMs: now },
+        { scopeKey: GLOBAL_WORKSPACE, lastOpenedPieceId: restarted.pieceId, updatedAtMs: now },
+      ],
+    });
+    setPracticeAnalytics(createPracticeAnalyticsState());
+    setPracticeReportOpen(false);
+    setHandsRejoinSpeed(null);
+    persistence.activate(restarted);
+    state.setSolvedScore({ scoreDoc: score, rawXmlText: state.rawXmlText, mxlContainer: state.mxlContainer,
+      fileName: state.fileName, exportFormat: state.exportFormat, solveResult: result, resetHistory: true });
   };
 
   const reSolveScore = async (
@@ -481,7 +635,6 @@ export default function App({
         store.mxlContainer,
         profile,
         ignoreAnchors,
-        false
       );
     } catch (err) {
       if (err instanceof SolverCancelledError) {
@@ -512,6 +665,8 @@ export default function App({
 
   const loadFile = async (file: File, saveToLibrary: boolean) => {
     if (!solverClientRef.current) return;
+    const generation = ++openSequence.current;
+    answerOpenChoice(false);
     if (saveToLibrary) {
       void fetch(`/api/scores/${encodeURIComponent(file.name)}`, { method: "PUT", body: file })
         .then(() => refreshLibrary())
@@ -529,18 +684,9 @@ export default function App({
         ? await loadScoreInput({ fileName: file.name, bytes: await file.arrayBuffer() })
         : await loadScoreInput({ fileName: file.name, text: await file.text() });
 
-      await solveAndRender(
-        session.scoreDoc,
-        session.rawXmlText,
-        file.name,
-        session.sourceFormat,
-        session.mxlContainer,
-        store.handSpanProfile,
-        store.ignoreExistingFingerings,
-        true
-      );
+      await openScoreSession(session, file.name, generation);
     } catch (err) {
-      if (err instanceof SolverCancelledError) {
+      if (err instanceof SolverCancelledError || generation !== openSequence.current) {
         return;
       }
       store.clearScoreErrorState(err instanceof Error ? err.message : String(err));
@@ -1156,17 +1302,9 @@ export default function App({
     repairSummary: string
   ) => {
     const store = useStudioStore.getState();
-    if (!solverClientRef.current) return;
+    if (!solverClientRef.current || !store.scoreDoc) return;
 
-    const nextAnchors: Record<string, AnchorOverride> = {};
-    for (const [uid, ov] of Object.entries(store.anchors)) {
-      if (nextDoc.noteElementsByUid.has(uid)) {
-        nextAnchors[uid] = ov;
-      }
-    }
-    const nextRemoved = store.removedRawAnchorUids.filter((uid) =>
-      nextDoc.noteElementsByUid.has(uid)
-    );
+    const { anchors: nextAnchors, removedRawAnchorUids: nextRemoved } = remapAnchorState(store.scoreDoc, nextDoc, store);
     const slicesToSolve = applyAnchorOverridesToSlices(
       nextDoc.onsetSlices,
       nextAnchors,
@@ -1887,6 +2025,12 @@ export default function App({
               />
             </label>
 
+            {persistence.storage && (
+              <button type="button" data-testid="practice-backup-open"
+                className="shrink-0 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-50"
+                onClick={() => { setBackupOpen(true); persistence.dismissReminder(); }}>练习备份</button>
+            )}
+
             {library.length > 0 && (
               <select
                 aria-label="已上传乐谱"
@@ -2036,6 +2180,21 @@ export default function App({
       </header>
 
       <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-1.5 px-2.5 pt-1.5 pb-1 sm:px-4">
+        {persistence.backupReminder && (
+          <aside data-testid="practice-backup-reminder" className="flex shrink-0 items-center gap-2 rounded-md bg-amber-50 px-3 py-1 text-xs text-amber-900">
+            <span>浏览器可能会清理本地数据，建议定期备份练习记录。</span>
+            <button type="button" className="underline" onClick={() => { setBackupOpen(true); persistence.dismissReminder(); }}>备份</button>
+            <button type="button" className="underline" onClick={persistence.dismissReminder}>稍后</button>
+          </aside>
+        )}
+        {persistence.saveError && <p role="status" className="shrink-0 rounded-md bg-amber-50 px-3 py-1 text-xs text-amber-900">
+          无法写入本地练习数据，请检查浏览器存储设置或备份已有记录。
+        </p>}
+        {backupOpen && persistence.storage && <PracticeBackupPanel storage={persistence.storage}
+          onClose={() => setBackupOpen(false)} flush={persistence.persistCurrent} onImported={handleBackupImported}
+          onArchive={scoreDoc && persistence.getActive() ? handleArchivePiece : undefined} />}
+        {openChoice && <ScoreOpenChoice choice={openChoice} onAnswer={answerOpenChoice} />}
+
         {showStatusBar && (
           <div
             data-testid="top-status-warning-bar"
