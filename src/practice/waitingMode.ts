@@ -28,10 +28,11 @@ export interface WaitingStepAdvanceResult {
 export type WaitingNoteOnResult = WaitingStepAdvanceResult;
 
 export interface WaitingNoteOnOptions {
+  /** Clear all hits and require a full release after a wrong pitch (default: false). */
+  absoluteStrictness?: boolean;
   /**
    * Whether the active step requires holding keys for `requiredHoldSec` before advancing.
-   * Defaults to `false` when omitted so pure pitch-matching callers remain instant,
-   * or `true` when `nowSec` / `requiredHoldRatio` is provided.
+   * Defaults to `false` regardless of whether a clock or hold ratio is supplied.
    */
   enforceHoldDuration?: boolean;
   /**
@@ -49,6 +50,8 @@ export interface WaitingNoteOnOptions {
 }
 
 export interface WaitingNoteOffOptions {
+  absoluteStrictness?: boolean;
+  enforceHoldDuration?: boolean;
   /**
    * Whether the sustain pedal (CC64) is currently depressed; when true, releasing a key
    * during `isHolding` does not invalidate the hold duration.
@@ -328,13 +331,9 @@ function advanceCompletedStep(
 }
 
 /**
- * Processes a `NoteOn` event against the active `PracticeStep` under **Absolute Strictness**:
- * 1. Pressing any unexpected pitch taints the current step (`tainted = true`), clears `hitMidis`,
- *    cancels any in-progress duration hold, and requires ALL pressed keys (`activeStepMidis`)
- *    to be released before retrying the step.
- * 2. When `options.enforceHoldDuration` is enabled and the step has a positive `requiredHoldSec`,
- *    completing all expected pitches enters the `isHolding` phase (`holdProgress` 0 -> 1) and
- *    advances only once held for `requiredHoldSec` without wrong notes or early release.
+ * Accumulates target pitches for the active Practice Step. Wrong pitches are reported
+ * without resetting hits unless Absolute Strictness is enabled. Strict Hold Duration
+ * separately requires the complete chord to be held before advancing.
  */
 export function handleWaitingNoteOn(
   state: WaitingModeState,
@@ -361,22 +360,23 @@ export function handleWaitingNoteOn(
 
   const isExpected = step.expectedMidis.includes(midi);
 
-  // Absolute strictness: any wrong note immediately taints the step and invalidates prior hits
   if (!isExpected) {
     const nextWrong = new Set(state.wrongMidis);
     nextWrong.add(midi);
     return {
       nextState: {
         ...state,
-        hitMidis: new Set<number>(),
         wrongMidis: nextWrong,
         activeStepMidis: nextActive,
-        tainted: true,
-        lastResetReason: "wrong-note",
-        isHolding: false,
-        holdProgress: 0,
-        requiredHoldSec: 0,
-        holdStartedAtSec: null,
+        ...(options.absoluteStrictness && {
+          hitMidis: new Set<number>(),
+          tainted: true,
+          lastResetReason: "wrong-note",
+          isHolding: false,
+          holdProgress: 0,
+          requiredHoldSec: 0,
+          holdStartedAtSec: null,
+        }),
       },
       matched: false,
       completedStep: null,
@@ -387,9 +387,8 @@ export function handleWaitingNoteOn(
     };
   }
 
-  // If the step is still tainted (user has not released all keys from a failed attempt)
-  // or any wrong key is still held down, block hit accumulation until full release.
-  if (state.tainted || state.wrongMidis.size > 0) {
+  // An opt-in reset or failed hold blocks new hits until the hand is released.
+  if (state.tainted) {
     return {
       nextState: {
         ...state,
@@ -411,7 +410,17 @@ export function handleWaitingNoteOn(
   const nextHit = new Set(state.hitMidis);
   nextHit.add(midi);
 
-  const isStepComplete = step.expectedMidis.every((expected) => nextHit.has(expected));
+  const requiredHoldSec = options.enforceHoldDuration
+    ? computeStepRequiredHoldSec(
+        step,
+        options.speedMultiplier ?? 1.0,
+        options.requiredHoldRatio ?? DEFAULT_HOLD_DURATION_RATIO
+      )
+    : 0;
+
+  const isStepComplete = step.expectedMidis.every((expected) =>
+    nextHit.has(expected) && (requiredHoldSec === 0 || state.isHolding || nextActive.has(expected))
+  );
   if (!isStepComplete) {
     return {
       nextState: {
@@ -428,15 +437,6 @@ export function handleWaitingNoteOn(
       faultReason: null,
     };
   }
-
-  const enforceHold = options.enforceHoldDuration ?? false;
-  const requiredHoldSec = enforceHold
-    ? computeStepRequiredHoldSec(
-        step,
-        options.speedMultiplier ?? 1.0,
-        options.requiredHoldRatio ?? DEFAULT_HOLD_DURATION_RATIO
-      )
-    : 0;
 
   if (requiredHoldSec > 0) {
     const nowSec = options.nowSec ?? 0;
@@ -525,8 +525,8 @@ export function advanceWaitingHoldProgress(
  * - Releases the pitch from `wrongMidis` and `activeStepMidis`.
  * - Under Absolute Strictness, if `tainted` is true, `tainted` clears ONLY when all keys in
  *   `activeStepMidis` have been released (`nextActive.size === 0`).
- * - If a required chord pitch is released before all chord notes are pressed, it is removed from
- *   `hitMidis` so chords must be held simultaneously.
+ * - In either strict mode, a chord pitch released before the chord is complete is no longer
+ *   a hit. In friendly mode it remains matched for the rest of the step.
  * - If the step is currently in `isHolding` (waiting for duration completion) and an expected key
  *   is released early (while sustain pedal is NOT pressed), the hold fails with `"early-release"`
  *   and taints the step (requiring full release and re-strike).
@@ -582,9 +582,8 @@ export function handleWaitingNoteOffWithResult(
     };
   }
 
-  // Normal simultaneous chord requirement: releasing a hit note before the step completes removes it from hitMidis
   const nextHit = new Set(state.hitMidis);
-  if (!state.isHolding && nextHit.has(midi)) {
+  if (!state.isHolding && (options.absoluteStrictness || options.enforceHoldDuration)) {
     nextHit.delete(midi);
   }
 

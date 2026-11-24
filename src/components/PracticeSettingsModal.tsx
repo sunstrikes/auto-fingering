@@ -28,6 +28,7 @@ export interface PracticeSettingsModalProps {
   loopGapEnabled?: boolean;
   metronomeVolume: number;
   skipGraceNotes?: boolean;
+  absoluteStrictnessEnabled?: boolean;
   strictHoldDurationEnabled?: boolean;
   showStatusBar?: boolean;
   showPianoOverhead?: boolean;
@@ -47,6 +48,7 @@ export interface PracticeSettingsModalProps {
   onToggleLoopGap?: () => void;
   onChangeMetronomeVolume: (volume: number) => void;
   onToggleSkipGraceNotes?: () => void;
+  onToggleAbsoluteStrictness?: () => void;
   onToggleStrictHoldDuration?: () => void;
   onToggleShowStatusBar?: () => void;
   onToggleShowPianoOverhead?: () => void;
@@ -104,7 +106,8 @@ export function PracticeSettingsModal({
   loopGapEnabled = false,
   metronomeVolume,
   skipGraceNotes = false,
-  strictHoldDurationEnabled = true,
+  absoluteStrictnessEnabled = false,
+  strictHoldDurationEnabled = false,
   showStatusBar = true,
   showPianoOverhead = true,
   showFullPalm = true,
@@ -123,6 +126,7 @@ export function PracticeSettingsModal({
   onToggleLoopGap,
   onChangeMetronomeVolume,
   onToggleSkipGraceNotes,
+  onToggleAbsoluteStrictness,
   onToggleStrictHoldDuration,
   onToggleShowStatusBar,
   onToggleShowPianoOverhead,
@@ -361,11 +365,28 @@ export function PracticeSettingsModal({
             />
           </div>
 
+          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div>
+              <div className="font-medium text-slate-900">等待模式绝对严格重置</div>
+              <div className="text-[11px] text-slate-500">
+                默认保留已弹对的音。开启后，弹错音会清空当前和弦的命中，需松开所有键重弹。
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              data-testid="absolute-strictness-toggle"
+              aria-label="等待模式绝对严格重置"
+              checked={absoluteStrictnessEnabled}
+              onChange={() => onToggleAbsoluteStrictness?.()}
+              className="h-4 w-4 accent-blue-600"
+            />
+          </label>
+
           <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
             <div>
               <div className="font-medium text-slate-900">等待模式严格时值保持验证</div>
               <div className="text-[11px] text-slate-500">
-                按下正确琴键后需按住达到音符理论时值的 80% 才推进下一步；提前松手或误触其它键需松开所有键重弹
+                按下正确琴键后需按住达到音符理论时值的 80% 才推进下一步；提前松手需松开所有键重弹。
               </div>
             </div>
             <input
