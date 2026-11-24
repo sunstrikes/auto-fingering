@@ -273,6 +273,55 @@ function findChordTail(noteEl: Element): Element {
   return tail;
 }
 
+function findChordLead(noteEl: Element): Element {
+  let lead = noteEl;
+  for (let cursor = noteEl.previousElementSibling;
+    findDirectChild(lead, "chord") && cursor;
+    cursor = cursor.previousElementSibling
+  ) {
+    if (cursor.localName === "backup" || cursor.localName === "forward") break;
+    if (cursor.localName === "note") lead = cursor;
+  }
+  return lead;
+}
+
+function noteDuration(noteEl: Element): number {
+  return Number(textOfDirectChild(noteEl, "duration") ?? "0");
+}
+
+function insertTimeShiftAfter(
+  xmlDoc: Document,
+  measure: Element,
+  after: Element | null,
+  kind: "forward" | "backup",
+  duration: number,
+): Element {
+  const shift = createNsElement(xmlDoc, kind);
+  const durationEl = createNsElement(xmlDoc, "duration");
+  durationEl.textContent = String(duration);
+  shift.appendChild(durationEl);
+  insertAfter(measure, shift, after);
+  return shift;
+}
+
+/** Leave the outer voice's cursor unchanged when the removed lead was longer. */
+function promoteChordMember(xmlDoc: Document, lead: Element): Element | null {
+  const first = nextNoteSibling(lead);
+  const measure = lead.parentElement;
+  if (!measure || !first || !findDirectChild(first, "chord")) return null;
+
+  // MusicXML requires chord members to be no longer than the lead.
+  let promoted = first;
+  for (let note = nextNoteSibling(first); note && findDirectChild(note, "chord"); note = nextNoteSibling(note)) {
+    if (noteDuration(note) > noteDuration(promoted)) promoted = note;
+  }
+  if (promoted !== first) measure.insertBefore(promoted, first);
+  promoted.removeChild(findDirectChild(promoted, "chord")!);
+  const tail = findChordTail(promoted);
+  const gap = noteDuration(lead) - noteDuration(promoted);
+  return gap > 0 ? insertTimeShiftAfter(xmlDoc, measure, tail, "forward", gap) : tail;
+}
+
 function convertNoteElToRest(xmlDoc: Document, noteEl: Element): void {
   const tagsToRemove = [
     "grace",
@@ -321,19 +370,22 @@ function removeNoteSafely(
   event: NoteEvent | undefined,
   freshDoc: ScoreDocument,
   cascadeTieChain: boolean
-): void {
-  if (!noteEl.parentNode) return;
+): Element | null {
+  if (!noteEl.parentNode) return null;
+  let cursorAfter: Element | null;
   const hasChord = findDirectChild(noteEl, "chord") !== null;
   if (hasChord) {
+    const tail = findChordTail(noteEl);
+    cursorAfter = tail === noteEl ? noteEl.previousElementSibling : tail;
     noteEl.parentNode.removeChild(noteEl);
   } else {
-    const nextNote = nextNoteSibling(noteEl);
-    const nextChordEl = nextNote ? findDirectChild(nextNote, "chord") : null;
-    if (nextNote && nextChordEl) {
-      nextNote.removeChild(nextChordEl);
+    const promotedTail = promoteChordMember(xmlDoc, noteEl);
+    if (promotedTail) {
+      cursorAfter = promotedTail;
       noteEl.parentNode.removeChild(noteEl);
     } else {
       convertNoteElToRest(xmlDoc, noteEl);
+      cursorAfter = noteEl;
     }
   }
 
@@ -348,6 +400,7 @@ function removeNoteSafely(
       }
     }
   }
+  return cursorAfter;
 }
 
 function applyPitchToNoteEl(
@@ -611,28 +664,17 @@ export function applyScoreRepairToXml(
           if (oldStaffEl) cloned.removeChild(oldStaffEl);
         }
 
+        removeNoteSafely(xmlDoc, noteEl, event, freshDoc, false);
         const chordTail = findChordTail(targetAnchorEl);
         const targetParent = chordTail.parentElement!;
-        removeNoteSafely(xmlDoc, noteEl, event, freshDoc, false);
         insertAfter(targetParent, cloned, chordTail);
       } else if (partCount === 1 && noteEl.parentElement) {
         const measureEl = noteEl.parentElement;
         const partEl = measureEl.parentElement;
         if (!partEl) continue;
 
-        const durText = textOfDirectChild(noteEl, "duration") ?? "1";
-        const hasChord = findDirectChild(noteEl, "chord") !== null;
-        const nextNote = nextNoteSibling(noteEl);
-        const nextHasChord = nextNote !== null && findDirectChild(nextNote, "chord") !== null;
-        const isSolo = !hasChord && !nextHasChord;
-
-        let anchorAfter: Element | null;
-        if (isSolo) {
-          anchorAfter = noteEl; // convertNoteElToRest keeps noteEl in-place as a <rest/>
-        } else {
-          const tail = findChordTail(noteEl);
-          anchorAfter = tail === noteEl ? noteEl.previousElementSibling : tail;
-        }
+        const advance = noteDuration(findChordLead(noteEl));
+        const ownDuration = noteDuration(noteEl);
 
         const cloned = noteEl.cloneNode(true) as Element;
         for (const tag of ["chord", "stem", "beam", "accidental"]) {
@@ -640,7 +682,7 @@ export function applyScoreRepairToXml(
         }
         removePrimaryFingering(cloned);
 
-        removeNoteSafely(xmlDoc, noteEl, event, freshDoc, false);
+        const anchorAfter = removeNoteSafely(xmlDoc, noteEl, event, freshDoc, false);
 
         const beatKey = `${event.measureIndex}:${event.onsetTick}:${edit.targetHand}`;
         const existingGroup = pathBInsertedByBeat.get(beatKey);
@@ -660,12 +702,13 @@ export function applyScoreRepairToXml(
           const safeVoice = pickSafeVoiceForPart(partEl);
           ensureDirectTextChild(xmlDoc, cloned, "voice", safeVoice, NOTE_ORDER_MAP);
           ensureDirectTextChild(xmlDoc, cloned, "staff", String(targetStaff), NOTE_ORDER_MAP);
-          const backupEl = createNsElement(xmlDoc, "backup");
-          const backupDur = createNsElement(xmlDoc, "duration");
-          backupDur.textContent = durText;
-          backupEl.appendChild(backupDur);
-          insertAfter(measureEl, backupEl, anchorAfter);
-          insertAfter(measureEl, cloned, backupEl);
+          const insertion = advance > 0
+            ? insertTimeShiftAfter(xmlDoc, measureEl, anchorAfter, "backup", advance)
+            : anchorAfter;
+          insertAfter(measureEl, cloned, insertion);
+          if (advance > ownDuration) {
+            insertTimeShiftAfter(xmlDoc, measureEl, cloned, "forward", advance - ownDuration);
+          }
           pathBInsertedByBeat.set(beatKey, {
             lastNoteEl: cloned,
             voice: safeVoice,
@@ -719,8 +762,6 @@ export function applyScoreRepairToXml(
 
         const keepXmlDur = Math.round((keepTicks * ctx.divisions) / globalLcm);
         const restXmlDur = Math.round((restTicks * ctx.divisions) / globalLcm);
-        const origXmlDur = keepXmlDur + restXmlDur;
-
         stripTieMarks(segEl, "start");
         const hasChord = findDirectChild(segEl, "chord") !== null;
         const nextNote = nextNoteSibling(segEl);
@@ -734,11 +775,13 @@ export function applyScoreRepairToXml(
           const restEl = buildRestNoteEl(xmlDoc, restXmlDur, ctx.divisions, seg.voice, staffVal);
           insertAfter(measureEl, restEl, segEl);
         } else {
+          // A shorter member still shares the lead's onset. Travel back by
+          // the lead's advance, then restore the cursor before the next note.
+          const advance = noteDuration(findChordLead(segEl));
           const chordTail = findChordTail(segEl);
-          const insertAfterEl = chordTail === segEl ? segEl.previousElementSibling : chordTail;
+          let insertion = chordTail === segEl ? segEl.previousElementSibling : chordTail;
           if (!hasChord && nextHasChord && nextNote) {
-            const nextChordEl = findDirectChild(nextNote, "chord");
-            if (nextChordEl) nextNote.removeChild(nextChordEl);
+            insertion = promoteChordMember(xmlDoc, segEl);
           } else if (hasChord) {
             const oldChord = findDirectChild(segEl, "chord");
             if (oldChord) segEl.removeChild(oldChord);
@@ -748,14 +791,8 @@ export function applyScoreRepairToXml(
           ensureDirectTextChild(xmlDoc, segEl, "voice", safeVoice, NOTE_ORDER_MAP);
           setNoteDurationAndType(xmlDoc, segEl, keepXmlDur, ctx.divisions);
 
-          const backupEl = createNsElement(xmlDoc, "backup");
-          const backupDur = createNsElement(xmlDoc, "duration");
-          backupDur.textContent = String(origXmlDur);
-          backupEl.appendChild(backupDur);
-
-          const restEl = buildRestNoteEl(xmlDoc, restXmlDur, ctx.divisions, safeVoice, staffVal);
-
-          insertAfter(measureEl, backupEl, insertAfterEl);
+          const restEl = buildRestNoteEl(xmlDoc, advance - keepXmlDur, ctx.divisions, safeVoice, staffVal);
+          const backupEl = insertTimeShiftAfter(xmlDoc, measureEl, insertion, "backup", advance);
           insertAfter(measureEl, segEl, backupEl);
           insertAfter(measureEl, restEl, segEl);
         }
