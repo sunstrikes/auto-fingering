@@ -18,6 +18,7 @@ import type { XmlDomDeps } from "../musicxml/parser";
 import type { ExportFormat } from "../musicxml/scoreSession";
 import { serializeScoreDocument, writeFingeringsToScore } from "../musicxml/writer";
 import { remapAnchorState, type AnchorState } from "../persistence/anchorDrafts";
+import { diffMeasureIndices, getScoreIdentity } from "../persistence/fingerprint";
 import { midiToPitchLabel } from "../solver/keyboard";
 
 export interface NoteDiffEntry {
@@ -38,6 +39,12 @@ export interface StudioSnapshot {
   solveResult: SolveResult;
   fingerByNoteUid: Record<string, Finger>;
   lastDiff: NoteDiffEntry[];
+}
+
+export interface ScoreRepairTransition {
+  previousFingerprint: string;
+  nextFingerprint: string;
+  modifiedMeasureIndices: readonly number[];
 }
 
 export interface ApplyScoreRepairPayload {
@@ -89,6 +96,7 @@ export interface StudioState {
   anchors: Record<string, AnchorOverride>;
   removedRawAnchorUids: string[];
   lastDiff: NoteDiffEntry[];
+  lastScoreRepairTransition: ScoreRepairTransition | null;
   history: {
     past: StudioSnapshot[];
     future: StudioSnapshot[];
@@ -253,6 +261,7 @@ const INITIAL_DATA = {
   anchors: {} as Record<string, AnchorOverride>,
   removedRawAnchorUids: [] as string[],
   lastDiff: [] as NoteDiffEntry[],
+  lastScoreRepairTransition: null,
   history: {
     past: [] as StudioSnapshot[],
     future: [] as StudioSnapshot[],
@@ -289,6 +298,7 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
       anchors: {},
       removedRawAnchorUids: [],
       lastDiff: [],
+      lastScoreRepairTransition: null,
       history: { past: [], future: [] },
       selectedNoteUid: null,
       selectedSliceId: null,
@@ -349,6 +359,7 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
       anchors: nextAnchors,
       removedRawAnchorUids: nextRemoved,
       lastDiff: nextDiff,
+      ...(resetHistory ? { lastScoreRepairTransition: null } : {}),
       history: nextHistory,
       selectedSliceId: nextSlice?.sliceId ?? null,
       selectedMeasureIndex: nextSlice?.measureIndex ?? null,
@@ -467,9 +478,12 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
     if (!state.scoreDoc || !state.solveResult) return;
 
     const snapshot = createSnapshot(state, true);
-    const remapped = remapAnchorState(state.scoreDoc, scoreDoc, state);
+    const remapped = anchors !== undefined && removedRawAnchorUids !== undefined
+      ? { anchors, removedRawAnchorUids } : remapAnchorState(state.scoreDoc, scoreDoc, state);
     const nextAnchors = anchors ?? remapped.anchors;
     const nextRemoved = removedRawAnchorUids ?? remapped.removedRawAnchorUids;
+    const previousIdentity = getScoreIdentity(state.scoreDoc);
+    const nextIdentity = getScoreIdentity(scoreDoc);
 
     const exportedXml = syncXmlOutput(
       scoreDoc,
@@ -503,6 +517,11 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
       anchors: nextAnchors,
       removedRawAnchorUids: nextRemoved,
       lastDiff: [],
+      lastScoreRepairTransition: {
+        previousFingerprint: previousIdentity.fingerprint,
+        nextFingerprint: nextIdentity.fingerprint,
+        modifiedMeasureIndices: diffMeasureIndices(previousIdentity.measureHashes, nextIdentity.measureHashes),
+      },
       history: {
         past: snapshot ? [...state.history.past, snapshot] : state.history.past,
         future: [],

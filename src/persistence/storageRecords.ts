@@ -14,7 +14,7 @@ const fields: { [K in PracticeStore]: readonly (keyof PracticeStorageRecords[K])
   workspacePrefs: ["scopeKey", "lastOpenedPieceId", "scoreFingerprint", "handSpanProfile", "speedMultiplier", "abLoop",
     "practiceMode", "singleStaffHand", "ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled",
     "freePracticeMinutes", "repairEdge", "updatedAtMs"],
-  scoreBlobs: ["fingerprint", "bytes", "fileName", "byteLength", "lastAccessedAtMs", "sourceFormat"],
+  scoreBlobs: ["fingerprint", "bytes", "fileName", "byteLength", "lastAccessedAtMs", "sourceFormat", "repairAlternate"],
 };
 
 function canPersistField(key: string) {
@@ -40,6 +40,10 @@ export function copyStorageRecord<K extends PracticeStore>(store: K, record: Pra
   const input = record as unknown as Record<string, unknown>;
   const result = Object.fromEntries(fields[store].filter((key) => Object.hasOwn(record, key))
     .map((key) => [key, copyValue(input[String(key)])]));
-  if (store === "scoreBlobs" && result.bytes instanceof Uint8Array) result.byteLength = result.bytes.byteLength;
+  if (store === "scoreBlobs" && result.bytes instanceof Uint8Array) {
+    result.byteLength = result.bytes.byteLength;
+    const alternate = (result as Partial<PracticeStorageRecords["scoreBlobs"]>).repairAlternate;
+    if (alternate) alternate.byteLength = alternate.bytes.byteLength;
+  }
   return result as unknown as PracticeStorageRecords[K];
 }

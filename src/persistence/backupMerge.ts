@@ -1,5 +1,5 @@
 import { GLOBAL_WORKSPACE, SCHEMA_VERSION, storeKeyPaths, type FingerAnchorDraft, type PieceProfile,
-  type PracticeEvent, type PracticeStoragePort, type PracticeStorageRecords, type ScoreBlob, type WorkspacePrefs } from "./storagePort";
+  type PracticeEvent, type PracticeStoragePort, type PracticeStorageRecords, type ScoreBlob, type ScoreBlobSource, type WorkspacePrefs } from "./storagePort";
 import { copyStorageRecord } from "./storageRecords";
 
 const MAX_BACKUP_SCORE_BYTES = 2 * 1024 * 1024;
@@ -13,8 +13,13 @@ interface BackupData {
   practiceEvents: PracticeEvent[];
   fingerAnchorDrafts: FingerAnchorDraft[];
   workspacePrefs: WorkspacePrefs[];
-  scoreBlobs?: Record<string, Omit<ScoreBlob, "bytes" | "fingerprint"> & { base64: string }>;
+  scoreBlobs?: Record<string, BackupBlobSource & {
+    lastAccessedAtMs: number;
+    repairAlternate?: BackupBlobSource & { cacheKey: string };
+  }>;
 }
+
+type BackupBlobSource = Omit<ScoreBlobSource, "bytes"> & { base64: string };
 
 export interface PracticeBackupExport {
   full: string;
@@ -32,6 +37,10 @@ function toBase64(bytes: Uint8Array) {
   return btoa(value);
 }
 
+function encodeBlob({ bytes, fileName, sourceFormat }: ScoreBlobSource): BackupBlobSource {
+  return { fileName, sourceFormat, byteLength: bytes.byteLength, base64: toBase64(bytes) };
+}
+
 export async function createPracticeBackup(storage: PracticeStoragePort): Promise<PracticeBackupExport> {
   const [pieceProfiles, practiceEvents, fingerAnchorDrafts, workspacePrefs, blobs] = await Promise.all([
     storage.all("pieceProfiles"), storage.all("practiceEvents"), storage.all("fingerAnchorDrafts"),
@@ -45,8 +54,10 @@ export async function createPracticeBackup(storage: PracticeStoragePort): Promis
     workspacePrefs: workspacePrefs.map((row) => copyStorageRecord("workspacePrefs", row)),
   };
   const scoreBlobs = Object.fromEntries(blobs.filter((row) => row.bytes.byteLength <= MAX_BACKUP_SCORE_BYTES)
-    .map(({ fingerprint, bytes, fileName, lastAccessedAtMs, sourceFormat }) => [fingerprint, {
-      fileName, lastAccessedAtMs, sourceFormat, byteLength: bytes.byteLength, base64: toBase64(bytes),
+    .map((blob) => [blob.fingerprint, {
+      ...encodeBlob(blob), lastAccessedAtMs: blob.lastAccessedAtMs,
+      ...(blob.repairAlternate && blob.repairAlternate.bytes.byteLength <= MAX_BACKUP_SCORE_BYTES
+        ? { repairAlternate: { ...encodeBlob(blob.repairAlternate), cacheKey: blob.repairAlternate.cacheKey } } : {}),
     }]));
   const data = JSON.stringify(body);
   const full = JSON.stringify({ ...body, scoreBlobs });
@@ -66,6 +77,59 @@ function asObject(value: unknown): ObjectRecord {
 function isString(value: unknown): value is string { return typeof value === "string" && value.length > 0; }
 function isNumber(value: unknown): value is number { return typeof value === "number" && Number.isFinite(value); }
 function isStringList(value: unknown): value is string[] { return Array.isArray(value) && value.every(isString); }
+const isBoolean = (value: unknown) => typeof value === "boolean";
+const isInteger = (value: unknown) => isNumber(value) && Number.isSafeInteger(value);
+const isCount = (value: unknown) => isNumber(value) && Number.isSafeInteger(value) && value >= 0;
+const isNonnegative = (value: unknown) => isNumber(value) && value >= 0;
+const isRatio = (value: unknown) => isNumber(value) && value >= 0 && value <= 1;
+const isPracticeMode = (mode: unknown) => mode === "both" || mode === "rh-only" || mode === "lh-only";
+const isStatus = (value: unknown) => value === "green" || value === "amber" || value === "red";
+const optional = (value: unknown, validate: (value: unknown) => boolean) => value === undefined || validate(value);
+
+function isScoreCoord(value: unknown) {
+  const { measureIndex, beatNum, beatDen, graceOrder } = asObject(value);
+  return isCount(measureIndex) && isInteger(beatNum) && isNumber(beatDen) &&
+    Number.isSafeInteger(beatDen) && beatDen > 0 && optional(graceOrder, isCount);
+}
+
+function isFluency(value: unknown) {
+  const row = asObject(value);
+  const { rh, lh } = asObject(row.dominantHandFaultRatio);
+  return isRatio(row.pitchAccuracy) && isCount(row.interiorHesitationCount) &&
+    isNonnegative(row.junctionHesitationRatio) && isNonnegative(row.timingCv) && isBoolean(row.stallDetected) &&
+    isRatio(rh) && isRatio(lh) && isBoolean(row.switchBranchMismatch) && isCount(row.reanchorCount);
+}
+
+function isAcoustic(value: unknown) {
+  const row = asObject(value);
+  return isStatus(row.timingEvennessStatus) && isNonnegative(row.timingNormNpvi) &&
+    optional(row.worstTimingMeasure, isCount) &&
+    (row.secondaryDimension === "voicing" || row.secondaryDimension === "articulation" || row.secondaryDimension === "hidden") &&
+    optional(row.voicingDeltaDb, isNumber) && optional(row.melodyRankDominance, isRatio) &&
+    optional(row.articulationKor, isNonnegative) &&
+    (row.tertiaryDimension === "pedal" || row.tertiaryDimension === "hand-sync" || row.tertiaryDimension === "hidden") &&
+    optional(row.pedalClarityRate, isRatio) && optional(row.handSyncStatus, isStatus) &&
+    optional(row.bleQuantizationRelaxed, isBoolean);
+}
+
+function isPracticeEvent(row: ObjectRecord) {
+  return isString(row.pieceId) && isString(row.scoreFingerprint) && isNonnegative(row.timestampMs) &&
+    isString(row.localDateKey) && /^\d{4}-\d{2}-\d{2}$/.test(row.localDateKey) && isInteger(row.timezoneOffsetMin) &&
+    isString(row.sessionId) && (row.boutKind === "chunk" || row.boutKind === "bridge" || row.boutKind === "cold-probe") &&
+    isScoreCoord(row.startCoord) && isScoreCoord(row.endCoord) && optional(row.junctionBoundaryCoord, isScoreCoord) &&
+    optional(row.cueCoord, isScoreCoord) && isPracticeMode(row.practiceMode) &&
+    isNumber(row.speedMultiplier) && row.speedMultiplier > 0 && isNonnegative(row.durationSec) && isCount(row.passCount) &&
+    isBoolean(row.wasColdFirstPass) && (row.scaffoldingLevel === 0 || row.scaffoldingLevel === 1 ||
+      row.scaffoldingLevel === 2 || row.scaffoldingLevel === 3) &&
+    optional(row.ehsLookaheadPreset, (preset) => preset === "off" || preset === "1-beat" || preset === "2-beats" || preset === "1-bar") &&
+    (row.autoGrade === 1 || row.autoGrade === 2 || row.autoGrade === 3 || row.autoGrade === 4) &&
+    optional(row.userGradeOverride, (grade) => grade === 2) && isFluency(row.fluency) && optional(row.acoustic, isAcoustic) &&
+    Object.entries(asObject(row.measureFaultCounts)).every(([index, value]) => {
+      const { missed, extra, hesitations } = asObject(value);
+      return /^(0|[1-9]\d*)$/.test(index) && isCount(Number(index)) && isCount(missed) && isCount(extra) && isCount(hesitations);
+    }) && optional(row.coachTakeaway, (value) => typeof value === "string");
+}
+
 function isAnchor(value: unknown) {
   const anchor = asObject(value);
   return [1, 2, 3, 4, 5].includes(anchor.finger as number) && ["phrase", "pinOnly"].includes(anchor.mode as string);
@@ -80,7 +144,7 @@ function hasValidPrefs(row: ObjectRecord) {
   return validOptional("speedMultiplier", isNumber) && validOptional("freePracticeMinutes", isNumber) &&
     validOptional("updatedAtMs", isNumber) && validOptional("lastOpenedPieceId", isString) &&
     validOptional("scoreFingerprint", isString) && validOptional("singleStaffHand", (hand) => hand === "RH" || hand === "LH") &&
-    validOptional("practiceMode", (mode) => mode === "both" || mode === "rh-only" || mode === "lh-only") &&
+    validOptional("practiceMode", isPracticeMode) &&
     ["ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled"].every((key) =>
       validOptional(key, (value) => typeof value === "boolean")) &&
     validOptional("handSpanProfile", (value) => {
@@ -92,8 +156,9 @@ function hasValidPrefs(row: ObjectRecord) {
       return isNumber(startMeasureIndex) && isNumber(endMeasureIndex) &&
         typeof enabled === "boolean" && typeof loopGap === "boolean";
     }) && validOptional("repairEdge", (value) => {
-      const { direction, otherCacheKey, otherDraft } = asObject(value);
-      return (direction === "undo" || direction === "redo") && isString(otherCacheKey) && isDraft(asObject(otherDraft));
+      const { direction, otherFingerprint, alternateCacheKey, otherDraft } = asObject(value);
+      return (direction === "undo" || direction === "redo") && isString(otherFingerprint) &&
+        optional(alternateCacheKey, (key) => isString(key) && otherFingerprint === row.scoreFingerprint) && isDraft(asObject(otherDraft));
     });
 }
 function parseRecords<K extends BackupStore>(data: ObjectRecord, store: K): PracticeStorageRecords[K][] {
@@ -105,7 +170,7 @@ function parseRecords<K extends BackupStore>(data: ObjectRecord, store: K): Prac
       store === "pieceProfiles" ? isString(row.title) && isStringList(row.fingerprints) && row.fingerprints.length > 0 &&
         row.fingerprints.every((fingerprint) => isStringList(asObject(row.measureHashesByFingerprint)[fingerprint])) &&
         (row.archivedAtMs === undefined || isNumber(row.archivedAtMs)) :
-      store === "practiceEvents" ? isString(row.pieceId) && isString(row.scoreFingerprint) && isNumber(row.timestampMs) :
+      store === "practiceEvents" ? isPracticeEvent(row) :
       store === "fingerAnchorDrafts" ? isDraft(row) : hasValidPrefs(row)
     );
     if (!valid) throw new Error("备份格式无效");
@@ -113,19 +178,29 @@ function parseRecords<K extends BackupStore>(data: ObjectRecord, store: K): Prac
   });
 }
 
+function decodeBlob(row: ObjectRecord): ScoreBlobSource {
+  if (!isString(row.fileName) || !isString(row.base64) || row.base64.length > Math.ceil(MAX_BACKUP_SCORE_BYTES / 3) * 4) {
+    throw new Error("备份内的乐谱格式无效");
+  }
+  const bytes = Uint8Array.from(atob(row.base64), (char) => char.charCodeAt(0));
+  if (bytes.length > MAX_BACKUP_SCORE_BYTES || bytes.byteLength !== row.byteLength || bytes[0] !== 0x50 || bytes[1] !== 0x4b ||
+      bytes[2] !== 0x03 || bytes[3] !== 0x04) throw new Error("备份内的乐谱格式无效");
+  return {
+    bytes, byteLength: bytes.byteLength, fileName: row.fileName,
+    ...(row.sourceFormat === "mxl" || row.sourceFormat === "musicxml" ? { sourceFormat: row.sourceFormat } : {}),
+  };
+}
+
 function parseBlobs(rawBlobs: unknown): ScoreBlob[] {
   if (rawBlobs === undefined) return [];
   return Object.entries(asObject(rawBlobs)).map(([fingerprint, value]) => {
     const row = asObject(value);
-    if (!isString(row.fileName) || !isString(row.base64) || row.base64.length > Math.ceil(MAX_BACKUP_SCORE_BYTES / 3) * 4 ||
-        !isNumber(row.lastAccessedAtMs)) throw new Error("备份内的乐谱格式无效");
-    const bytes = Uint8Array.from(atob(row.base64), (char) => char.charCodeAt(0));
-    if (bytes.length > MAX_BACKUP_SCORE_BYTES || bytes.byteLength !== row.byteLength || bytes[0] !== 0x50 || bytes[1] !== 0x4b ||
-        bytes[2] !== 0x03 || bytes[3] !== 0x04) throw new Error("备份内的乐谱格式无效");
-    return {
-      fingerprint, bytes, byteLength: bytes.byteLength, fileName: row.fileName, lastAccessedAtMs: row.lastAccessedAtMs,
-      ...(row.sourceFormat === "mxl" || row.sourceFormat === "musicxml" ? { sourceFormat: row.sourceFormat } : {}),
-    };
+    if (!isNumber(row.lastAccessedAtMs)) throw new Error("备份内的乐谱格式无效");
+    const blob = { ...decodeBlob(row), fingerprint, lastAccessedAtMs: row.lastAccessedAtMs };
+    if (row.repairAlternate === undefined) return blob;
+    const alternate = asObject(row.repairAlternate);
+    if (!isString(alternate.cacheKey)) throw new Error("备份内的乐谱格式无效");
+    return { ...blob, repairAlternate: { ...decodeBlob(alternate), cacheKey: alternate.cacheKey } };
   });
 }
 

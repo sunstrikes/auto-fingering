@@ -1,5 +1,6 @@
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
+import { createInMemoryStorage } from "../src/persistence/inMemoryStorage";
 import { createIndexedDbStorage } from "../src/persistence/indexedDbStorage";
 import { createPracticeBackup, importPracticeBackup } from "../src/persistence/backupMerge";
 import type { PracticeEvent } from "../src/persistence/storagePort";
@@ -122,4 +123,48 @@ it("migrates a version-0 data-only backup and rejects a newer backup without mut
     .rejects.toThrow("不支持此备份版本");
   expect(await storage.findPieceProfiles("revision")).toEqual([piece]);
   await storage.close();
+});
+
+it.each([
+  ["missing aggregate", { fluency: undefined }],
+  ["invalid coordinates", { endCoord: { measureIndex: 0, beatNum: 0, beatDen: 0 } }],
+  ["invalid measure counts", { measureFaultCounts: { 0: { missed: -1, extra: 0, hesitations: 0 } } }],
+])("rejects an immutable event with %s before it can reserve its ID", async (_case, malformed) => {
+  const storage = createIndexedDbStorage({ indexedDB: new IDBFactory(), keyRange: IDBKeyRange });
+  const good = event("bout", 200);
+  const data = (practiceEvents: unknown[]) => JSON.stringify({
+    schemaVersion: 1, pieceProfiles: [piece], practiceEvents, fingerAnchorDrafts: [], workspacePrefs: [],
+  });
+  try {
+    await expect(importPracticeBackup(storage, data([{ ...good, ...malformed }]))).rejects.toThrow("备份格式无效");
+    expect(await storage.get("pieceProfiles", piece.pieceId)).toBeUndefined();
+    await importPracticeBackup(storage, data([good]));
+    expect(await storage.listPracticeEvents(piece.pieceId)).toEqual([good]);
+  } finally {
+    await storage.close();
+  }
+});
+
+
+it.each([
+  ["IndexedDB", (maxScoreBytes: number) => createIndexedDbStorage({ indexedDB: new IDBFactory(), maxScoreBytes })],
+  ["memory", (maxScoreBytes: number) => createInMemoryStorage({ maxScoreBytes })],
+])("charges compressed repair alternates to the %s score-cache budget", async (_adapter, createStorage) => {
+  const storage = createStorage(6);
+  const source = { fileName: "Etude.mxl", bytes: new Uint8Array(3), byteLength: 3 };
+  const repairAlternate = { ...source, cacheKey: "old-xml" };
+  try {
+    await storage.commit({ scoreBlobs: [
+      { ...source, fingerprint: "older", lastAccessedAtMs: 1 },
+      { ...source, fingerprint: "current", lastAccessedAtMs: 2, repairAlternate },
+    ] });
+    expect(await storage.get("scoreBlobs", "older")).toBeUndefined();
+    expect((await storage.get("scoreBlobs", "current"))?.repairAlternate).toEqual(repairAlternate);
+
+    await storage.commit({ scoreBlobs: [{ ...source, fingerprint: "current", lastAccessedAtMs: 3,
+      repairAlternate: { ...repairAlternate, bytes: new Uint8Array(4), byteLength: 4 } }] });
+    expect(await storage.get("scoreBlobs", "current")).toEqual({ ...source, fingerprint: "current", lastAccessedAtMs: 3 });
+  } finally {
+    if ("close" in storage && typeof storage.close === "function") await storage.close();
+  }
 });

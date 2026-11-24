@@ -1,12 +1,11 @@
 import type { ScoreDocument } from "../domain/types";
-import { exportMxlContainer } from "../musicxml/mxl";
-import { loadScoreInput, type LoadedScoreSession } from "../musicxml/scoreSession";
-import type { StudioSnapshot, StudioState } from "../store/useStudioStore";
-import { captureDraft, hashSourceFingerings } from "./anchorDrafts";
+import { exportMxlContainer, type MxlContainer } from "../musicxml/mxl";
+import { loadScoreInput, type ExportFormat } from "../musicxml/scoreSession";
+import { captureDraft, hashSourceFingerings, type AnchorState } from "./anchorDrafts";
 import { getScoreIdentity, isSimilarScore, type ScoreIdentity } from "./fingerprint";
 import { sha256 } from "./sha256";
 import { GLOBAL_WORKSPACE, type PieceProfile, type PracticeStoragePort,
-  type PracticeStorageWrite, type ScoreBlob, type WorkspacePrefs } from "./storagePort";
+  type PracticeStorageWrite, type ScoreBlob, type ScoreBlobSource, type WorkspacePrefs } from "./storagePort";
 
 export function addScoreAlias(profile: PieceProfile, identity: ScoreIdentity): PieceProfile {
   if (profile.fingerprints.includes(identity.fingerprint)) return profile;
@@ -48,26 +47,45 @@ export async function resolvePieceOpen(storage: PracticeStoragePort, score: Scor
   const [prefs, draft] = await Promise.all([
     existing ?? storage.get("workspacePrefs", profile.pieceId), storage.get("fingerAnchorDrafts", profile.pieceId),
   ]);
-  const sourceDraft = prefs?.repairEdge?.otherCacheKey === identity.fingerprint &&
+  const sourceDraft = prefs?.repairEdge?.otherFingerprint === identity.fingerprint &&
       prefs.scoreFingerprint !== identity.fingerprint ? prefs.repairEdge.otherDraft : draft;
   const conflict = exact && !existing && sourceDraft && sourceDraft.sourceFingeringHash !== hashSourceFingerings(score);
   const keepDraft = !conflict || await choose({ kind: "fingering", title: profile.title });
   return { profile: addScoreAlias(profile, identity), prefs, draft: keepDraft ? sourceDraft : undefined };
 }
 
-export async function readCachedScore(storage: PracticeStoragePort, key: string, prefs: WorkspacePrefs):
-Promise<{ session: LoadedScoreSession; blob: ScoreBlob } | undefined> {
-  const blob = await storage.accessScoreBlob(key);
-  if (!blob) return undefined;
-  const session = await loadScoreInput({ fileName: blob.fileName, bytes: blob.bytes },
+async function loadCachedSource(source: ScoreBlobSource, prefs: WorkspacePrefs) {
+  const session = await loadScoreInput({ fileName: source.fileName, bytes: source.bytes },
     { singleStaffHandOverride: prefs.singleStaffHand });
-  session.sourceFormat = blob.sourceFormat ?? "mxl";
-  return { session, blob };
+  session.sourceFormat = source.sourceFormat ?? "mxl";
+  return { session, fileName: source.fileName };
 }
 
-export interface CurrentWorkspace {
-  state: StudioState;
+export async function readCachedScore(storage: PracticeStoragePort, fingerprint: string, prefs: WorkspacePrefs) {
+  const blob = await storage.accessScoreBlob(fingerprint);
+  return blob ? loadCachedSource(blob, prefs) : undefined;
+}
+
+export async function readRepairAlternate(storage: PracticeStoragePort, prefs: WorkspacePrefs) {
+  const repair = prefs.repairEdge;
+  if (!repair) return undefined;
+  const blob = await storage.accessScoreBlob(repair.otherFingerprint);
+  const source = repair.alternateCacheKey ? blob?.repairAlternate : blob;
+  if (!source || (repair.alternateCacheKey && blob?.repairAlternate?.cacheKey !== repair.alternateCacheKey)) return undefined;
+  return loadCachedSource(source, prefs);
+}
+
+export interface WorkspaceSource extends AnchorState {
+  rawXmlText: string;
+  scoreDoc: ScoreDocument;
+}
+
+export interface CurrentWorkspace extends WorkspaceSource {
+  fileName: string;
+  mxlContainer?: MxlContainer;
+  exportFormat: ExportFormat;
   prefs: Omit<WorkspacePrefs, "scopeKey" | "scoreFingerprint" | "repairEdge" | "updatedAtMs">;
+  repair?: { direction: "undo" | "redo"; alternate: WorkspaceSource };
 }
 
 export interface WorkspaceChanges {
@@ -82,32 +100,26 @@ export interface WorkspaceChanges {
 /** Persist only changed parts. For a score edit keep a single adjacent score edge,
  * not volatile solver output or the ordinary anchor undo stack. */
 export async function saveWorkspace(storage: PracticeStoragePort, profile: PieceProfile,
-  { state, prefs }: CurrentWorkspace, changes: WorkspaceChanges) {
-  if (!state.rawXmlText || !state.scoreDoc) return profile;
+  workspace: CurrentWorkspace, changes: WorkspaceChanges) {
   const now = Date.now();
-  const identity = getScoreIdentity(state.scoreDoc);
+  const { scoreDoc, rawXmlText, fileName, exportFormat, mxlContainer, prefs, repair } = workspace;
+  const identity = getScoreIdentity(scoreDoc);
   // An import may have added aliases while this score was already open.
   const known = profile.fingerprints.includes(identity.fingerprint) && !changes.profile && !changes.practiced
     ? profile : await storage.get("pieceProfiles", profile.pieceId) ?? profile;
   const withAlias = addScoreAlias(known, identity);
   const nextProfile = changes.practiced ? { ...withAlias, lastPracticedAtMs: now } : withAlias;
-  let alternate: StudioSnapshot | undefined;
   let repairEdge: WorkspacePrefs["repairEdge"];
-  if (changes.prefs || changes.cache) {
-    const previous = [...state.history.past].reverse().find((snapshot) => snapshot.scoreDoc && snapshot.rawXmlText !== state.rawXmlText);
-    const next = state.history.future.find((snapshot) => snapshot.scoreDoc && snapshot.rawXmlText !== state.rawXmlText);
-    // Future takes precedence after an Undo, so the latest repair can be redone after refresh.
-    alternate = next ?? previous;
-    if (alternate?.scoreDoc && alternate.rawXmlText) {
-      const other = getScoreIdentity(alternate.scoreDoc).fingerprint;
-      const otherCacheKey = other === identity.fingerprint ? `${other}:${sha256(alternate.rawXmlText)}` : other;
-      repairEdge = { direction: next ? "redo" : "undo", otherCacheKey,
-        otherDraft: captureDraft(profile.pieceId, alternate.scoreDoc, alternate, now) };
-    }
+  if (repair && (changes.prefs || changes.cache)) {
+    const { direction, alternate } = repair;
+    const otherFingerprint = getScoreIdentity(alternate.scoreDoc).fingerprint;
+    repairEdge = { direction, otherFingerprint,
+      ...(otherFingerprint === identity.fingerprint ? { alternateCacheKey: sha256(alternate.rawXmlText) } : {}),
+      otherDraft: captureDraft(profile.pieceId, alternate.scoreDoc, alternate, now) };
   }
   const write: PracticeStorageWrite = {
     ...(changes.profile || nextProfile !== profile ? { pieceProfiles: [nextProfile] } : {}),
-    ...(changes.draft ? { fingerAnchorDrafts: [captureDraft(profile.pieceId, state.scoreDoc, state, now)] } : {}),
+    ...(changes.draft ? { fingerAnchorDrafts: [captureDraft(profile.pieceId, scoreDoc, workspace, now)] } : {}),
   };
   const workspacePrefs: WorkspacePrefs[] = [];
   if (changes.prefs || changes.cache) workspacePrefs.push({ ...prefs, scopeKey: profile.pieceId,
@@ -115,18 +127,23 @@ export async function saveWorkspace(storage: PracticeStoragePort, profile: Piece
   if (changes.lastOpened) workspacePrefs.push({ scopeKey: GLOBAL_WORKSPACE, lastOpenedPieceId: profile.pieceId, updatedAtMs: now });
   if (workspacePrefs.length) write.workspacePrefs = workspacePrefs;
   if (changes.cache) {
-    const blob = async (fingerprint: string, xml: string): Promise<ScoreBlob> => {
-      const bytes = await exportMxlContainer(xml, state.mxlContainer);
-      return { fingerprint, bytes, byteLength: bytes.byteLength, lastAccessedAtMs: now,
-        fileName: state.fileName, sourceFormat: state.exportFormat };
+    const pack = async (xml: string): Promise<ScoreBlobSource> => {
+      const bytes = await exportMxlContainer(xml, mxlContainer);
+      return { bytes, byteLength: bytes.byteLength, fileName, sourceFormat: exportFormat };
     };
     // Core data must survive unavailable storage for the (evictable) score blobs.
     let scoreBlobs: ScoreBlob[];
     try {
-      scoreBlobs = await Promise.all([
-        blob(identity.fingerprint, state.rawXmlText),
-        ...(repairEdge && alternate?.rawXmlText ? [blob(repairEdge.otherCacheKey, alternate.rawXmlText)] : []),
+      const [current, alternate] = await Promise.all([
+        pack(rawXmlText), repairEdge && repair ? pack(repair.alternate.rawXmlText) : undefined,
       ]);
+      const scoreBlob = { ...current, fingerprint: identity.fingerprint, lastAccessedAtMs: now };
+      if (alternate && repairEdge?.alternateCacheKey) {
+        scoreBlobs = [{ ...scoreBlob, repairAlternate: { ...alternate, cacheKey: repairEdge.alternateCacheKey } }];
+      } else {
+        scoreBlobs = [scoreBlob, ...(alternate && repairEdge ? [{ ...alternate, fingerprint: repairEdge.otherFingerprint,
+          lastAccessedAtMs: now }] : [])];
+      }
     } catch (error) {
       await storage.commit(write);
       throw error;

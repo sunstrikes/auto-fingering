@@ -86,7 +86,9 @@ export interface FingerAnchorDraft {
 /** A single repair edge; the other endpoint's source lives in evictable scoreBlobs. */
 export interface RepairEdge {
   direction: "undo" | "redo";
-  otherCacheKey: string;
+  otherFingerprint: string;
+  /** XML-level key when the other source has the same canonical Score Fingerprint. */
+  alternateCacheKey?: string;
   otherDraft: FingerAnchorDraft;
 }
 
@@ -107,13 +109,31 @@ export interface WorkspacePrefs {
   updatedAtMs?: number;
 }
 
-export interface ScoreBlob {
-  fingerprint: string;
+export interface ScoreBlobSource {
   bytes: Uint8Array;
   fileName: string;
   byteLength: number;
-  lastAccessedAtMs: number;
   sourceFormat?: ExportFormat;
+}
+
+export interface ScoreBlob extends ScoreBlobSource {
+  fingerprint: string;
+  lastAccessedAtMs: number;
+  repairAlternate?: ScoreBlobSource & { cacheKey: string };
+}
+
+export function scoreBlobCacheBytes(blob: ScoreBlob) {
+  return blob.byteLength + (blob.repairAlternate?.byteLength ?? 0);
+}
+
+export function fitScoreBlob(blob: ScoreBlob, maxBytes: number): ScoreBlob | undefined {
+  if (blob.byteLength > maxBytes) return undefined;
+  // Preserve the active source if the optional alternate cannot fit with it.
+  if (scoreBlobCacheBytes(blob) > maxBytes) {
+    const { repairAlternate: _alternate, ...current } = blob;
+    return current;
+  }
+  return blob;
 }
 
 export type MetaRecord =
