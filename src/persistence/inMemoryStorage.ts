@@ -1,5 +1,5 @@
 import {
-  SCHEMA_VERSION, scoreCacheLimits, storeKeyPaths, type PracticeStoragePort, type PracticeStorageRecords,
+  SCHEMA_VERSION, scoreCacheLimits, storeKeyPaths, fitScoreBlob, scoreBlobCacheBytes, type PracticeStoragePort, type PracticeStorageRecords,
   type PracticeStore, type ScoreBlob, type ScoreCacheOptions,
 } from "./storagePort";
 import { copyStorageRecord } from "./storageRecords";
@@ -38,7 +38,11 @@ export function createInMemoryStorage(options: ScoreCacheOptions = {}): Practice
       const writes = (Object.keys(storeKeyPaths) as PracticeStore[]).flatMap((store) =>
         (write[store] ?? []).map((record) => ({ store, record: copyStorageRecord(store, record) })));
       for (const { store, record } of writes) {
-        if (store === "scoreBlobs" && (maxCount <= 0 || (record as ScoreBlob).byteLength > maxBytes)) continue;
+        if (store === "scoreBlobs") {
+          const blob = maxCount > 0 ? fitScoreBlob(record as ScoreBlob, maxBytes) : undefined;
+          if (blob) records.scoreBlobs.set(blob.fingerprint, blob);
+          continue;
+        }
         const key = (record as unknown as Record<string, string>)[storeKeyPaths[store]];
         if (store === "practiceEvents" && records[store].has(key)) continue;
         (records[store] as Map<string, typeof record>).set(key, record);
@@ -46,11 +50,11 @@ export function createInMemoryStorage(options: ScoreCacheOptions = {}): Practice
       if (!write.scoreBlobs?.length) return;
       const rows = [...records.scoreBlobs.values()].sort((a, b) => a.lastAccessedAtMs - b.lastAccessedAtMs ||
         (a.fingerprint < b.fingerprint ? -1 : 1));
-      let bytes = rows.reduce((total, row) => total + row.byteLength, 0);
+      let bytes = rows.reduce((total, row) => total + scoreBlobCacheBytes(row), 0);
       for (const row of rows) {
         if (records.scoreBlobs.size <= maxCount && bytes <= maxBytes) break;
         records.scoreBlobs.delete(row.fingerprint);
-        bytes -= row.byteLength;
+        bytes -= scoreBlobCacheBytes(row);
       }
     },
   };

@@ -5,6 +5,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import type { ScoreRendererHandle } from "../src/components/ScoreViewer";
 import type { PracticeStoragePort } from "../src/persistence/storagePort";
+import { createPracticeBackup, importPracticeBackup } from "../src/persistence/backupMerge";
+import { applyScoreRepairToXml } from "../src/musicxml/repairWriter";
 import { createInMemoryStorage } from "../src/persistence/inMemoryStorage";
 import { getScoreIdentity } from "../src/persistence/fingerprint";
 import { buildNoteCoordIndex, hashSourceFingerings } from "../src/persistence/anchorDrafts";
@@ -164,4 +166,94 @@ it("requests persistent browser storage at startup and does not repeat the remin
   const second = await mount(storage);
   expect(second.element.querySelector('[data-testid="practice-backup-reminder"]')).toBeNull();
   expect(persist).toHaveBeenCalledTimes(2);
+});
+
+it("reminds again when a workbench left open is foregrounded after seven days", async () => {
+  const persist = vi.fn(async () => false);
+  vi.stubGlobal("navigator", { storage: { persist } });
+  const day = 24 * 60 * 60 * 1000;
+  const now = vi.spyOn(Date, "now").mockReturnValue(10 * day);
+  const ui = await mount(createInMemoryStorage());
+  const reminder = () => ui.element.querySelector('[data-testid="practice-backup-reminder"]');
+  expect(reminder()).not.toBeNull();
+  act(() => reminder()!.querySelectorAll<HTMLButtonElement>("button")[1].click());
+
+  now.mockReturnValue(17 * day - 1);
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(reminder()).toBeNull();
+  now.mockReturnValue(17 * day);
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(reminder()).not.toBeNull();
+  expect(persist).toHaveBeenCalledTimes(1);
+});
+
+it("retries a failed workspace write before preparing a backup", async () => {
+  const storage = createInMemoryStorage();
+  const { pieceId } = await seed(storage);
+  const ui = await mount(storage);
+  await act(async () => { await vi.waitFor(() => expect(ui.rendered()).toContain("First Étude")); });
+  const commit = storage.commit.bind(storage);
+  let failOnce = true;
+  vi.spyOn(storage, "commit").mockImplementation(async (write) => {
+    if (failOnce && write.workspacePrefs?.some((row) => row.scopeKey === pieceId && row.speedMultiplier === 1)) {
+      failOnce = false;
+      throw new Error("transient storage failure");
+    }
+    await commit(write);
+  });
+  const click = async (testId: string) => {
+    await act(async () => ui.element.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!.click());
+  };
+  await click("speed-preset-1");
+  expect(ui.element.textContent).toContain("无法写入本地练习数据");
+  expect((await storage.get("workspacePrefs", pieceId))?.speedMultiplier).toBe(0.75);
+  await click("practice-backup-open");
+  expect(ui.element.querySelector<HTMLButtonElement>('[data-testid="practice-backup-download"]')?.disabled).toBe(false);
+  expect((await storage.get("workspacePrefs", pieceId))?.speedMultiplier).toBe(1);
+});
+
+
+it("restores same-fingerprint repair Undo and Redo from a full backup without a noncanonical score fingerprint", async () => {
+  const storage = createInMemoryStorage();
+  const source = xml.replace("<duration>1</duration><staff>1", "<duration>2</duration><staff>1");
+  const { identity, pieceId } = await seed(storage, source);
+  const first = await mount(storage);
+  await act(async () => { await vi.waitFor(() => expect(first.rendered()).toContain("First Étude")); });
+  await act(async () => {
+    const state = useStudioStore.getState();
+    const original = state.scoreDoc!;
+    const revisedXml = applyScoreRepairToXml(source, original, {
+      edits: [{ kind: "clip-duration", noteUid: original.noteEvents[0].noteUid, newDurationTick: 1 }],
+      optionId: "clip", strategy: "octave-fold-thin", label: "", fidelityScore: 0, description: "", previewSummary: "",
+    });
+    const revised = parseMusicXml(revisedXml);
+    expect(getScoreIdentity(revised).fingerprint).toBe(identity.fingerprint);
+    state.applyScoreRepair({ scoreDoc: revised, rawXmlText: revisedXml,
+      solveResult: solveFingering(revised.onsetSlices, state.handSpanProfile) });
+  });
+  await act(async () => { await vi.waitFor(async () => expect((await storage.get("workspacePrefs", pieceId))?.repairEdge?.direction).toBe("undo")); });
+  expect((await storage.all("scoreBlobs")).map((blob) => blob.fingerprint)).toEqual([identity.fingerprint]);
+  const restored = createInMemoryStorage();
+  const backup = await createPracticeBackup(storage);
+  await importPracticeBackup(restored, backup.full);
+  const dataOnly = createInMemoryStorage();
+  await importPracticeBackup(dataOnly, backup.data);
+  expect(await dataOnly.all("scoreBlobs")).toEqual([]);
+
+  const remount = async () => {
+    act(() => roots.pop()!.unmount());
+    return mount(restored);
+  };
+  const duration = () => useStudioStore.getState().scoreDoc?.noteEvents[0].durationTick;
+  const repaired = await remount();
+  await act(async () => { await vi.waitFor(() => expect(duration()).toBe(1)); });
+  await act(async () => repaired.element.querySelector<HTMLButtonElement>('[data-testid="undo-btn"]')!.click());
+  expect(duration()).toBe(2);
+  expect(repaired.rendered()).toMatch(/<fingering[^>]*>4<\/fingering>/);
+  await act(async () => { await vi.waitFor(async () => expect((await restored.get("workspacePrefs", pieceId))?.repairEdge?.direction).toBe("redo")); });
+  const undone = await remount();
+  await act(async () => { await vi.waitFor(() => expect(duration()).toBe(2)); });
+  await act(async () => undone.element.querySelector<HTMLButtonElement>('[data-testid="redo-btn"]')!.click());
+  expect(duration()).toBe(1);
+  expect(undone.rendered()).toMatch(/<fingering[^>]*>4<\/fingering>/);
 });

@@ -221,12 +221,11 @@ function stripTieMarks(noteEl: Element, mode: "all" | "start" | "stop"): void {
   for (const notations of findDirectChildren(noteEl, "notations")) {
     for (const tiedEl of findDirectChildren(notations, "tied")) {
       const type = tiedEl.getAttribute("type");
-      if (
-        mode === "all" ||
-        type === mode ||
-        type === "continue"
-      ) {
+      if (mode === "all" || type === mode) {
         tiedEl.parentNode?.removeChild(tiedEl);
+      } else if (type === "continue") {
+        // A notation-only continuation encodes both halves of the tie.
+        tiedEl.setAttribute("type", mode === "start" ? "stop" : "start");
       }
     }
     if (notations.children.length === 0) {

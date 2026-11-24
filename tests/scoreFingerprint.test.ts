@@ -1,13 +1,16 @@
 import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import { describe, expect, it } from "vitest";
-import type { ScoreDocument, ScoreRepairNoteEdit } from "../src/domain/types";
+import { DEFAULT_HAND_SPAN_PROFILE, type ScoreDocument, type ScoreRepairNoteEdit } from "../src/domain/types";
 import { parseMusicXml } from "../src/musicxml/parser";
 import { applyScoreRepairToXml } from "../src/musicxml/repairWriter";
 import { exportScoreOutput, loadScoreInput } from "../src/musicxml/scoreSession";
 import { writeFingeringsToScore } from "../src/musicxml/writer";
 import { buildNoteCoordIndex, hashSourceFingerings } from "../src/persistence/anchorDrafts";
 import { diffMeasureIndices, getScoreIdentity, isSimilarScore } from "../src/persistence/fingerprint";
+
+import { solveFingering } from "../src/solver/solveFingering";
+import { createStudioStore } from "../src/store/useStudioStore";
 
 const { DOMParser, XMLSerializer } = new JSDOM("").window;
 const parse = (xml: string) => parseMusicXml(xml, { DOMParser });
@@ -259,6 +262,27 @@ describe("Score Fingerprint", () => {
     expect(newIdentity.measureHashes[1]).toBe(oldIdentity.measureHashes[1]);
   });
 
+  it("publishes the canonical transition when committing a repair", () => {
+    const before = parse(REPAIR_XML);
+    const after = repair(REPAIR_XML, before,
+      { kind: "remove-note", noteUid: before.noteEvents[0].noteUid },
+      { kind: "change-pitch", noteUid: before.noteEvents[3].noteUid, oldMidi: 62, newMidi: 63 },
+    );
+    const store = createStudioStore();
+    const xmlDeps = { DOMParser, XMLSerializer };
+    store.getState().setSolvedScore({ scoreDoc: before, rawXmlText: REPAIR_XML, fileName: "test.musicxml",
+      exportFormat: "musicxml", solveResult: solveFingering(before.onsetSlices, DEFAULT_HAND_SPAN_PROFILE), xmlDeps });
+    const transitions: unknown[] = [];
+    const unsubscribe = store.subscribe((state, previous) => {
+      if (state.lastScoreRepairTransition !== previous.lastScoreRepairTransition) transitions.push(state.lastScoreRepairTransition);
+    });
+    store.getState().applyScoreRepair({ scoreDoc: after, rawXmlText: new XMLSerializer().serializeToString(after.xmlDoc),
+      solveResult: solveFingering(after.onsetSlices, DEFAULT_HAND_SPAN_PROFILE), xmlDeps });
+    unsubscribe();
+    expect(transitions).toEqual([{ previousFingerprint: getScoreIdentity(before).fingerprint,
+      nextFingerprint: getScoreIdentity(after).fingerprint, modifiedMeasureIndices: [0, 2] }]);
+  });
+
   it("remains identical after actual non-pitch repairs on the grand-staff corpus score", () => {
     const xml = readFileSync(corpus("02-grand-staff-arpeggio-chord.musicxml"), "utf8");
     const before = parse(xml);
@@ -294,6 +318,22 @@ describe("Score Fingerprint", () => {
       newDurationTick: 1,
     });
     expect(after.noteEvents.find((n) => n.midi === midi)?.durationTick).toBe(1);
+    expect(getScoreIdentity(after)).toEqual(getScoreIdentity(before));
+  });
+
+  it.each([6, 8])("preserves incoming notation ties when clipping a continuation to %i ticks", (newDurationTick) => {
+    const tied = (type: string) => `<note><pitch><step>C</step><octave>4</octave></pitch>
+      <duration>4</duration><notations><tied type="${type}"/></notations></note>`;
+    const xml = onePart(`
+      <measure number="1"><attributes><divisions>1</divisions></attributes>${tied("start")}</measure>
+      <measure number="2">${tied("continue")}</measure>
+      <measure number="3">${tied("stop")}</measure>`);
+    const before = parse(xml);
+    const after = repair(xml, before, {
+      kind: "clip-duration", noteUid: before.noteEvents[0].noteUid, newDurationTick,
+    });
+    expect(after.noteEvents).toHaveLength(2);
+    expect(after.noteEvents[1]).toMatchObject({ isTieStop: true, isTieStart: false, durationTick: newDurationTick - 4 });
     expect(getScoreIdentity(after)).toEqual(getScoreIdentity(before));
   });
 

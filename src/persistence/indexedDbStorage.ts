@@ -1,6 +1,6 @@
 import { copyStorageRecord } from "./storageRecords";
 import {
-  DATABASE_NAME, SCHEMA_VERSION, storeKeyPaths, scoreCacheLimits,
+  DATABASE_NAME, SCHEMA_VERSION, storeKeyPaths, scoreCacheLimits, fitScoreBlob, scoreBlobCacheBytes,
   type PracticeStoragePort, type PracticeStorageRecords, type PracticeStore,
   type PracticeStorageWrite, type ScoreBlob, type ScoreCacheOptions,
 } from "./storagePort";
@@ -70,8 +70,10 @@ export function createIndexedDbStorage(options: IndexedDbStorageOptions = {}): P
 
   const commit = async (write: PracticeStorageWrite) => {
     const batches = (Object.keys(storeKeyPaths) as PracticeStore[]).flatMap((name) => {
-      const records = write[name]?.map((record) => copyStorageRecord(name, record))
-        .filter((record) => name !== "scoreBlobs" || (maxCount > 0 && (record as ScoreBlob).byteLength <= maxBytes));
+      const records = name === "scoreBlobs" ? (maxCount > 0 ? write.scoreBlobs?.flatMap((record) => {
+        const blob = fitScoreBlob(copyStorageRecord("scoreBlobs", record), maxBytes);
+        return blob ? [blob] : [];
+      }) : []) : write[name]?.map((record) => copyStorageRecord(name, record));
       return records?.length ? [{ name, records }] : [];
     });
     if (!batches.length) return;
@@ -96,11 +98,11 @@ export function createIndexedDbStorage(options: IndexedDbStorageOptions = {}): P
         request.onsuccess = () => {
           const rows = request.result as ScoreBlob[];
           let count = rows.length;
-          let bytes = rows.reduce((total, row) => total + row.byteLength, 0);
+          let bytes = rows.reduce((total, row) => total + scoreBlobCacheBytes(row), 0);
           for (const row of rows) {
             if (count <= maxCount && bytes <= maxBytes) break;
             store.delete(row.fingerprint);
-            bytes -= row.byteLength;
+            bytes -= scoreBlobCacheBytes(row);
             count--;
           }
         };
