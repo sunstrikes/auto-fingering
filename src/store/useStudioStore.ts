@@ -17,7 +17,7 @@ import type { MxlContainer } from "../musicxml/mxl";
 import type { XmlDomDeps } from "../musicxml/parser";
 import type { ExportFormat } from "../musicxml/scoreSession";
 import { serializeScoreDocument, writeFingeringsToScore } from "../musicxml/writer";
-import { remapAnchorState, type AnchorState } from "../persistence/studioPersistence";
+import { remapAnchorState, type AnchorState } from "../persistence/anchorDrafts";
 import { midiToPitchLabel } from "../solver/keyboard";
 
 export interface NoteDiffEntry {

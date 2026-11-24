@@ -1,50 +1,12 @@
-import type { AnchorOverride, ScoreDocument } from "../domain/types";
+import type { ScoreDocument } from "../domain/types";
 import { exportMxlContainer } from "../musicxml/mxl";
 import { loadScoreInput, type LoadedScoreSession } from "../musicxml/scoreSession";
 import type { StudioSnapshot, StudioState } from "../store/useStudioStore";
-import { buildNoteCoordIndex, hashSourceFingerings } from "./anchorDrafts";
+import { captureDraft, hashSourceFingerings } from "./anchorDrafts";
 import { getScoreIdentity, isSimilarScore, type ScoreIdentity } from "./fingerprint";
 import { sha256 } from "./sha256";
-import { GLOBAL_WORKSPACE, type FingerAnchorDraft, type PieceProfile, type PracticeStoragePort,
+import { GLOBAL_WORKSPACE, type PieceProfile, type PracticeStoragePort,
   type PracticeStorageWrite, type ScoreBlob, type WorkspacePrefs } from "./storagePort";
-
-export interface AnchorState {
-  anchors: Record<string, AnchorOverride>;
-  removedRawAnchorUids: string[];
-}
-
-export function captureDraft(pieceId: string, score: ScoreDocument, state: AnchorState, now: number): FingerAnchorDraft {
-  const { keyByUid } = buildNoteCoordIndex(score);
-  return {
-    pieceId, sourceFingeringHash: hashSourceFingerings(score), updatedAtMs: now,
-    anchorsByCoord: Object.fromEntries(Object.entries(state.anchors).flatMap(([uid, override]) => {
-      const coord = keyByUid.get(uid);
-      return coord === undefined ? [] : [[coord, override]];
-    })),
-    removedRawCoords: state.removedRawAnchorUids.flatMap((uid) => {
-      const coord = keyByUid.get(uid);
-      return coord === undefined ? [] : [coord];
-    }),
-  };
-}
-
-export function applyDraft(score: ScoreDocument, draft?: FingerAnchorDraft): AnchorState {
-  const { uidByKey } = buildNoteCoordIndex(score);
-  return {
-    anchors: Object.fromEntries(Object.entries(draft?.anchorsByCoord ?? {}).flatMap(([coord, override]) => {
-      const uid = uidByKey.get(coord);
-      return uid === undefined ? [] : [[uid, override]];
-    })),
-    removedRawAnchorUids: (draft?.removedRawCoords ?? []).flatMap((coord) => {
-      const uid = uidByKey.get(coord);
-      return uid === undefined ? [] : [uid];
-    }),
-  };
-}
-
-export function remapAnchorState(previous: ScoreDocument, next: ScoreDocument, state: AnchorState): AnchorState {
-  return applyDraft(next, captureDraft("", previous, state, 0));
-}
 
 export function addScoreAlias(profile: PieceProfile, identity: ScoreIdentity): PieceProfile {
   if (profile.fingerprints.includes(identity.fingerprint)) return profile;
@@ -114,6 +76,7 @@ export interface WorkspaceChanges {
   draft?: boolean;
   cache?: boolean;
   lastOpened?: boolean;
+  practiced?: boolean;
 }
 
 /** Persist only changed parts. For a score edit keep a single adjacent score edge,
@@ -123,17 +86,22 @@ export async function saveWorkspace(storage: PracticeStoragePort, profile: Piece
   if (!state.rawXmlText || !state.scoreDoc) return profile;
   const now = Date.now();
   const identity = getScoreIdentity(state.scoreDoc);
-  const nextProfile = addScoreAlias(profile, identity);
+  // An import may have added aliases while this score was already open.
+  const known = profile.fingerprints.includes(identity.fingerprint) && !changes.profile && !changes.practiced
+    ? profile : await storage.get("pieceProfiles", profile.pieceId) ?? profile;
+  const withAlias = addScoreAlias(known, identity);
+  const nextProfile = changes.practiced ? { ...withAlias, lastPracticedAtMs: now } : withAlias;
   let alternate: StudioSnapshot | undefined;
   let repairEdge: WorkspacePrefs["repairEdge"];
   if (changes.prefs || changes.cache) {
     const previous = [...state.history.past].reverse().find((snapshot) => snapshot.scoreDoc && snapshot.rawXmlText !== state.rawXmlText);
     const next = state.history.future.find((snapshot) => snapshot.scoreDoc && snapshot.rawXmlText !== state.rawXmlText);
-    alternate = previous ?? next;
+    // Future takes precedence after an Undo, so the latest repair can be redone after refresh.
+    alternate = next ?? previous;
     if (alternate?.scoreDoc && alternate.rawXmlText) {
       const other = getScoreIdentity(alternate.scoreDoc).fingerprint;
       const otherCacheKey = other === identity.fingerprint ? `${other}:${sha256(alternate.rawXmlText)}` : other;
-      repairEdge = { direction: previous ? "undo" : "redo", otherCacheKey,
+      repairEdge = { direction: next ? "redo" : "undo", otherCacheKey,
         otherDraft: captureDraft(profile.pieceId, alternate.scoreDoc, alternate, now) };
     }
   }

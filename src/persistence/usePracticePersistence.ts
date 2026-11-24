@@ -21,6 +21,7 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
   const activeRef = useRef(active);
   const [saveError, setSaveError] = useState(false);
   const [backupReminder, setBackupReminder] = useState(false);
+  const showReminder = useRef(false);
   const startup = useRef<{ storage: PracticeStoragePort; run: Promise<void> } | undefined>(undefined);
   const queue = useRef(Promise.resolve());
   const last = useRef<{ active: ActivePiece; state: StudioState; prefs: Prefs; minutes: number } | null>(null);
@@ -57,7 +58,8 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
     return enqueue(async () => {
       binding.profile = await saveWorkspace(storage, binding.profile, {
         state, prefs: { ...next.prefs, freePracticeMinutes: next.minutes },
-      }, { profile: opened, prefs: preferences, draft, cache, lastOpened: opened });
+      }, { profile: opened, prefs: preferences, draft, cache, lastOpened: opened,
+        practiced: !opened && next.minutes > (previous?.minutes ?? 0) });
       setSaveError(false);
     });
   }
@@ -85,8 +87,6 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
     }).catch(() => { if (mounted) setSaveError(true); });
     return () => { mounted = false; };
   }, [storage]);
-  const showReminder = useRef(false);
-
   useEffect(() => {
     if (!active) return;
     void persistCurrent().catch(() => undefined);

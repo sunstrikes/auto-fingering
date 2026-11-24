@@ -53,8 +53,9 @@ import { createSolverClient, SolverCancelledError, type SolverClient } from "./w
 import { computeNextAnchorState, useStudioStore, type StudioState, type StudioSnapshot } from "./store/useStudioStore";
 import { GLOBAL_WORKSPACE, type PracticeStoragePort, type WorkspacePrefs } from "./persistence/storagePort";
 import {
-  applyDraft, newPieceProfile, readCachedScore, remapAnchorState, resolvePieceOpen, type AnchorState, type OpenChoice,
+  newPieceProfile, readCachedScore, resolvePieceOpen, type OpenChoice,
 } from "./persistence/studioPersistence";
+import { applyDraft, remapAnchorState, type AnchorState } from "./persistence/anchorDrafts";
 import { usePracticePersistence } from "./persistence/usePracticePersistence";
 import { getScoreIdentity } from "./persistence/fingerprint";
 import { PracticeBackupPanel, ScoreOpenChoice } from "./components/PracticeBackupPanel";

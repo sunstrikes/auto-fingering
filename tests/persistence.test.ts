@@ -2,8 +2,6 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
 import { createIndexedDbStorage } from "../src/persistence/indexedDbStorage";
 import { createPracticeBackup, importPracticeBackup } from "../src/persistence/backupMerge";
-
-
 import type { PracticeEvent } from "../src/persistence/storagePort";
 
 const piece = {
@@ -102,5 +100,26 @@ it("excludes BYOK secrets from storage and versioned backups, with or without th
     expect((await restored.get("scoreBlobs", "original"))?.bytes).toEqual(hasScore ? bytes : undefined);
     await restored.close();
   }
+  await storage.close();
+});
+
+it("does not discard resumable scores for a single blob that cannot fit the LRU budget", async () => {
+  const storage = createIndexedDbStorage({ indexedDB: new IDBFactory(), maxScoreBytes: 4 });
+  const blob = (fingerprint: string, byteLength: number, lastAccessedAtMs: number) => ({
+    fingerprint, lastAccessedAtMs, fileName: `${fingerprint}.mxl`, bytes: new Uint8Array(byteLength), byteLength,
+  });
+  await storage.commit({ scoreBlobs: [blob("resume", 4, 1)] });
+  await storage.commit({ scoreBlobs: [blob("oversized", 5, 2)] });
+  expect((await storage.all("scoreBlobs")).map((row) => row.fingerprint)).toEqual(["resume"]);
+  await storage.close();
+});
+
+it("migrates a version-0 data-only backup and rejects a newer backup without mutating data", async () => {
+  const storage = createIndexedDbStorage({ indexedDB: new IDBFactory() });
+  await importPracticeBackup(storage, JSON.stringify({ schemaVersion: 0, pieceProfiles: [piece] }));
+  expect(await storage.findPieceProfiles("revision")).toEqual([piece]);
+  await expect(importPracticeBackup(storage, JSON.stringify({ schemaVersion: 100, pieceProfiles: [] })))
+    .rejects.toThrow("不支持此备份版本");
+  expect(await storage.findPieceProfiles("revision")).toEqual([piece]);
   await storage.close();
 });

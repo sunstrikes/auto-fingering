@@ -70,7 +70,8 @@ export function createIndexedDbStorage(options: IndexedDbStorageOptions = {}): P
 
   const commit = async (write: PracticeStorageWrite) => {
     const batches = (Object.keys(storeKeyPaths) as PracticeStore[]).flatMap((name) => {
-      const records = write[name]?.map((record) => copyStorageRecord(name, record));
+      const records = write[name]?.map((record) => copyStorageRecord(name, record))
+        .filter((record) => name !== "scoreBlobs" || (maxCount > 0 && (record as ScoreBlob).byteLength <= maxBytes));
       return records?.length ? [{ name, records }] : [];
     });
     if (!batches.length) return;

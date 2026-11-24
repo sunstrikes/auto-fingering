@@ -1,6 +1,6 @@
 import {
   SCHEMA_VERSION, scoreCacheLimits, storeKeyPaths, type PracticeStoragePort, type PracticeStorageRecords,
-  type PracticeStore, type ScoreCacheOptions,
+  type PracticeStore, type ScoreBlob, type ScoreCacheOptions,
 } from "./storagePort";
 import { copyStorageRecord } from "./storageRecords";
 
@@ -38,6 +38,7 @@ export function createInMemoryStorage(options: ScoreCacheOptions = {}): Practice
       const writes = (Object.keys(storeKeyPaths) as PracticeStore[]).flatMap((store) =>
         (write[store] ?? []).map((record) => ({ store, record: copyStorageRecord(store, record) })));
       for (const { store, record } of writes) {
+        if (store === "scoreBlobs" && (maxCount <= 0 || (record as ScoreBlob).byteLength > maxBytes)) continue;
         const key = (record as unknown as Record<string, string>)[storeKeyPaths[store]];
         if (store === "practiceEvents" && records[store].has(key)) continue;
         (records[store] as Map<string, typeof record>).set(key, record);
