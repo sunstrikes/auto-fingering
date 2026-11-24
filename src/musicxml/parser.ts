@@ -1,14 +1,21 @@
 import type {
+  ExplicitBarlineKind,
   Finger,
   Hand,
+  MeasureStructuralMeta,
   MeasureTimeline,
   NoteEvent,
   OnsetSlice,
   PedalInterval,
+  ScoreCoord,
   ScoreDocument,
+  SlurSpan,
   TempoPoint,
   TimeSignaturePoint,
 } from "../domain/types";
+import { computeSourceFingeringHash } from "./sourceFingeringHash";
+import { computeMeasureHashes } from "../domain/measureHashes";
+import { makeScoreCoord } from "../domain/scoreCoord";
 import {
   findDirectChild as firstDirectChild,
   findDirectChildren as directChildrenByTag,
@@ -143,33 +150,29 @@ function pitchToMidi(pitchEl: Element): number {
   return (octave + 1) * 12 + semitone + Math.round(alter);
 }
 
-function extractAnchorFingers(noteEl: Element): {
+function extractAnchorFingers(elements: Element[]): {
   anchorFinger?: Finger;
   anchorExitFinger?: Finger;
   fingeringEl?: Element;
 } {
-  for (const notations of directChildrenByTag(noteEl, "notations")) {
-    for (const technical of directChildrenByTag(notations, "technical")) {
-      for (const fingering of directChildrenByTag(technical, "fingering")) {
-        if (
-          fingering.getAttribute("alternate") === "yes" ||
-          fingering.getAttribute("substitution") === "yes"
-        ) {
-          continue;
-        }
-        const match = (fingering.textContent ?? "")
-          .trim()
-          .match(/^([1-5])(?:\s*-\s*(?:[1-5]\s*-\s*)*([1-5]))?(?![0-9])/);
-        if (match) {
-          return {
-            anchorFinger: Number.parseInt(match[1], 10) as Finger,
-            anchorExitFinger: match[2]
-              ? (Number.parseInt(match[2], 10) as Finger)
-              : undefined,
-            fingeringEl: fingering,
-          };
-        }
-      }
+  for (const fingering of elements) {
+    if (
+      fingering.getAttribute("alternate") === "yes" ||
+      fingering.getAttribute("substitution") === "yes"
+    ) {
+      continue;
+    }
+    const match = (fingering.textContent ?? "")
+      .trim()
+      .match(/^([1-5])(?:\s*-\s*(?:[1-5]\s*-\s*)*([1-5]))?(?![0-9])/);
+    if (match) {
+      return {
+        anchorFinger: Number.parseInt(match[1], 10) as Finger,
+        anchorExitFinger: match[2]
+          ? (Number.parseInt(match[2], 10) as Finger)
+          : undefined,
+        fingeringEl: fingering,
+      };
     }
   }
   return {};
@@ -208,6 +211,94 @@ function extractIsArpeggiated(noteEl: Element): boolean {
     }
   }
   return false;
+}
+
+function getExplicitBarlineKind(barline: Element): ExplicitBarlineKind | undefined {
+  const directions = directChildrenByTag(barline, "repeat").map((el) => el.getAttribute("direction"));
+  if (directions.includes("forward")) {
+    return directions.includes("backward") ? "repeat-both" : "repeat-forward";
+  }
+  if (directions.includes("backward")) return "repeat-backward";
+  switch (textOfChild(barline, "bar-style")) {
+    case "light-light":
+    case "heavy-heavy":
+    case "heavy-light":
+      return "double";
+    case "light-heavy":
+      return "final";
+    case "regular":
+      return "regular";
+  }
+}
+
+function extractBarlineMeta(barline: Element, meta: MeasureStructuralMeta): void {
+  const location = barline.getAttribute("location") ?? "right";
+  const kind = getExplicitBarlineKind(barline);
+  if (location === "left") meta.barlineLeft ??= kind;
+  if (location === "right") meta.barlineRight ??= kind;
+  if (firstDirectChild(barline, "fermata")) meta.hasFermata = true;
+
+  const ending = firstDirectChild(barline, "ending");
+  const type = ending?.getAttribute("type");
+  if (
+    (type === "start" || type === "stop" || type === "discontinue") &&
+    (location === "left" || location === "middle" || location === "right")
+  ) {
+    const numbers = [...new Set((ending?.getAttribute("number") ?? "").split(",")
+      .map((text) => Number(text.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b);
+    const endings = (meta.endings ??= []);
+    if (!endings.some((el) => el.location === location && el.type === type && String(el.numbers) === String(numbers))) {
+      endings.push({ location, numbers, type });
+    }
+    if (meta.endingType === undefined || (type === "start" && meta.endingType !== "start")) {
+      meta.endingType = type;
+      meta.endingNumbers = numbers;
+    }
+  }
+}
+
+interface SlurEndpoint {
+  key: string;
+  type: "start" | "stop";
+  note: NoteEvent & { scoreCoord: ScoreCoord };
+}
+
+function pairSlurSpans(endpoints: SlurEndpoint[]): SlurSpan[] {
+  // Polyphonic voices are serialized independently; XML order can put a stop
+  // before the start on another staff. The final hand is known only after the
+  // cross-staff voice analysis.
+  endpoints.sort(({ note: a }, { note: b }) =>
+    a.measureIndex - b.measureIndex ||
+    a.onsetTick - b.onsetTick ||
+    (a.graceOrder ?? Infinity) - (b.graceOrder ?? Infinity)
+  );
+  const open = new Map<string, SlurEndpoint["note"][]>();
+  const spans: SlurSpan[] = [];
+  for (const { key, type, note } of endpoints) {
+    const starts = open.get(key) ?? [];
+    if (type === "start") {
+      starts.push(note);
+      open.set(key, starts);
+      continue;
+    }
+
+    let index = starts.findIndex((start) => start.voice === note.voice && start.staff === note.staff);
+    if (index < 0) index = starts.findIndex((start) => start.voice === note.voice);
+    if (index < 0 && starts.length === 1) index = 0;
+    if (index < 0) continue;
+
+    const [start] = starts.splice(index, 1);
+    if (starts.length === 0) open.delete(key);
+    spans.push({
+      hand: start.hand,
+      voice: start.voice,
+      startCoord: start.scoreCoord,
+      endCoord: note.scoreCoord,
+      crossesBarline: start.measureIndex !== note.measureIndex,
+    });
+  }
+  return spans;
 }
 
 function getFirstMeasureClefSign(part: Element): string | null {
@@ -378,6 +469,7 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
 
   const noteElementsByUid = new Map<string, Element>();
   const originalFingeringByUid = new Map<string, Element>();
+  const allFingeringsByUid = new Map<string, Element[]>();
   const noteEvents: NoteEvent[] = [];
 
   let noteSeq = 0;
@@ -392,6 +484,9 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
     timeBeats: number;
     timeBeatType: number;
   }> = [];
+  const measureStructuralMeta: MeasureStructuralMeta[] = [];
+  const measuresWithNotes = new Set<number>();
+  const slurEndpoints: SlurEndpoint[] = [];
   const measureBoundaryBefore = new Set<number>();
 
   // Phrase tracking per hand across measures
@@ -434,12 +529,14 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
     const consecutiveRestTicksByStaff = new Map<number, number>();
 
     measures.forEach((measure, measureIndex) => {
+      const meta = (measureStructuralMeta[measureIndex] ??= { measureIndex });
       let cursorTick = measureStartTick;
       let lastNonChordOnsetTick = cursorTick;
       let lastGraceOnsetTick = cursorTick;
       let maxMeasureEndTick = measureStartTick;
       let pendingGraceOrder = 0;
       let lastGraceOrder = 0;
+      const restEndByVoice = new Map<string, number>();
 
       for (let i = 0; i < measure.children.length; i++) {
         const child = measure.children[i];
@@ -453,8 +550,17 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
               divisions = parsed;
             }
           }
+          const keyEl = firstDirectChild(child, "key");
+          if (keyEl) {
+            const fifthsText = textOfChild(keyEl, "fifths");
+            const fifths = fifthsText === null ? NaN : Number(fifthsText);
+            if (Number.isInteger(fifths)) meta.keyFifths ??= fifths;
+            const mode = textOfChild(keyEl, "mode");
+            if (mode) meta.keyMode ??= mode;
+          }
           const timeEl = firstDirectChild(child, "time");
           if (timeEl) {
+            meta.hasTimeSigChange = true;
             const beatsText = textOfChild(timeEl, "beats");
             const beatTypeText = textOfChild(timeEl, "beat-type");
             const parsedBeats = beatsText ? Number.parseInt(beatsText, 10) : NaN;
@@ -477,6 +583,7 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
             }
           }
         } else if (tag === "barline") {
+          extractBarlineMeta(child, meta);
           const repeatEl = firstDirectChild(child, "repeat");
           if (repeatEl && repeatEl.getAttribute("direction") === "backward") {
             measureBoundaryBefore.add(measureIndex + 1);
@@ -496,6 +603,7 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
             const tempoAttr = sound.getAttribute("tempo");
             const parsedTempo = tempoAttr ? Number.parseFloat(tempoAttr) : NaN;
             if (Number.isFinite(parsedTempo) && parsedTempo > 0) {
+              meta.hasTempoChange = true;
               tempoPoints.push({ tick: cursorTick, bpm: parsedTempo });
             }
           }
@@ -505,6 +613,9 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
             ? Math.max(0, cursorTick + parsedOffset * (globalLcm / divisions))
             : cursorTick;
           for (const dtEl of directChildrenByTag(child, "direction-type")) {
+            const rehearsal = textOfChild(dtEl, "rehearsal");
+            if (rehearsal) meta.rehearsalMark ??= rehearsal;
+            if (firstDirectChild(dtEl, "metronome")) meta.hasTempoChange = true;
             for (const pedalEl of directChildrenByTag(dtEl, "pedal")) {
               const rawType = pedalEl.getAttribute("type")?.toLowerCase();
               let mappedType: RawPedalEvent["type"] | null = null;
@@ -528,6 +639,7 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
           const tempoAttr = child.getAttribute("tempo");
           const parsedTempo = tempoAttr ? Number.parseFloat(tempoAttr) : NaN;
           if (Number.isFinite(parsedTempo) && parsedTempo > 0) {
+            meta.hasTempoChange = true;
             tempoPoints.push({ tick: cursorTick, bpm: parsedTempo });
           }
         } else if (tag === "backup" || tag === "forward") {
@@ -580,9 +692,23 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
 
           const staffText = textOfChild(child, "staff");
           const staff = staffText ? Number.parseInt(staffText, 10) : 1;
+          const voice = textOfChild(child, "voice") ?? "1";
+          const notations = directChildrenByTag(child, "notations");
+          if (notations.some((el) => firstDirectChild(el, "fermata") !== null)) meta.hasFermata = true;
 
           if (isRest) {
             const expectedMeasureTicks = (timeBeats * 4 * globalLcm) / timeBeatType;
+            const restKey = `${staff}:${voice}`;
+            const restEnd = restEndByVoice.get(restKey) ?? measureStartTick;
+            if (onsetTick <= restEnd) {
+              restEndByVoice.set(restKey, Math.max(restEnd, onsetTick + scaledDur));
+            }
+            if (
+              restEl.getAttribute("measure") === "yes" ||
+              (restEndByVoice.get(restKey) ?? measureStartTick) - measureStartTick >= expectedMeasureTicks
+            ) {
+              meta.isFullMeasureRest = true;
+            }
             const prevRestTicks = consecutiveRestTicksByStaff.get(staff) ?? 0;
             const nextRestTicks = prevRestTicks + scaledDur;
             consecutiveRestTicksByStaff.set(staff, nextRestTicks);
@@ -596,12 +722,12 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
             continue;
           }
 
+          measuresWithNotes.add(measureIndex);
           const pitchEl = firstDirectChild(child, "pitch");
           if (!pitchEl) {
             continue;
           }
 
-          const voice = textOfChild(child, "voice") ?? "1";
           const hand: Hand =
             partCount === 1 && !isSingleStaff
               ? staff === 2
@@ -615,20 +741,28 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
           const noteUid = `${partId}-m${measureIndex}-n${noteSeq++}`;
           noteElementsByUid.set(noteUid, child);
 
-          const { anchorFinger, anchorExitFinger, fingeringEl } = extractAnchorFingers(child);
+          const allFingerings = notations.flatMap((notation) =>
+            directChildrenByTag(notation, "technical").flatMap((technical) =>
+              directChildrenByTag(technical, "fingering")
+            )
+          );
+          if (allFingerings.length > 0) allFingeringsByUid.set(noteUid, allFingerings);
+          const { anchorFinger, anchorExitFinger, fingeringEl } = extractAnchorFingers(allFingerings);
           if (fingeringEl) {
             originalFingeringByUid.set(noteUid, fingeringEl.cloneNode(true) as Element);
           }
 
-          const event: NoteEvent = {
+          const event: SlurEndpoint["note"] = {
             noteUid,
             measureIndex,
             onsetTick,
+            scoreCoord: makeScoreCoord(measureIndex, onsetTick - measureStartTick, globalLcm, graceOrder),
             durationTick: scaledDur,
             onsetSec: 0,
             durationSec: 0,
             midi: pitchToMidi(pitchEl),
             hand,
+            writtenHand: isSingleStaff ? defaultSingleStaffHand : hand,
             voice,
             staff,
             isGrace,
@@ -640,6 +774,18 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
             anchorExitFinger,
             anchorRawPreserved: anchorFinger !== undefined,
           };
+          for (const notation of notations) {
+            for (const slur of directChildrenByTag(notation, "slur")) {
+              const type = slur.getAttribute("type");
+              if (type === "start" || type === "stop") {
+                slurEndpoints.push({
+                  key: `${partIndex}:${slur.getAttribute("number") ?? "1"}`,
+                  type,
+                  note: event,
+                });
+              }
+            }
+          }
 
           rawNotes.push({
             partId,
@@ -669,6 +815,10 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
       measureStartTick = maxMeasureEndTick;
     });
   });
+
+  for (const measureIndex of measuresWithNotes) {
+    delete measureStructuralMeta[measureIndex].isFullMeasureRest;
+  }
 
   // Cross-staff >= 70% primary staff rule per (partId, voice) on single-part 2-staff scores
   if (partCount === 1 && !isSingleStaff) {
@@ -926,7 +1076,7 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
     });
   });
 
-  return {
+  const score: ScoreDocument = {
     title,
     xmlDoc,
     xmlDeclaration,
@@ -936,11 +1086,19 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
     onsetSlices,
     isSingleStaff,
     defaultSingleStaffHand,
+    ...(isSingleStaff ? { singleStaffHand: activeSingleStaffHand } : {}),
     measureCount,
     ticksPerQuarter: globalLcm,
     tempoPoints: normalizedTempoPoints,
     timeSignaturePoints: normalizedTimeSigPoints,
     measureTimelines,
     pedalIntervals,
+    measureStructuralMeta,
+    slurSpans: pairSlurSpans(slurEndpoints),
   };
+  computeMeasureHashes(score).forEach((hash, i) => {
+    measureStructuralMeta[i].measureHash = hash;
+  });
+  score.sourceFingeringHash = computeSourceFingeringHash(score, allFingeringsByUid);
+  return score;
 }

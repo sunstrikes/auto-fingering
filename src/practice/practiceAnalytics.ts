@@ -3,8 +3,7 @@ import { midiToPitchLabel } from "../solver/keyboard";
 
 export type PracticeFaultKind = "wrong-note" | "early-release";
 
-/** Number of consecutive 0-fault rehearsal passes required to consider a measure/segment mastered. */
-export const MASTERY_REQUIRED_CLEAN_PASSES = 3;
+const FLUENCY_CREDIT_TARGET = 2;
 
 /** Ratio of actual inter-step latency to expected tempo-scaled onset gap above which a transition is flagged as a hesitation. */
 export const FLUENCY_HESITATION_RATIO_THRESHOLD = 1.6;
@@ -34,7 +33,7 @@ export interface MeasureErrorSummary {
   totalErrors: number;
   hesitationCount: number;
   recurrentPasses: number;
-  cleanStreak: number;
+  fluencyCredit: number;
   completedPasses: number;
   mastered: boolean;
   status: MeasureMasteryStatus;
@@ -51,7 +50,7 @@ export interface PracticeRepeatRecommendation {
   pitchErrors: number;
   durationErrors: number;
   recurrentPasses: number;
-  cleanStreak: number;
+  fluencyCredit: number;
   dominantFault: "pitch" | "duration" | "mixed";
   dominantHand: Hand | "both";
   recommendedSpeedMultiplier: number | null;
@@ -69,14 +68,21 @@ export type PracticeProgressionStage =
   | "ready-next-measure"
   | "piece-mastered";
 
+export interface PracticeSectionPaceSuggestion {
+  startMeasureIndex: number;
+  endMeasureIndex: number;
+  practicedSpeed: number;
+  suggestedSpeed: number;
+}
+
 export interface PracticeProgressionEvaluation {
   startMeasureIndex: number;
   endMeasureIndex: number;
-  cleanStreak: number;
-  requiredCleanPasses: number;
-  isCleanStreakMet: boolean;
+  fluencyCredit: number;
+  isFluent: boolean;
   hesitationCount: number;
   recentPassHadHesitation: boolean;
+  sectionPaceSuggestions: PracticeSectionPaceSuggestion[];
   stage: PracticeProgressionStage;
   canAdvanceToNextMeasure: boolean;
   nextStartMeasureIndex: number | null;
@@ -89,6 +95,13 @@ export interface PracticeProgressionEvaluation {
   detail: string;
 }
 
+interface MeasurePassProgress {
+  completedPasses: number;
+  fluencyCredit: number;
+  fluentSpeed?: number;
+  lastPassHesitated: boolean;
+}
+
 export interface PracticeAnalyticsState {
   currentPassIndex: number;
   completedPasses: number;
@@ -98,11 +111,9 @@ export interface PracticeAnalyticsState {
   stepStatsByIndex: Record<number, StepErrorStats>;
   currentPassFaultSteps: Set<number>;
   currentPassMeasuresTouched: Set<number>;
-  currentPassFaultMeasures: Set<number>;
+  currentPassFaultWeightByMeasure: Record<number, number>;
   currentPassHesitationMeasures: Set<number>;
-  measureCleanStreakByIndex: Record<number, number>;
-  measurePassCountByIndex: Record<number, number>;
-  lastPassHesitationByMeasure: Record<number, number>;
+  measureProgressByMode: Record<PracticeMode, Record<number, MeasurePassProgress>>;
   lastStepCompletedAtSec: number | null;
   lastCompletedStep: PracticeStep | null;
 }
@@ -117,34 +128,23 @@ export function createPracticeAnalyticsState(): PracticeAnalyticsState {
     stepStatsByIndex: {},
     currentPassFaultSteps: new Set<number>(),
     currentPassMeasuresTouched: new Set<number>(),
-    currentPassFaultMeasures: new Set<number>(),
+    currentPassFaultWeightByMeasure: {},
     currentPassHesitationMeasures: new Set<number>(),
-    measureCleanStreakByIndex: {},
-    measurePassCountByIndex: {},
-    lastPassHesitationByMeasure: {},
+    measureProgressByMode: { both: {}, "rh-only": {}, "lh-only": {} },
     lastStepCompletedAtSec: null,
     lastCompletedStep: null,
   };
 }
 
-/**
- * Resets the consecutive clean pass streak for a measure range (e.g. when upgrading from single-hand
- * to both-hands or from slow speed to 1.0x speed so the user validates 3 clean passes at the new difficulty).
- */
-export function resetMeasureCleanStreak(
-  analytics: PracticeAnalyticsState,
-  startMeasureIndex: number,
-  endMeasureIndex: number
-): PracticeAnalyticsState {
-  const nextStreaks = { ...analytics.measureCleanStreakByIndex };
-  for (let m = startMeasureIndex; m <= endMeasureIndex; m += 1) {
-    nextStreaks[m] = 0;
-  }
+/** Drops incomplete-pass data when changing exercise settings, not earned fluency. */
+export function resetCurrentPracticePass(analytics: PracticeAnalyticsState): PracticeAnalyticsState {
   return {
     ...analytics,
-    measureCleanStreakByIndex: nextStreaks,
+    currentPassIndex: analytics.currentPassIndex + 1,
+    currentStepHadFaultInPass: false,
+    currentPassFaultSteps: new Set<number>(),
     currentPassMeasuresTouched: new Set<number>(),
-    currentPassFaultMeasures: new Set<number>(),
+    currentPassFaultWeightByMeasure: {},
     currentPassHesitationMeasures: new Set<number>(),
     lastStepCompletedAtSec: null,
     lastCompletedStep: null,
@@ -227,18 +227,6 @@ export function recordPracticeStepFault(
   const nextPassFaultSteps = new Set(analytics.currentPassFaultSteps);
   nextPassFaultSteps.add(step.stepIndex);
 
-  const nextPassFaultMeasures = new Set(analytics.currentPassFaultMeasures);
-  nextPassFaultMeasures.add(step.measureIndex);
-
-  const nextPassMeasuresTouched = new Set(analytics.currentPassMeasuresTouched);
-  nextPassMeasuresTouched.add(step.measureIndex);
-
-  // Immediately reset the measure's clean streak when a fault occurs during the pass
-  const nextStreaks = {
-    ...analytics.measureCleanStreakByIndex,
-    [step.measureIndex]: 0,
-  };
-
   return {
     ...analytics,
     currentStepHadFaultInPass: true,
@@ -247,15 +235,17 @@ export function recordPracticeStepFault(
       [step.stepIndex]: nextStats,
     },
     currentPassFaultSteps: nextPassFaultSteps,
-    currentPassFaultMeasures: nextPassFaultMeasures,
-    currentPassMeasuresTouched: nextPassMeasuresTouched,
-    measureCleanStreakByIndex: nextStreaks,
+    currentPassFaultWeightByMeasure: {
+      ...analytics.currentPassFaultWeightByMeasure,
+      [step.measureIndex]: (analytics.currentPassFaultWeightByMeasure[step.measureIndex] ?? 0)
+        + (faultKind === "early-release" ? 2 : 1),
+    },
   };
 }
 
 /**
  * Records completion of a `PracticeStep`, evaluates inter-step hesitation latency when
- * timestamps are provided, and updates per-measure consecutive clean pass streaks
+ * timestamps are provided, and updates per-measure accumulated fluency
  * when the score completes or an A-B loop wraps back to start (`passCompleted: true`).
  */
 export function recordPracticeStepCompleted(
@@ -265,6 +255,7 @@ export function recordPracticeStepCompleted(
     passCompleted?: boolean;
     nowSec?: number;
     speedMultiplier?: number;
+    practiceMode?: PracticeMode;
   } = {}
 ): PracticeAnalyticsState {
   const wasClean = !analytics.currentStepHadFaultInPass;
@@ -325,46 +316,26 @@ export function recordPracticeStepCompleted(
     nextPassMeasuresTouched.add(completedStep.measureIndex);
   }
 
-  let nextMeasureCleanStreakByIndex = analytics.measureCleanStreakByIndex;
-  let nextMeasurePassCountByIndex = analytics.measurePassCountByIndex;
-  let nextLastPassHesitationByMeasure = analytics.lastPassHesitationByMeasure;
-
+  const practiceMode = options.practiceMode ?? "both";
+  let measureProgressByMode = analytics.measureProgressByMode;
   if (passCompleted) {
-    const coveredMeasures = new Set<number>([
-      ...nextPassMeasuresTouched,
-      ...analytics.currentPassFaultMeasures,
-    ]);
-    // Fallback for unit-test callers that omit `completedStep` on clean passes:
-    // include any measure previously tracked in stepStatsByIndex or measurePassCountByIndex
-    if (coveredMeasures.size === 0) {
-      for (const stat of Object.values(nextStepStatsByIndex)) {
-        coveredMeasures.add(stat.measureIndex);
-      }
-      for (const mKey of Object.keys(analytics.measurePassCountByIndex)) {
-        coveredMeasures.add(Number(mKey));
-      }
-    } else {
-      for (const stat of Object.values(nextStepStatsByIndex)) {
-        if (nextPassMeasuresTouched.size === 0 || coveredMeasures.has(stat.measureIndex)) {
-          coveredMeasures.add(stat.measureIndex);
-        }
-      }
+    const progress = { ...measureProgressByMode[practiceMode] };
+    for (const mIdx of nextPassMeasuresTouched) {
+      const previous = progress[mIdx];
+      const hesitated = nextPassHesitationMeasures.has(mIdx);
+      const faultWeight = analytics.currentPassFaultWeightByMeasure[mIdx] ?? 0;
+      // A smooth clean pass is enough. An isolated pitch slip earns partial credit;
+      // a shaky pass earns none but never erases earlier progress.
+      const earned = hesitated ? 0 : Math.max(0, FLUENCY_CREDIT_TARGET - faultWeight);
+      const fluencyCredit = Math.min(FLUENCY_CREDIT_TARGET, (previous?.fluencyCredit ?? 0) + earned);
+      progress[mIdx] = {
+        completedPasses: (previous?.completedPasses ?? 0) + 1,
+        fluencyCredit,
+        fluentSpeed: earned > 0 && fluencyCredit >= FLUENCY_CREDIT_TARGET ? speed : previous?.fluentSpeed,
+        lastPassHesitated: hesitated,
+      };
     }
-
-    nextMeasureCleanStreakByIndex = { ...analytics.measureCleanStreakByIndex };
-    nextMeasurePassCountByIndex = { ...analytics.measurePassCountByIndex };
-    nextLastPassHesitationByMeasure = { ...analytics.lastPassHesitationByMeasure };
-
-    for (const mIdx of coveredMeasures) {
-      nextMeasurePassCountByIndex[mIdx] = (nextMeasurePassCountByIndex[mIdx] ?? 0) + 1;
-      if (analytics.currentPassFaultMeasures.has(mIdx)) {
-        nextMeasureCleanStreakByIndex[mIdx] = 0;
-      } else {
-        nextMeasureCleanStreakByIndex[mIdx] =
-          (nextMeasureCleanStreakByIndex[mIdx] ?? 0) + 1;
-      }
-      nextLastPassHesitationByMeasure[mIdx] = nextPassHesitationMeasures.has(mIdx) ? 1 : 0;
-    }
+    measureProgressByMode = { ...measureProgressByMode, [practiceMode]: progress };
   }
 
   return {
@@ -377,29 +348,22 @@ export function recordPracticeStepCompleted(
     stepStatsByIndex: nextStepStatsByIndex,
     currentPassFaultSteps: passCompleted ? new Set<number>() : analytics.currentPassFaultSteps,
     currentPassMeasuresTouched: passCompleted ? new Set<number>() : nextPassMeasuresTouched,
-    currentPassFaultMeasures: passCompleted
-      ? new Set<number>()
-      : analytics.currentPassFaultMeasures,
+    currentPassFaultWeightByMeasure: passCompleted ? {} : analytics.currentPassFaultWeightByMeasure,
     currentPassHesitationMeasures: passCompleted
       ? new Set<number>()
       : nextPassHesitationMeasures,
-    measureCleanStreakByIndex: nextMeasureCleanStreakByIndex,
-    measurePassCountByIndex: nextMeasurePassCountByIndex,
-    lastPassHesitationByMeasure: nextLastPassHesitationByMeasure,
+    measureProgressByMode,
     lastStepCompletedAtSec: passCompleted ? null : (nowSec ?? analytics.lastStepCompletedAtSec),
     lastCompletedStep: passCompleted ? null : (completedStep ?? analytics.lastCompletedStep),
   };
 }
 
-/**
- * Aggregates per-measure error and mastery summaries across all recorded `StepErrorStats`
- * and pass streaks. Includes any measure that has recorded faults OR has reached
- * mastery (`cleanStreak >= MASTERY_REQUIRED_CLEAN_PASSES`).
- */
+/** Aggregates recorded pitch, duration and hesitation faults alongside earned fluency. */
 export function buildMeasureErrorSummaries(
   analytics: PracticeAnalyticsState,
-  requiredCleanPasses = MASTERY_REQUIRED_CLEAN_PASSES
+  practiceMode: PracticeMode = "both",
 ): Map<number, MeasureErrorSummary> {
+  const progress = analytics.measureProgressByMode[practiceMode];
   const byMeasure = new Map<
     number,
     {
@@ -437,10 +401,9 @@ export function buildMeasureErrorSummaries(
     byMeasure.set(stat.measureIndex, entry);
   }
 
-  // Also include measures that reached mastery streak even if they had 0 errors
-  for (const [mKey, streak] of Object.entries(analytics.measureCleanStreakByIndex)) {
-    const mIdx = Number(mKey);
-    if (streak >= requiredCleanPasses && !byMeasure.has(mIdx)) {
+  for (const key of Object.keys(progress)) {
+    const mIdx = Number(key);
+    if (!byMeasure.has(mIdx)) {
       byMeasure.set(mIdx, {
         pitchErrors: 0,
         durationErrors: 0,
@@ -456,20 +419,15 @@ export function buildMeasureErrorSummaries(
   const summaries = new Map<number, MeasureErrorSummary>();
   for (const [measureIndex, m] of byMeasure.entries()) {
     const totalErrors = m.pitchErrors + m.durationErrors;
-    const cleanStreak = analytics.measureCleanStreakByIndex[measureIndex] ?? 0;
-    const completedPasses = analytics.measurePassCountByIndex[measureIndex] ?? 0;
-    const mastered = cleanStreak >= requiredCleanPasses;
-
-    // Exclude 0-error measures that haven't reached mastery yet
-    if (totalErrors === 0 && !mastered) {
-      continue;
-    }
+    const fluencyCredit = progress[measureIndex]?.fluencyCredit ?? 0;
+    const completedPasses = progress[measureIndex]?.completedPasses ?? 0;
+    const mastered = fluencyCredit >= FLUENCY_CREDIT_TARGET;
 
     const status: MeasureMasteryStatus = mastered
       ? "mastered"
-      : totalErrors > 0 && cleanStreak > 0
+      : totalErrors > 0 && fluencyCredit > 0
         ? "recovering"
-        : totalErrors > 0
+        : totalErrors > 0 || m.hesitationCount > 0
           ? "trouble"
           : "clean";
 
@@ -478,9 +436,7 @@ export function buildMeasureErrorSummaries(
       m.pitchErrors * 1.5 +
       m.durationErrors * 1.2 +
       m.faultStepCount;
-    // Discount troubleScore as cleanStreak progresses toward mastery
-    const streakDiscount = mastered ? 0 : Math.max(0.25, 1 - cleanStreak * 0.25);
-    const troubleScore = Number((rawTroubleScore * streakDiscount).toFixed(2));
+    const troubleScore = mastered ? 0 : rawTroubleScore * (1 - fluencyCredit * 0.25);
 
     const dominantFault: MeasureErrorSummary["dominantFault"] =
       m.pitchErrors > 0 && m.durationErrors === 0
@@ -508,7 +464,7 @@ export function buildMeasureErrorSummaries(
       totalErrors,
       hesitationCount: m.hesitationCount,
       recurrentPasses: m.maxRecurrentPasses,
-      cleanStreak,
+      fluencyCredit,
       completedPasses,
       mastered,
       status,
@@ -524,7 +480,7 @@ export function buildMeasureErrorSummaries(
 /**
  * Clusters unmastered trouble measures into actionable A-B Loop repeat recommendations (1–4 measures),
  * correlating with solver `TransitionCue`s, dominant hand, and current playback speed.
- * Measures that have achieved `mastered === true` (3 consecutive clean passes) automatically graduate out.
+ * Fluent measures graduate out of pitch/duration trouble recommendations.
  */
 export function buildPracticeRepeatRecommendations(
   analytics: PracticeAnalyticsState,
@@ -535,11 +491,9 @@ export function buildPracticeRepeatRecommendations(
     isSingleStaff?: boolean;
     warnings?: TransitionCue[];
     maxRecommendations?: number;
-    requiredCleanPasses?: number;
   }
 ): PracticeRepeatRecommendation[] {
-  const requiredCleanPasses = options.requiredCleanPasses ?? MASTERY_REQUIRED_CLEAN_PASSES;
-  const summaries = buildMeasureErrorSummaries(analytics, requiredCleanPasses);
+  const summaries = buildMeasureErrorSummaries(analytics, options.currentPracticeMode);
   if (summaries.size === 0) return [];
 
   // Filter out measures that have already graduated (mastered) or have 0 errors
@@ -585,18 +539,18 @@ export function buildPracticeRepeatRecommendations(
     let troubleScore = 0;
     let rhWeight = 0;
     let lhWeight = 0;
-    let minCleanStreak = Number.POSITIVE_INFINITY;
+    let minCredit = Number.POSITIVE_INFINITY;
 
     for (const m of cluster.measures) {
       pitchErrors += m.pitchErrors;
       durationErrors += m.durationErrors;
       recurrentPasses = Math.max(recurrentPasses, m.recurrentPasses);
       troubleScore += m.troubleScore;
-      minCleanStreak = Math.min(minCleanStreak, m.cleanStreak);
+      minCredit = Math.min(minCredit, m.fluencyCredit);
       if (m.dominantHand === "RH") rhWeight += m.totalErrors;
       else if (m.dominantHand === "LH") lhWeight += m.totalErrors;
     }
-    const cleanStreak = Number.isFinite(minCleanStreak) ? minCleanStreak : 0;
+    const fluencyCredit = Number.isFinite(minCredit) ? minCredit : 0;
 
     const dominantFault: PracticeRepeatRecommendation["dominantFault"] =
       pitchErrors > 0 && durationErrors === 0
@@ -631,9 +585,9 @@ export function buildPracticeRepeatRecommendations(
     const faultParts: string[] = [];
     if (pitchErrors > 0) faultParts.push(`错音 ${pitchErrors} 次`);
     if (durationErrors > 0) faultParts.push(`时值不足 ${durationErrors} 次`);
-    if (recurrentPasses >= 2) faultParts.push(`连续 ${recurrentPasses} 遍复发`);
-    if (cleanStreak > 0) {
-      faultParts.push(`已连续 ${cleanStreak}/${requiredCleanPasses} 遍零失误`);
+    if (recurrentPasses >= 2) faultParts.push(`${recurrentPasses} 遍遇到失误`);
+    if (fluencyCredit > 0) {
+      faultParts.push("已有流畅进展");
     }
 
     const headline = `${rangeLabel}（${faultParts.join(" · ")}）`;
@@ -685,23 +639,17 @@ export function buildPracticeRepeatRecommendations(
       prescriptionTips.push(`含指法难点「${cueLabels.join("、")}」`);
     }
 
-    if (cleanStreak > 0) {
+    if (recommendedPracticeMode) {
       prescriptionTips.push(
-        `再保持 ${requiredCleanPasses - cleanStreak} 遍零失误即可达标通关`
+        `建议先切到「${recommendedPracticeMode === "rh-only" ? "仅右手" : "仅左手"}」单独巩固`
+      );
+    }
+    if (recommendedSpeedMultiplier !== null) {
+      prescriptionTips.push(
+        `降速至 ${Number(recommendedSpeedMultiplier.toFixed(2))}x 进行 A-B 循环`
       );
     } else {
-      if (recommendedPracticeMode) {
-        prescriptionTips.push(
-          `建议先切到「${recommendedPracticeMode === "rh-only" ? "仅右手" : "仅左手"}」单独巩固`
-        );
-      }
-      if (recommendedSpeedMultiplier !== null) {
-        prescriptionTips.push(
-          `降速至 ${Number(recommendedSpeedMultiplier.toFixed(2))}x 进行 A-B 循环`
-        );
-      } else {
-        prescriptionTips.push(`建议开启 ${rangeLabel} A-B 循环重点重复`);
-      }
+      prescriptionTips.push(`可开启 ${rangeLabel} A-B 循环重点练习`);
     }
 
     return {
@@ -712,7 +660,7 @@ export function buildPracticeRepeatRecommendations(
       pitchErrors,
       durationErrors,
       recurrentPasses,
-      cleanStreak,
+      fluencyCredit,
       dominantFault,
       dominantHand,
       recommendedSpeedMultiplier,
@@ -729,11 +677,7 @@ export function buildPracticeRepeatRecommendations(
     .slice(0, maxRecommendations);
 }
 
-/**
- * Evaluates whether the currently practiced measure or A-B loop segment has met the mastery
- * criteria (default: 3 consecutive 0-fault passes), whether the player needs to restore two-hand
- * or full-speed playback first, or whether they are ready to advance to the next measure(s).
- */
+/** Suggests optional next steps for the current exercise range. */
 export function evaluatePracticeProgression(
   analytics: PracticeAnalyticsState,
   options: {
@@ -744,12 +688,11 @@ export function evaluatePracticeProgression(
     targetSpeed?: number;
     currentPracticeMode: PracticeMode;
     isSingleStaff?: boolean;
-    requiredCleanPasses?: number;
   }
 ): PracticeProgressionEvaluation {
   const totalMeasures = Math.max(1, options.measureCount);
-  const requiredCleanPasses = options.requiredCleanPasses ?? MASTERY_REQUIRED_CLEAN_PASSES;
   const targetSpeed = options.targetSpeed ?? 1.0;
+  const progress = analytics.measureProgressByMode[options.currentPracticeMode];
 
   let startMeasureIndex = 0;
   let endMeasureIndex = totalMeasures - 1;
@@ -764,7 +707,7 @@ export function evaluatePracticeProgression(
       Math.min(totalMeasures - 1, options.abLoop.endMeasureIndex)
     );
   } else {
-    const practicedMeasures = Object.keys(analytics.measurePassCountByIndex)
+    const practicedMeasures = Object.keys(progress)
       .map(Number)
       .filter((m) => Number.isFinite(m) && m >= 0 && m < totalMeasures)
       .sort((a, b) => a - b);
@@ -782,14 +725,13 @@ export function evaluatePracticeProgression(
     }
   }
 
-  let minStreak = Number.POSITIVE_INFINITY;
+  let minCredit = Number.POSITIVE_INFINITY;
   let hesitationCount = 0;
   let recentHesitation = false;
 
   for (let m = startMeasureIndex; m <= endMeasureIndex; m += 1) {
-    const streak = analytics.measureCleanStreakByIndex[m] ?? 0;
-    minStreak = Math.min(minStreak, streak);
-    if ((analytics.lastPassHesitationByMeasure[m] ?? 0) > 0) {
+    minCredit = Math.min(minCredit, progress[m]?.fluencyCredit ?? 0);
+    if (progress[m]?.lastPassHesitated) {
       recentHesitation = true;
     }
   }
@@ -800,11 +742,29 @@ export function evaluatePracticeProgression(
     }
   }
 
-  const cleanStreak = Number.isFinite(minStreak) ? minStreak : 0;
-  const isCleanStreakMet = cleanStreak >= requiredCleanPasses;
+  const fluencyCredit = Number.isFinite(minCredit) ? minCredit : 0;
+  const isFluent = fluencyCredit >= FLUENCY_CREDIT_TARGET;
 
   const needsBothHands = !options.isSingleStaff && options.currentPracticeMode !== "both";
-  const needsTempoRestore = options.currentSpeed < targetSpeed - 0.04;
+  const sectionPaceSuggestions: PracticeSectionPaceSuggestion[] = [];
+  for (let index = 0; index < totalMeasures; index++) {
+    const practicedSpeed = progress[index]?.fluentSpeed;
+    if (!practicedSpeed || practicedSpeed >= targetSpeed || progress[index]?.lastPassHesitated) {
+      continue;
+    }
+    const suggestedSpeed = Number(Math.min(targetSpeed, practicedSpeed * 1.1).toFixed(2));
+    if (suggestedSpeed <= practicedSpeed) continue;
+    const previous = sectionPaceSuggestions.at(-1);
+    if (previous?.endMeasureIndex === index - 1 && previous.practicedSpeed === practicedSpeed) {
+      previous.endMeasureIndex = index;
+    } else {
+      sectionPaceSuggestions.push({ startMeasureIndex: index, endMeasureIndex: index, practicedSpeed, suggestedSpeed });
+    }
+  }
+  const activeSectionPace = sectionPaceSuggestions.find((section) =>
+    section.startMeasureIndex <= startMeasureIndex && endMeasureIndex <= section.endMeasureIndex
+      && section.suggestedSpeed > options.currentSpeed
+  );
   const canAdvanceToNextMeasure = endMeasureIndex + 1 < totalMeasures;
 
   const spanLength = Math.max(1, endMeasureIndex - startMeasureIndex + 1);
@@ -828,54 +788,45 @@ export function evaluatePracticeProgression(
   let headline = "";
   let detail = "";
 
-  if (!isCleanStreakMet) {
-    stage = "practicing";
-    const remaining = Math.max(1, requiredCleanPasses - cleanStreak);
-    headline = `${rangeLabel} · 通关进度 ${cleanStreak}/${requiredCleanPasses} 遍`;
-    detail =
-      cleanStreak === 0
-        ? `当前段落需连续 ${requiredCleanPasses} 遍零失误（无错音、无提前松键）方可判定掌握。`
-        : `已连续 ${cleanStreak} 遍零失误，再稳定弹对 ${remaining} 遍即可进入下一阶段！`;
+  if (!isFluent) {
+    headline = `${rangeLabel} · ${fluencyCredit > 0 ? "渐趋流畅" : "练习中"}`;
+    detail = "保持舒适的速度，慢慢连起来；偶尔误触不影响已累积的进展。";
   } else if (needsBothHands) {
     stage = "step-up-hand";
     recommendedNextPracticeMode = "both";
-    const handLabel = options.currentPracticeMode === "rh-only" ? "右手" : "左手";
-    headline = `${rangeLabel} 单手已达标（连续 ${cleanStreak} 遍零失误）`;
-    detail = `${handLabel}单独练习已形成稳定肌肉记忆，建议切回「双手合练」完成合手检验。`;
-  } else if (needsTempoRestore) {
+    headline = `${rangeLabel} · 单手已流畅`;
+    detail = "可以试试双手合练，切回时会自动补偿 −12% 速度。";
+  } else if (activeSectionPace) {
     stage = "step-up-speed";
-    recommendedNextSpeedMultiplier = Number(
-      Math.min(targetSpeed, Math.round((options.currentSpeed + 0.15) * 20) / 20).toFixed(2)
-    );
-    if (targetSpeed - recommendedNextSpeedMultiplier < 0.06) {
-      recommendedNextSpeedMultiplier = targetSpeed;
-    }
-    headline = `${rangeLabel} 慢速已达标（${Number(options.currentSpeed.toFixed(2))}x 连续 ${cleanStreak} 遍零失误）`;
-    detail = `当前慢速下准确率与时值已稳定，建议提速至 ${Number(recommendedNextSpeedMultiplier.toFixed(2))}x 巩固原速流畅度。`;
+    recommendedNextSpeedMultiplier = activeSectionPace.suggestedSpeed;
+    headline = `${rangeLabel} · 慢速已流畅`;
+    detail = `这段可尝试相对提速约 10% 至 ${recommendedNextSpeedMultiplier}x。`;
   } else if (canAdvanceToNextMeasure && nextStartMeasureIndex !== null && nextEndMeasureIndex !== null) {
     stage = "ready-next-measure";
     const nextLabel =
       nextStartMeasureIndex === nextEndMeasureIndex
         ? `第 ${nextStartMeasureIndex + 1} 小节`
         : `第 ${nextStartMeasureIndex + 1}–${nextEndMeasureIndex + 1} 小节`;
-    headline = `🎉 ${rangeLabel} 已掌握（连续 ${cleanStreak} 遍零失误），可进入 ${nextLabel}！`;
-    detail = recentHesitation
-      ? `音高与按住时值已连续 ${cleanStreak} 遍达标（仍有少量步间找键停顿，可先做跨小节衔接练习或直接进入 ${nextLabel}）。`
-      : `音高、时值与合手速度均已稳定达标，可以直接推进至 ${nextLabel}，或先做「第 ${endMeasureIndex + 1}–${endMeasureIndex + 2} 小节」跨小节衔接练习。`;
+    headline = `${rangeLabel} · 已流畅`;
+    detail = `可以试试 ${nextLabel}，或练一下小节间的衔接。`;
   } else {
     stage = "piece-mastered";
-    headline = `🎉 ${rangeLabel} 已彻底掌握（连续 ${cleanStreak} 遍零失误通关）！`;
-    detail = `已到达乐谱末尾并完成连续 ${cleanStreak} 遍零失误检验，当前段落/全曲练习圆满达标。`;
+    headline = `${rangeLabel} · 已流畅`;
+    detail = "可以换一段练习，也可以继续享受这一段。";
+  }
+
+  if (recentHesitation) {
+    detail += " 上一遍有步间犹豫，可放慢速度连一连相邻音符。";
   }
 
   return {
     startMeasureIndex,
     endMeasureIndex,
-    cleanStreak,
-    requiredCleanPasses,
-    isCleanStreakMet,
+    fluencyCredit,
+    isFluent,
     hesitationCount,
     recentPassHadHesitation: recentHesitation,
+    sectionPaceSuggestions,
     stage,
     canAdvanceToNextMeasure,
     nextStartMeasureIndex,

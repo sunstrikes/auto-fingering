@@ -122,6 +122,8 @@ test-corpus/       # 01–05 回归样本（含真实曲目《武昌》）
 - 交互练琴：节拍器与预备拍、等比调速、Web MIDI 事件解析、等待模式状态机、A-B 循环均有独立用例。
 - 性能预算在本地保持 SPEC 原值；CI 共享 runner 上通过 `PERF_BUDGET_SCALE`（默认 `3`）放宽，避免硬件抖动误报，可在本地覆盖该变量复现严格门禁。
 
+M1 浏览器验收：用 `npm run dev` 启动工作台，再在另一终端运行 `node scripts/check-m1-browser.mjs`（需要本机 Chrome，可用 `CHROME_PATH` 指定路径）。脚本用模拟 MIDI 检查等待模式，并在独立浏览器上下文中验证 `.mxl` 刷新恢复、修谱撤销/重做及两类备份。用 `STUDIO_URL` 指定其他本地地址。
+
 ## 部署
 
 本项目是纯静态 SPA，`npm run build` 后把 `dist/` 部署到任意静态托管即可，无服务端依赖、无需 SPA 路由回退（单页应用只有根路径）。

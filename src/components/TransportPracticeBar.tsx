@@ -263,7 +263,7 @@ export function TransportPracticeBar({
                       const errSummary = measureErrorsByIndex?.get(mIdx);
                       const errorCount = errSummary?.totalErrors ?? 0;
                       const isMastered = Boolean(errSummary?.mastered);
-                      const cleanStreak = errSummary?.cleanStreak ?? 0;
+                      const fluencyCredit = errSummary?.fluencyCredit ?? 0;
                       const severity: RiskSeverity = risk?.highestSeverity ?? "none";
                       const isActive = activeMeasureIndex === mIdx;
                       const inAbLoop =
@@ -279,10 +279,10 @@ export function TransportPracticeBar({
                           ? ` · ${risk.warningCount} 条提示`
                           : "";
                       const errorHint = isMastered
-                        ? ` · 已连续 ${cleanStreak} 遍零失误掌握 ✓`
+                        ? " · 已流畅 ✓"
                         : errSummary && errorCount > 0
                           ? ` · 练习失误 ${errorCount} 次 (错音 ${errSummary.pitchErrors} / 时值不足 ${errSummary.durationErrors}${
-                              cleanStreak > 0 ? ` · 已连续 ${cleanStreak}/3 遍零失误` : ""
+                              fluencyCredit > 0 ? " · 渐趋流畅" : ""
                             })`
                           : "";
                       const actionHint =
@@ -303,9 +303,6 @@ export function TransportPracticeBar({
                             errorCount > 0 && !isMastered ? String(errorCount) : undefined
                           }
                           data-practice-mastered={isMastered ? "true" : undefined}
-                          data-practice-streak={
-                            cleanStreak > 0 ? String(cleanStreak) : undefined
-                          }
                           title={`${meta.label}${riskHint}${errorHint}${inAbLoop ? " (A-B 循环内)" : ""}${actionHint}`}
                           aria-label={`${meta.label}${inAbLoop ? " (A-B 循环内)" : ""}`}
                           onClick={(e) => {

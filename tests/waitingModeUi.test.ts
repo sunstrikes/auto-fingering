@@ -336,41 +336,29 @@ describe("<App /> PracticeMode & WaitingMode end-to-end", () => {
       (container.querySelector('[data-testid="audio-play-btn"]') as HTMLButtonElement).click();
     });
 
-    // Wrong note (61) -> highlighted red, taints step under Absolute Strictness, local sound off so triggeredMidis stays empty
-    const key61 = container.querySelector('[data-testid="piano-key-61"]') as SVGGElement;
-    await act(async () => {
-      key61.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      await Promise.resolve();
-    });
-    expect(key61.getAttribute("data-wrong-note")).toBe("true");
-    expect(container.querySelector('[data-testid="waiting-strict-fault-badge"]')).not.toBeNull();
-    expect(triggeredMidis).toHaveLength(0);
-
-    // Release wrong note 61 so step untaints
-    await act(async () => {
-      key61.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-      await Promise.resolve();
-    });
-    expect(key61.getAttribute("data-wrong-note")).toBeNull();
-
-    // Play step 0 chord (C4=60, E4=64) held simultaneously -> completes step 0 and plays LH accompaniment (C3=48)
+    // A graze on the neighboring key flashes red without cancelling the first hit.
     const key60 = container.querySelector('[data-testid="piano-key-60"]') as SVGGElement;
+    const key61 = container.querySelector('[data-testid="piano-key-61"]') as SVGGElement;
     const key64 = container.querySelector('[data-testid="piano-key-64"]') as SVGGElement;
     await act(async () => {
       key60.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      await Promise.resolve();
+      key61.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     });
+    expect(key61.getAttribute("data-wrong-note")).toBe("true");
     expect(key60.getAttribute("data-hit-note")).toBe("true");
+    expect(container.querySelector('[data-testid="waiting-strict-fault-badge"]')).toBeNull();
+    expect(triggeredMidis).toHaveLength(0);
 
+    // Release C, then finish the rolled chord while the grazed key is still held.
     await act(async () => {
+      key60.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
       key64.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      await Promise.resolve();
     });
     // Accompaniment C3 (48) should have played automatically!
     expect(triggeredMidis).toContain(48);
 
     await act(async () => {
-      key60.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      key61.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
       key64.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
       await Promise.resolve();
     });
@@ -386,12 +374,14 @@ describe("<App /> PracticeMode & WaitingMode end-to-end", () => {
     // Accompaniment G3 (55) should have played!
     expect(triggeredMidis).toContain(55);
 
-    // Completing the score after a wrong note opens the Practice Report & Repeat Recommendation pill
+    // Completing a pass lights the status badge without opening the report.
     const reportBtn = container.querySelector(
       '[data-testid="practice-report-toggle-btn"]'
     ) as HTMLButtonElement;
     expect(reportBtn).not.toBeNull();
     expect(reportBtn.textContent).toContain("已练 1 遍");
+    expect(container.querySelector('[data-testid="practice-report-dropdown"]')).toBeNull();
+    act(() => reportBtn.click());
     expect(container.querySelector('[data-testid="practice-recommendation-0"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="measure-ruler-error-dot-0"]')).not.toBeNull();
 
@@ -528,6 +518,101 @@ describe("<App /> PracticeMode & WaitingMode end-to-end", () => {
       (container.querySelector('[data-testid="measure-ruler-item-0"]') as HTMLButtonElement).click();
     });
     expect(container.querySelector('[data-testid="note-anchor-popover"]')).toBeNull();
+  });
+
+  it("automatically reduces speed by 12% on return to both hands and leaves the explanation on demand", async () => {
+    const container = mount(createElement(App, {
+      solverClientFactory: createInProcessSolverClientFactory(),
+      scoreRendererFactory: () => ({
+        render: vi.fn(async () => ({ measureCount: 1, measureGeometry: [] })),
+        highlightMeasure: vi.fn(), markAnchoredNotes: vi.fn(), scrollToMeasure: vi.fn(),
+        syncCursor: vi.fn(), hitTestNoteAtClientPoint: vi.fn(() => null), dispose: vi.fn(),
+      }),
+      audioDeps: createFakeAudioDeps().audioDeps,
+    }));
+    await uploadXml(container, TWO_HAND_SCORE_XML);
+    const find = (id: string) => container.querySelector<HTMLElement>(`[data-testid="${id}"]`);
+    const click = (id: string) => act(() => find(id)!.click());
+    click("practice-mode-rh-only");
+    click("speed-preset-0.75");
+    click("practice-mode-both");
+    expect(find("bpm-readout-btn")?.textContent).toContain("0.66x");
+    click("practice-mode-both");
+    expect(find("bpm-readout-btn")?.textContent).toContain("0.66x");
+    expect(find("practice-report-dropdown")).toBeNull();
+    expect(find("practice-report-toggle-btn")?.textContent).toContain("合手调速");
+    click("practice-report-toggle-btn");
+    expect(find("practice-report-dropdown")?.textContent).toContain("−12%");
+  });
+
+  it("shows a brief red flash even if the wrong key is released in the same input burst", async () => {
+    const container = mount(createElement(App, {
+      solverClientFactory: createInProcessSolverClientFactory(),
+      scoreRendererFactory: () => ({
+        render: vi.fn(async () => ({ measureCount: 1, measureGeometry: [] })),
+        highlightMeasure: vi.fn(), markAnchoredNotes: vi.fn(), scrollToMeasure: vi.fn(),
+        syncCursor: vi.fn(), hitTestNoteAtClientPoint: vi.fn(() => null), dispose: vi.fn(),
+      }),
+      audioDeps: createFakeAudioDeps().audioDeps,
+    }));
+    await uploadXml(container, TWO_HAND_SCORE_XML);
+    const click = (id: string) => act(() => container.querySelector<HTMLElement>(`[data-testid="${id}"]`)!.click());
+    click("waiting-mode-toggle-btn");
+    click("audio-play-btn");
+    const key = container.querySelector('[data-testid="piano-key-61"]')!;
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        key.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+        key.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      });
+      expect(key.getAttribute("data-wrong-note")).toBe("true");
+      act(() => vi.advanceTimersByTime(250));
+      expect(key.getAttribute("data-wrong-note")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("only resets chord hits after a wrong note when Absolute Strictness is enabled in Settings", async () => {
+    const { triggeredMidis, audioDeps } = createFakeAudioDeps();
+    const container = mount(createElement(App, {
+      solverClientFactory: createInProcessSolverClientFactory(),
+      scoreRendererFactory: () => ({
+        render: vi.fn(async () => ({ measureCount: 1, measureGeometry: [] })),
+        highlightMeasure: vi.fn(), markAnchoredNotes: vi.fn(), scrollToMeasure: vi.fn(),
+        syncCursor: vi.fn(), hitTestNoteAtClientPoint: vi.fn(() => null), dispose: vi.fn(),
+      }),
+      audioDeps,
+    }));
+    await uploadXml(container, TWO_HAND_SCORE_XML);
+    const click = (id: string) => act(() => container.querySelector<HTMLElement>(`[data-testid="${id}"]`)!.click());
+    const key = (midi: number) => container.querySelector<SVGGElement>(`[data-testid="piano-key-${midi}"]`)!;
+    const play = async (type: "mousedown" | "mouseup", ...midis: number[]) => {
+      await act(async () => {
+        for (const midi of midis) key(midi).dispatchEvent(new MouseEvent(type, { bubbles: true }));
+      });
+    };
+    click("practice-mode-rh-only");
+    click("practice-settings-btn");
+    const absoluteStrictness = container.querySelector<HTMLInputElement>('[data-testid="absolute-strictness-toggle"]');
+    expect(absoluteStrictness?.checked).toBe(false);
+    expect(container.querySelector<HTMLInputElement>('[data-testid="strict-hold-duration-toggle"]')?.checked).toBe(false);
+    click("absolute-strictness-toggle");
+    expect(absoluteStrictness?.checked).toBe(true);
+    click("practice-settings-close-btn");
+    click("waiting-mode-toggle-btn");
+    click("audio-play-btn");
+
+    await play("mousedown", 60, 61);
+    expect(key(60).getAttribute("data-hit-note")).toBeNull();
+    expect(container.querySelector('[data-testid="waiting-strict-fault-badge"]')).not.toBeNull();
+    await play("mouseup", 61);
+    await play("mousedown", 64);
+    expect(triggeredMidis).not.toContain(48);
+    await play("mouseup", 60, 64);
+    await play("mousedown", 60, 64);
+    expect(triggeredMidis).toContain(48);
   });
 
   it("enforces strict hold duration in UI when enabled: displays hold progress badge, flags early release, and advances once held to required duration", async () => {
@@ -685,7 +770,7 @@ describe("<App /> PracticeMode & WaitingMode end-to-end", () => {
     expect(triggeredMidis).toContain(48);
   });
 
-  it("transitions measure ruler from rose error dot to emerald mastered dot after 3 consecutive clean passes and advances A-B loop to the next measure", async () => {
+  it("marks a measure green after two smooth low-fault passes and offers optional progression on demand", async () => {
     const TWO_MEASURE_SINGLE_STAFF_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">
   <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
@@ -756,14 +841,13 @@ describe("<App /> PracticeMode & WaitingMode end-to-end", () => {
     expect(container.querySelector('[data-testid="measure-ruler-error-dot-0"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="measure-ruler-mastered-dot-0"]')).toBeNull();
 
-    // Passes 2, 3, 4: Play 3 consecutive clean passes on Measure 1 (MIDI 60)
-    for (let pass = 0; pass < 3; pass += 1) {
-      await act(async () => {
-        key60.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-        key60.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-        await Promise.resolve();
-      });
-    }
+    // A second smooth pass with a single accidental slip still earns fluency.
+    await act(async () => {
+      key61.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      key61.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      key60.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      key60.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    });
 
     // Measure 1 ruler indicator transitions from rose error dot to emerald mastered dot!
     expect(container.querySelector('[data-testid="measure-ruler-error-dot-0"]')).toBeNull();
@@ -774,10 +858,12 @@ describe("<App /> PracticeMode & WaitingMode end-to-end", () => {
         ?.getAttribute("data-practice-mastered")
     ).toBe("true");
 
-    // Progression card shows cleanStreak = 3 and ready-next-measure stage
+    // Advice never opens automatically; the badge reveals it when requested.
+    expect(container.querySelector('[data-testid="practice-report-dropdown"]')).toBeNull();
+    act(() => (container.querySelector('[data-testid="practice-report-toggle-btn"]') as HTMLButtonElement).click());
     const progCard = container.querySelector('[data-testid="practice-progression-card"]');
     expect(progCard).not.toBeNull();
-    expect(progCard?.getAttribute("data-clean-streak")).toBe("3");
+    expect(progCard?.textContent).toContain("已流畅");
     expect(progCard?.getAttribute("data-progression-stage")).toBe("ready-next-measure");
 
     // Clicking "进入第 2 小节 →" advances the A-B loop to Measure 2 (index 1)

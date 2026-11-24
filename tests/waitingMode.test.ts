@@ -19,7 +19,6 @@ import {
   evaluatePracticeProgression,
   recordPracticeStepCompleted,
   recordPracticeStepFault,
-  resetMeasureCleanStreak,
 } from "../src/practice/practiceAnalytics";
 
 function makeNote(
@@ -173,6 +172,22 @@ describe("PracticeStep projection (buildPracticeSteps)", () => {
 });
 
 describe("WaitingMode state machine (Absolute Strictness & Hold Duration Verification)", () => {
+  it("accumulates chord hits by default through key releases and a held wrong key", () => {
+    const steps = buildPracticeSteps(makeScoreDoc([
+      makeNote({ noteUid: "c", midi: 60, hand: "RH", onsetTick: 0, onsetSec: 0 }),
+      makeNote({ noteUid: "e", midi: 64, hand: "RH", onsetTick: 0, onsetSec: 0 }),
+    ]), "both");
+    const firstHit = handleWaitingNoteOn(createWaitingModeState(), steps, 60).nextState;
+    const wrongNote = handleWaitingNoteOn(firstHit, steps, 61);
+    expect(wrongNote.faultReason).toBe("wrong-note");
+    expect(wrongNote.nextState).toMatchObject({
+      hitMidis: new Set([60]), wrongMidis: new Set([61]), tainted: false,
+    });
+    const rolledChord = handleWaitingNoteOff(wrongNote.nextState, 60);
+    const lastHit = handleWaitingNoteOn(rolledChord, steps, 64, null, { nowSec: 1 });
+    expect(lastHit.completedScore).toBe(true);
+  });
+
   it("enforces Absolute Strictness: any wrong note taints the step, clears prior hitMidis, and requires all held keys to be released before retrying", () => {
     const notes: NoteEvent[] = [
       makeNote({ noteUid: "c1-a", midi: 60, hand: "RH", onsetTick: 0, onsetSec: 0 }),
@@ -185,17 +200,19 @@ describe("WaitingMode state machine (Absolute Strictness & Hold Duration Verific
     const steps = buildPracticeSteps(doc, "rh-only");
     expect(steps).toHaveLength(2);
 
+    const press = (state: ReturnType<typeof createWaitingModeState>, midi: number) =>
+      handleWaitingNoteOn(state, steps, midi, null, { absoluteStrictness: true });
     let state = createWaitingModeState(0);
 
     // 1. Hit 60 first -> stays on step 0 with hitMidis={60}
-    const r1 = handleWaitingNoteOn(state, steps, 60);
+    const r1 = press(state, 60);
     expect(r1.matched).toBe(true);
     expect(r1.completedStep).toBeNull();
     expect(Array.from(r1.nextState.hitMidis)).toEqual([60]);
     state = r1.nextState;
 
     // 2. Wrong note 61 -> taints step, clears hitMidis, records faultReason="wrong-note"
-    const rWrong = handleWaitingNoteOn(state, steps, 61);
+    const rWrong = press(state, 61);
     expect(rWrong.matched).toBe(false);
     expect(rWrong.faultReason).toBe("wrong-note");
     expect(rWrong.nextState.tainted).toBe(true);
@@ -204,7 +221,7 @@ describe("WaitingMode state machine (Absolute Strictness & Hold Duration Verific
     state = rWrong.nextState;
 
     // 3. Pressing the remaining expected note 64 while 60 and 61 are still held is rejected because tainted=true
-    const rWhileTainted = handleWaitingNoteOn(state, steps, 64);
+    const rWhileTainted = press(state, 64);
     expect(rWhileTainted.matched).toBe(false);
     expect(rWhileTainted.completedStep).toBeNull();
     expect(rWhileTainted.nextState.tainted).toBe(true);
@@ -216,21 +233,21 @@ describe("WaitingMode state machine (Absolute Strictness & Hold Duration Verific
     expect(state.tainted).toBe(true);
 
     // 5. Releasing 60 and 64 clears activeStepMidis -> untaints step for a fresh clean attempt
-    state = handleWaitingNoteOff(state, 60);
+    state = handleWaitingNoteOff(state, 60, { absoluteStrictness: true });
     expect(state.tainted).toBe(true);
     state = handleWaitingNoteOff(state, 64);
     expect(state.tainted).toBe(false);
     expect(state.lastResetReason).toBeNull();
 
     // 6. Also verify simultaneous chord holding: pressing 60 then releasing 60 removes it from hitMidis
-    state = handleWaitingNoteOn(state, steps, 60).nextState;
+    state = press(state, 60).nextState;
     expect(Array.from(state.hitMidis)).toEqual([60]);
-    state = handleWaitingNoteOff(state, 60);
+    state = handleWaitingNoteOff(state, 60, { absoluteStrictness: true });
     expect(Array.from(state.hitMidis)).toEqual([]);
 
     // 7. Cleanly hold 60 and 64 simultaneously -> completes step 0 and advances to step 1
-    state = handleWaitingNoteOn(state, steps, 60).nextState;
-    const r2 = handleWaitingNoteOn(state, steps, 64);
+    state = press(state, 60).nextState;
+    const r2 = press(state, 64);
     expect(r2.matched).toBe(true);
     expect(r2.completedStep?.stepIndex).toBe(0);
     expect(r2.completedStep?.accompanimentNotes.map((n) => n.midi)).toEqual([48]);
@@ -240,7 +257,7 @@ describe("WaitingMode state machine (Absolute Strictness & Hold Duration Verific
     state = r2.nextState;
 
     // 8. Fresh NoteOn 64 completes step 1 and finishes score
-    const r3 = handleWaitingNoteOn(state, steps, 64);
+    const r3 = press(state, 64);
     expect(r3.matched).toBe(true);
     expect(r3.completedScore).toBe(true);
     expect(r3.advancedToStep).toBeNull();
@@ -357,12 +374,12 @@ describe("Multi-pass PracticeAnalytics & Repeat Recommendations", () => {
     let analytics = createPracticeAnalyticsState();
 
     // Pass 1: Step 0 clean; Step 1 has 2 wrong-note faults; Step 2 has 1 early-release fault -> finish Pass 1
-    analytics = recordPracticeStepCompleted(analytics); // step 0 clean
+    analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[0] }); // step 0 clean
     analytics = recordPracticeStepFault(analytics, steps[1], "wrong-note", 63);
     analytics = recordPracticeStepFault(analytics, steps[1], "wrong-note", 65);
-    analytics = recordPracticeStepCompleted(analytics); // step 1 done
+    analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[1] }); // step 1 done
     analytics = recordPracticeStepFault(analytics, steps[2], "early-release", 67);
-    analytics = recordPracticeStepCompleted(analytics, { passCompleted: true }); // step 2 done + pass 1 complete
+    analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[2], passCompleted: true }); // pass 1 complete
 
     expect(analytics.completedPasses).toBe(1);
     expect(analytics.totalStepsCompleted).toBe(3);
@@ -371,19 +388,20 @@ describe("Multi-pass PracticeAnalytics & Repeat Recommendations", () => {
     expect(analytics.stepStatsByIndex[1].failedPasses).toBe(1);
 
     // Pass 2: Step 1 faults again -> recurrentPasses becomes 2!
-    analytics = recordPracticeStepCompleted(analytics); // step 0 clean
+    analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[0] }); // step 0 clean
     analytics = recordPracticeStepFault(analytics, steps[1], "wrong-note", 63);
-    analytics = recordPracticeStepCompleted(analytics); // step 1 done
-    analytics = recordPracticeStepCompleted(analytics, { passCompleted: true }); // step 2 clean + pass 2 complete
+    analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[1] }); // step 1 done
+    analytics = recordPracticeStepFault(analytics, steps[2], "early-release", 67);
+    analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[2], passCompleted: true }); // pass 2 complete
 
     expect(analytics.completedPasses).toBe(2);
     expect(analytics.stepStatsByIndex[1].failedPasses).toBe(2);
 
     const summaries = buildMeasureErrorSummaries(analytics);
-    expect(summaries.has(0)).toBe(false);
+    expect(summaries.get(0)?.mastered).toBe(true);
     expect(summaries.get(1)?.recurrentPasses).toBe(2);
     expect(summaries.get(1)?.pitchErrors).toBe(3);
-    expect(summaries.get(2)?.durationErrors).toBe(1);
+    expect(summaries.get(2)?.durationErrors).toBe(2);
 
     const warnings: TransitionCue[] = [
       {
@@ -418,148 +436,76 @@ describe("Multi-pass PracticeAnalytics & Repeat Recommendations", () => {
     expect(recs[0].prescription).toContain("左手移位");
   });
 
-  it("evaluates 3-pass consecutive clean mastery, graduates mastered measures out of trouble recommendations, and guides hand/speed/next-measure progression", () => {
-    const steps = [
-      {
-        stepIndex: 0,
-        onsetTick: 0,
-        onsetSec: 0,
-        measureIndex: 0,
-        isGrace: false,
-        expectedMidis: [60],
-        expectedNotes: [makeNote({ noteUid: "m0-0", midi: 60, hand: "RH", measureIndex: 0 })],
-        accompanimentNotes: [],
-        primarySliceId: "s0",
-        expectedDurationSec: 0.5,
-      },
-      {
-        stepIndex: 1,
-        onsetTick: 4,
-        onsetSec: 0.5,
-        measureIndex: 0,
-        isGrace: false,
-        expectedMidis: [62],
-        expectedNotes: [makeNote({ noteUid: "m0-1", midi: 62, hand: "RH", measureIndex: 0 })],
-        accompanimentNotes: [],
-        primarySliceId: "s1",
-        expectedDurationSec: 0.5,
-      },
-    ];
+  it("marks a measure fluent after one clean or two low-fault smooth passes without erasing progress after a slip", () => {
+    const steps = buildPracticeSteps(makeScoreDoc([
+      makeNote({ noteUid: "c", midi: 60, hand: "RH", onsetSec: 0 }),
+      makeNote({ noteUid: "d", midi: 62, hand: "RH", onsetTick: 4, onsetSec: 0.5 }),
+    ]), "both");
+    const pass = (
+      analytics: ReturnType<typeof createPracticeAnalyticsState>,
+      faults = 0,
+      delay = 0.5,
+    ) => {
+      for (let i = 0; i < faults; i++) {
+        analytics = recordPracticeStepFault(analytics, steps[0], "wrong-note", 61);
+      }
+      analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[0], nowSec: 0 });
+      return recordPracticeStepCompleted(analytics, { completedStep: steps[1], nowSec: delay, passCompleted: true });
+    };
+    const summary = (analytics: ReturnType<typeof createPracticeAnalyticsState>) => buildMeasureErrorSummaries(analytics).get(0);
 
+    const clean = pass(createPracticeAnalyticsState());
+    expect(summary(clean)?.mastered).toBe(true);
+    expect(summary(pass(clean, 1))).toMatchObject({ mastered: true, pitchErrors: 1 });
+
+    const oneSlip = pass(createPracticeAnalyticsState(), 1);
+    expect(summary(oneSlip)?.mastered).toBe(false);
+    const interrupted = pass(oneSlip, 2);
+    expect(summary(interrupted)?.mastered).toBe(false);
+    const fluent = pass(interrupted, 1);
+    expect(summary(fluent)).toMatchObject({ mastered: true, pitchErrors: 4 });
+    expect(buildPracticeRepeatRecommendations(fluent, {
+      measureCount: 1, currentSpeed: 1, currentPracticeMode: "both",
+    })).toHaveLength(0);
+
+    const hesitated = pass(createPracticeAnalyticsState(), 0, 3);
+    expect(summary(hesitated)).toMatchObject({ mastered: false, hesitationCount: 1 });
+  });
+
+  it("requires a fresh fluent pass when joining both hands and retains each mode's own progress", () => {
+    const [step] = buildPracticeSteps(makeScoreDoc([
+      makeNote({ noteUid: "c", midi: 60, hand: "RH", onsetSec: 0 }),
+    ]), "rh-only");
+    const options = { measureCount: 2, activeMeasureIndex: 0, currentSpeed: 1 };
+    const oneHand = recordPracticeStepCompleted(createPracticeAnalyticsState(), {
+      completedStep: step, passCompleted: true, practiceMode: "rh-only",
+    });
+    expect(evaluatePracticeProgression(oneHand, { ...options, currentPracticeMode: "rh-only" }).stage).toBe("step-up-hand");
+    expect(evaluatePracticeProgression(oneHand, { ...options, currentPracticeMode: "both" }).stage).toBe("practicing");
+    const bothHands = recordPracticeStepCompleted(oneHand, { completedStep: step, passCompleted: true, practiceMode: "both" });
+    expect(evaluatePracticeProgression(bothHands, { ...options, currentPracticeMode: "both" }).stage).toBe("ready-next-measure");
+    expect(evaluatePracticeProgression(bothHands, { ...options, currentPracticeMode: "lh-only" }).stage).toBe("practicing");
+  });
+
+  it("suggests relative tempo increases for fluent sections, but not a hesitant section", () => {
+    const steps = buildPracticeSteps(makeScoreDoc([
+      makeNote({ noteUid: "a", midi: 60, hand: "RH", measureIndex: 0, onsetTick: 0, onsetSec: 0 }),
+      makeNote({ noteUid: "b", midi: 62, hand: "RH", measureIndex: 1, onsetTick: 4, onsetSec: 0.5 }),
+      makeNote({ noteUid: "c", midi: 64, hand: "RH", measureIndex: 2, onsetTick: 8, onsetSec: 1 }),
+    ]), "both");
     let analytics = createPracticeAnalyticsState();
+    analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[0], nowSec: 0, speedMultiplier: 0.5 });
+    analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[1], nowSec: 4, speedMultiplier: 0.5, passCompleted: true });
+    analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[2], nowSec: 0, speedMultiplier: 0.75, passCompleted: true });
 
-    // Pass 1: Fault on step 0 in measure 0 -> cleanStreak = 0, mastered = false
-    analytics = recordPracticeStepFault(analytics, steps[0], "wrong-note", 61);
-    analytics = recordPracticeStepCompleted(analytics, { completedStep: steps[0], nowSec: 0.5 });
-    analytics = recordPracticeStepCompleted(analytics, {
-      completedStep: steps[1],
-      passCompleted: true,
-      nowSec: 1.0,
+    const progression = evaluatePracticeProgression(analytics, {
+      measureCount: 3, currentSpeed: 0.5, currentPracticeMode: "both",
     });
-    expect(analytics.measureCleanStreakByIndex[0]).toBe(0);
-    expect(buildMeasureErrorSummaries(analytics).get(0)?.mastered).toBe(false);
-    expect(
-      buildPracticeRepeatRecommendations(analytics, {
-        measureCount: 4,
-        currentSpeed: 1.0,
-        currentPracticeMode: "both",
-      })
-    ).toHaveLength(1);
-
-    // Pass 2 & Pass 3: 2 consecutive clean passes -> cleanStreak = 2, status = "recovering"
-    for (let pass = 0; pass < 2; pass += 1) {
-      analytics = recordPracticeStepCompleted(analytics, {
-        completedStep: steps[0],
-        nowSec: 2.0 + pass * 2,
-      });
-      analytics = recordPracticeStepCompleted(analytics, {
-        completedStep: steps[1],
-        passCompleted: true,
-        nowSec: 2.5 + pass * 2,
-      });
-    }
-    expect(analytics.measureCleanStreakByIndex[0]).toBe(2);
-    expect(buildMeasureErrorSummaries(analytics).get(0)?.status).toBe("recovering");
-
-    const progBeforeMastery = evaluatePracticeProgression(analytics, {
-      measureCount: 4,
-      abLoop: { startMeasureIndex: 0, endMeasureIndex: 0, enabled: true, loopGap: false },
-      currentSpeed: 1.0,
-      currentPracticeMode: "both",
-    });
-    expect(progBeforeMastery.stage).toBe("practicing");
-    expect(progBeforeMastery.cleanStreak).toBe(2);
-    expect(progBeforeMastery.isCleanStreakMet).toBe(false);
-
-    // Pass 4: 3rd consecutive clean pass (with a hesitation gap of 3.0s between step 0 and step 1) -> cleanStreak = 3, mastered = true!
-    analytics = recordPracticeStepCompleted(analytics, {
-      completedStep: steps[0],
-      nowSec: 10.0,
-    });
-    analytics = recordPracticeStepCompleted(analytics, {
-      completedStep: steps[1],
-      passCompleted: true,
-      nowSec: 13.0,
-    });
-
-    const summaryAfter3 = buildMeasureErrorSummaries(analytics).get(0);
-    expect(summaryAfter3?.cleanStreak).toBe(3);
-    expect(summaryAfter3?.mastered).toBe(true);
-    expect(summaryAfter3?.status).toBe("mastered");
-    expect(summaryAfter3?.hesitationCount).toBe(1);
-
-    // Mastered measure automatically graduates out of trouble repeat recommendations!
-    expect(
-      buildPracticeRepeatRecommendations(analytics, {
-        measureCount: 4,
-        currentSpeed: 1.0,
-        currentPracticeMode: "both",
-      })
-    ).toHaveLength(0);
-
-    // Verify staged graduation guidance:
-    // 1) If currently in single-hand mode ("rh-only"), advises restoring both hands ("step-up-hand")
-    const progSingleHand = evaluatePracticeProgression(analytics, {
-      measureCount: 4,
-      abLoop: { startMeasureIndex: 0, endMeasureIndex: 0, enabled: true, loopGap: false },
-      currentSpeed: 0.75,
-      currentPracticeMode: "rh-only",
-      isSingleStaff: false,
-    });
-    expect(progSingleHand.stage).toBe("step-up-hand");
-    expect(progSingleHand.recommendedNextPracticeMode).toBe("both");
-
-    // 2) If in both-hands mode at slow speed (0.75x), advises stepping up speed ("step-up-speed")
-    const progSlowSpeed = evaluatePracticeProgression(analytics, {
-      measureCount: 4,
-      abLoop: { startMeasureIndex: 0, endMeasureIndex: 0, enabled: true, loopGap: false },
-      currentSpeed: 0.75,
-      targetSpeed: 1.0,
-      currentPracticeMode: "both",
-      isSingleStaff: false,
-    });
-    expect(progSlowSpeed.stage).toBe("step-up-speed");
-    expect(progSlowSpeed.recommendedNextSpeedMultiplier).toBe(0.9);
-
-    // 3) If in both-hands mode at target speed (1.0x), advises advancing to next measure ("ready-next-measure")
-    const progReadyNext = evaluatePracticeProgression(analytics, {
-      measureCount: 4,
-      abLoop: { startMeasureIndex: 0, endMeasureIndex: 0, enabled: true, loopGap: false },
-      currentSpeed: 1.0,
-      targetSpeed: 1.0,
-      currentPracticeMode: "both",
-      isSingleStaff: false,
-    });
-    expect(progReadyNext.stage).toBe("ready-next-measure");
-    expect(progReadyNext.nextStartMeasureIndex).toBe(1);
-    expect(progReadyNext.nextEndMeasureIndex).toBe(1);
-    expect(progReadyNext.bridgeStartMeasureIndex).toBe(0);
-    expect(progReadyNext.bridgeEndMeasureIndex).toBe(1);
-    expect(progReadyNext.recentPassHadHesitation).toBe(true);
-
-    // Resetting streak for a new difficulty stage resets cleanStreak back to 0
-    const afterReset = resetMeasureCleanStreak(analytics, 0, 0);
-    expect(afterReset.measureCleanStreakByIndex[0]).toBe(0);
+    expect(progression.sectionPaceSuggestions).toEqual([
+      { startMeasureIndex: 0, endMeasureIndex: 0, practicedSpeed: 0.5, suggestedSpeed: 0.55 },
+      { startMeasureIndex: 2, endMeasureIndex: 2, practicedSpeed: 0.75, suggestedSpeed: 0.83 },
+    ]);
+    expect(progression.detail).toContain("步间犹豫");
   });
 });
 

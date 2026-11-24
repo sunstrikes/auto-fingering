@@ -6,7 +6,15 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     coverage: {
       provider: "v8",
-      include: ["src/solver/**/*.ts", "src/musicxml/**/*.ts"],
+      include: [
+        "src/solver/**/*.ts",
+        "src/domain/{measureHashes,noteCoordIndex,scoreCoord,sha256}.ts",
+        "src/musicxml/**/*.ts",
+        "src/midi/**/*.ts",
+        "src/persistence/**/*.ts",
+        "src/practice/**/*.ts",
+      ],
+      exclude: ["src/practice/useScreenWakeLock.ts"],
       reporter: ["text", "json-summary"],
     },
   },
