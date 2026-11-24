@@ -22,10 +22,10 @@ interface BackupData {
 type BackupBlobSource = Omit<ScoreBlobSource, "bytes"> & { base64: string };
 
 export interface PracticeBackupExport {
-  full: string;
-  data: string;
+  fullJson: string;
+  metadataOnlyJson: string;
   fullBytes: number;
-  dataBytes: number;
+  metadataOnlyBytes: number;
   skippedScores: number;
 }
 
@@ -59,10 +59,11 @@ export async function createPracticeBackup(storage: PracticeStoragePort): Promis
       ...(blob.repairAlternate && blob.repairAlternate.bytes.byteLength <= MAX_BACKUP_SCORE_BYTES
         ? { repairAlternate: { ...encodeBlob(blob.repairAlternate), cacheKey: blob.repairAlternate.cacheKey } } : {}),
     }]));
-  const data = JSON.stringify(body);
-  const full = JSON.stringify({ ...body, scoreBlobs });
+  const metadataOnlyJson = JSON.stringify(body);
+  const fullJson = JSON.stringify({ ...body, scoreBlobs });
   const encoder = new TextEncoder();
-  return { data, full, dataBytes: encoder.encode(data).byteLength, fullBytes: encoder.encode(full).byteLength,
+  return { metadataOnlyJson, fullJson, metadataOnlyBytes: encoder.encode(metadataOnlyJson).byteLength,
+    fullBytes: encoder.encode(fullJson).byteLength,
     skippedScores: blobs.length - Object.keys(scoreBlobs).length };
 }
 

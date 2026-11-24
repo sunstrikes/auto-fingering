@@ -1,6 +1,7 @@
 import { copyStorageRecord } from "./storageRecords";
+import { createScoreCachePolicy } from "./scoreCache";
 import {
-  DATABASE_NAME, SCHEMA_VERSION, storeKeyPaths, scoreCacheLimits, fitScoreBlob, scoreBlobCacheBytes,
+  DATABASE_NAME, SCHEMA_VERSION, storeKeyPaths,
   type PracticeStoragePort, type PracticeStorageRecords, type PracticeStore,
   type PracticeStorageWrite, type ScoreBlob, type ScoreCacheOptions,
 } from "./storagePort";
@@ -64,16 +65,14 @@ export function createIndexedDbStorage(options: IndexedDbStorageOptions = {}): P
 } {
   const factory = options.indexedDB ?? globalThis.indexedDB;
   const now = options.now ?? Date.now;
-  const { maxCount, maxBytes } = scoreCacheLimits(options);
+  const scoreCache = createScoreCachePolicy(options);
   let opening: Promise<IDBDatabase> | undefined;
   const database = () => opening ??= openDatabase(factory, options.name ?? DATABASE_NAME);
 
   const commit = async (write: PracticeStorageWrite) => {
     const batches = (Object.keys(storeKeyPaths) as PracticeStore[]).flatMap((name) => {
-      const records = name === "scoreBlobs" ? (maxCount > 0 ? write.scoreBlobs?.flatMap((record) => {
-        const blob = fitScoreBlob(copyStorageRecord("scoreBlobs", record), maxBytes);
-        return blob ? [blob] : [];
-      }) : []) : write[name]?.map((record) => copyStorageRecord(name, record));
+      const records = name === "scoreBlobs" ? write.scoreBlobs?.flatMap((record) => scoreCache.prepare(record) ?? [])
+        : write[name]?.map((record) => copyStorageRecord(name, record));
       return records?.length ? [{ name, records }] : [];
     });
     if (!batches.length) return;
@@ -94,17 +93,9 @@ export function createIndexedDbStorage(options: IndexedDbStorageOptions = {}): P
         }
       }
       if (name === "scoreBlobs") {
-        const request = store.index("byLastAccessed").getAll();
+        const request = store.getAll();
         request.onsuccess = () => {
-          const rows = request.result as ScoreBlob[];
-          let count = rows.length;
-          let bytes = rows.reduce((total, row) => total + scoreBlobCacheBytes(row), 0);
-          for (const row of rows) {
-            if (count <= maxCount && bytes <= maxBytes) break;
-            store.delete(row.fingerprint);
-            bytes -= scoreBlobCacheBytes(row);
-            count--;
-          }
+          for (const key of scoreCache.evictionKeys(request.result)) store.delete(key);
         };
       }
     }

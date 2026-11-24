@@ -266,6 +266,8 @@ export interface SlurSpan {
   crossesBarline: boolean;
 }
 
+export type ExportFormat = "musicxml" | "mxl";
+
 export interface ScoreDocument {
   title: string;
   xmlDoc: Document;

@@ -1,53 +1,14 @@
-import type { ScoreCoord, ScoreDocument } from "../domain/types";
-import { getNoteScoreCoord } from "./scoreCoord";
-import { sha256 } from "./sha256";
+import type { ScoreDocument } from "../domain/types";
+import { computeMeasureHashes, type ScoreSkeleton } from "../domain/measureHashes";
+import { sha256 } from "../domain/sha256";
 
 export interface ScoreIdentity {
   fingerprint: string;
   measureHashes: string[];
 }
 
-interface Onset {
-  coord: ScoreCoord;
-  midis: Set<number>;
-}
-
-function compareOnsets(a: Onset, b: Onset): number {
-  return a.coord.beatNum / a.coord.beatDen - b.coord.beatNum / b.coord.beatDen ||
-    a.coord.beatDen - b.coord.beatDen ||
-    (a.coord.graceOrder ?? Infinity) - (b.coord.graceOrder ?? Infinity);
-}
-
-/** Positional within a measure but deliberately independent of its ordinal. */
-export function computeMeasureHashes(score: ScoreDocument): string[] {
-  const measures = Array.from({ length: score.measureCount }, () => new Map<string, Onset>());
-  for (const note of score.noteEvents) {
-    // Like the playback slices, a written tie stop is not a new strike.
-    if (note.isTieStop) continue;
-    const coord = getNoteScoreCoord(score, note);
-    const measure = measures[coord.measureIndex];
-    if (!measure) continue;
-    const key = `${coord.beatNum}/${coord.beatDen}:${coord.graceOrder ?? "m"}`;
-    let onset = measure.get(key);
-    if (!onset) {
-      onset = { coord, midis: new Set() };
-      measure.set(key, onset);
-    }
-    onset.midis.add(note.midi);
-  }
-
-  return measures.map((measure) => sha256(JSON.stringify(
-    [...measure.values()].sort(compareOnsets).map(({ coord, midis }) => [
-      coord.beatNum,
-      coord.beatDen,
-      coord.graceOrder ?? null,
-      [...midis].sort((a, b) => a - b),
-    ]),
-  )));
-}
-
 /** Array order encodes measureIndex; per-measure hashes also work as a multiset. */
-export function getScoreIdentity(score: ScoreDocument): ScoreIdentity {
+export function getScoreIdentity(score: ScoreSkeleton & Pick<ScoreDocument, "measureStructuralMeta">): ScoreIdentity {
   const cached = score.measureStructuralMeta?.map((meta) => meta.measureHash);
   const measureHashes = cached?.length === score.measureCount &&
       cached.every((hash): hash is string => hash !== undefined)

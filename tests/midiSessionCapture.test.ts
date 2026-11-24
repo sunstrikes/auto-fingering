@@ -6,28 +6,33 @@ const input = { channel: 0, portId: "piano", source: "midi" } as const;
 const strike = { ...input, type: "noteon", midi: 60, velocity: 127, timeStampMs: 1 } as const;
 const release = { ...input, type: "noteoff", midi: 60, velocity: 0, timeStampMs: 3 } as const;
 
-it("retains only the active score bout, including paused wake-up, and discards late releases after Stop", () => {
+it("isolates waiting and paused packets from continuous playback while retaining them within the bout", () => {
   const capture = createMidiSessionCapture();
   capture.record(strike);
   capture.setTransport("playing", false);
   capture.record(strike);
-  expect(capture.sliceWindow(0, 10)).toEqual([]);
+  expect(capture.sliceWindow(0, 10, { mode: "continuous" })).toEqual([]);
 
   capture.setTransport("playing", true);
   capture.record(strike);
+  capture.setMode("waiting");
+  capture.record({ ...strike, midi: 62, timeStampMs: 2 });
   capture.setTransport("paused", true);
   capture.record(release);
   capture.setTransport("playing", true);
-  expect(capture.sliceWindow(0, 10)).toEqual([strike, release]);
+  expect(capture.sliceWindow(0, 10, { mode: "continuous" })).toEqual([strike]);
+  expect(capture.sliceWindow(0, 10, { mode: "waiting" })).toEqual([{ ...strike, midi: 62, timeStampMs: 2 }]);
+  expect(capture.sliceWindow(0, 10, { mode: "waiting", transport: "paused" })).toEqual([release]);
+  expect(capture.sliceWindow(0, 10, { mode: "continuous", transport: "paused" })).toEqual([]);
 
   capture.setTransport("stopped", true);
   capture.record(release);
   capture.setTransport("playing", true);
-  expect(capture.sliceWindow(0, 10)).toEqual([]);
+  expect(capture.sliceWindow(0, 10, { mode: "waiting", transport: "paused" })).toEqual([]);
   capture.record(strike);
   capture.setTransport("stopped", false);
   capture.record(release);
-  expect(capture.sliceWindow(0, 10)).toEqual([]);
+  expect(capture.sliceWindow(0, 10, { mode: "waiting" })).toEqual([]);
 });
 
 it("clocks virtual and QWERTY input without changing its source or inventing a hardware timestamp", () => {
@@ -37,7 +42,7 @@ it("clocks virtual and QWERTY input without changing its source or inventing a h
   capture.record(unclocked);
   capture.record({ ...unclocked, source: "virtual", portId: "screen" });
   capture.record({ ...unclocked, source: "qwerty", portId: "keyboard" });
-  expect(capture.sliceWindow(0, 10)).toEqual([
+  expect(capture.sliceWindow(0, 10, { mode: "continuous" })).toEqual([
     { ...unclocked, source: "virtual", portId: "screen", timeStampMs: 4.25 },
     { ...unclocked, source: "qwerty", portId: "keyboard", timeStampMs: 4.25 },
   ]);

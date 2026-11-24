@@ -13,9 +13,9 @@ import type {
   TempoPoint,
   TimeSignaturePoint,
 } from "../domain/types";
-import { computeSourceFingeringHash } from "../persistence/anchorDrafts";
-import { computeMeasureHashes } from "../persistence/fingerprint";
-import { makeScoreCoord } from "../persistence/scoreCoord";
+import { computeSourceFingeringHash } from "./sourceFingeringHash";
+import { computeMeasureHashes } from "../domain/measureHashes";
+import { makeScoreCoord } from "../domain/scoreCoord";
 import {
   findDirectChild as firstDirectChild,
   findDirectChildren as directChildrenByTag,

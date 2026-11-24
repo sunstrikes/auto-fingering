@@ -1,11 +1,11 @@
-import type { ScoreDocument } from "../domain/types";
-import { exportMxlContainer, type MxlContainer } from "../musicxml/mxl";
-import { loadScoreInput, type ExportFormat } from "../musicxml/scoreSession";
+import type { ExportFormat, ScoreDocument } from "../domain/types";
+import { sha256 } from "../domain/sha256";
 import { captureDraft, hashSourceFingerings, type AnchorState } from "./anchorDrafts";
 import { getScoreIdentity, isSimilarScore, type ScoreIdentity } from "./fingerprint";
-import { sha256 } from "./sha256";
 import { GLOBAL_WORKSPACE, type PieceProfile, type PracticeStoragePort,
   type PracticeStorageWrite, type ScoreBlob, type ScoreBlobSource, type WorkspacePrefs } from "./storagePort";
+
+type ScoreProfileSource = Parameters<typeof getScoreIdentity>[0] & Pick<ScoreDocument, "title" | "sourceFingeringHash">;
 
 export function addScoreAlias(profile: PieceProfile, identity: ScoreIdentity): PieceProfile {
   if (profile.fingerprints.includes(identity.fingerprint)) return profile;
@@ -13,7 +13,7 @@ export function addScoreAlias(profile: PieceProfile, identity: ScoreIdentity): P
     measureHashesByFingerprint: { ...profile.measureHashesByFingerprint, [identity.fingerprint]: identity.measureHashes } };
 }
 
-export function newPieceProfile(score: ScoreDocument, identity = getScoreIdentity(score)): PieceProfile {
+export function newPieceProfile(score: ScoreProfileSource, identity = getScoreIdentity(score)): PieceProfile {
   // randomUUID is secure-context only; the fallback still uses cryptographic entropy on LAN origins.
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = (bytes[6] & 15) | 64;
@@ -25,9 +25,10 @@ export function newPieceProfile(score: ScoreDocument, identity = getScoreIdentit
 }
 
 export type OpenChoice = { kind: "link"; title: string } | { kind: "fingering"; title: string };
+export type OpenDecision = "link-existing" | "open-as-new" | "keep-local-draft" | "adopt-imported";
 
-export async function resolvePieceOpen(storage: PracticeStoragePort, score: ScoreDocument,
-  choose: (choice: OpenChoice) => Promise<boolean>, existing?: WorkspacePrefs) {
+export async function resolvePieceOpen(storage: PracticeStoragePort, score: ScoreProfileSource,
+  choose: (choice: OpenChoice) => Promise<OpenDecision>, existing?: WorkspacePrefs) {
   const identity = getScoreIdentity(score);
   const active = (p: PieceProfile) => p.archivedAtMs === undefined;
   const byRecent = (a: PieceProfile, b: PieceProfile) => (b.lastPracticedAtMs ?? 0) - (a.lastPracticedAtMs ?? 0);
@@ -41,7 +42,7 @@ export async function resolvePieceOpen(storage: PracticeStoragePort, score: Scor
     const similar = (await storage.all("pieceProfiles")).filter(active).sort(byRecent)
       .find((candidate) => Object.values(candidate.measureHashesByFingerprint)
         .some((hashes) => isSimilarScore(hashes, identity.measureHashes)));
-    if (similar && await choose({ kind: "link", title: similar.title })) profile = similar;
+    if (similar && await choose({ kind: "link", title: similar.title }) === "link-existing") profile = similar;
   }
   if (!profile) return { profile: newPieceProfile(score, identity), prefs: undefined, draft: undefined };
   const [prefs, draft] = await Promise.all([
@@ -50,39 +51,29 @@ export async function resolvePieceOpen(storage: PracticeStoragePort, score: Scor
   const sourceDraft = prefs?.repairEdge?.otherFingerprint === identity.fingerprint &&
       prefs.scoreFingerprint !== identity.fingerprint ? prefs.repairEdge.otherDraft : draft;
   const conflict = exact && !existing && sourceDraft && sourceDraft.sourceFingeringHash !== hashSourceFingerings(score);
-  const keepDraft = !conflict || await choose({ kind: "fingering", title: profile.title });
+  const keepDraft = !conflict || await choose({ kind: "fingering", title: profile.title }) === "keep-local-draft";
   return { profile: addScoreAlias(profile, identity), prefs, draft: keepDraft ? sourceDraft : undefined };
 }
 
-async function loadCachedSource(source: ScoreBlobSource, prefs: WorkspacePrefs) {
-  const session = await loadScoreInput({ fileName: source.fileName, bytes: source.bytes },
-    { singleStaffHandOverride: prefs.singleStaffHand });
-  session.sourceFormat = source.sourceFormat ?? "mxl";
-  return { session, fileName: source.fileName };
+export async function readLastOpenedPrefs(storage: PracticeStoragePort) {
+  const global = await storage.get("workspacePrefs", GLOBAL_WORKSPACE);
+  return global?.lastOpenedPieceId ? storage.get("workspacePrefs", global.lastOpenedPieceId) : undefined;
 }
 
-export async function readCachedScore(storage: PracticeStoragePort, fingerprint: string, prefs: WorkspacePrefs) {
-  const blob = await storage.accessScoreBlob(fingerprint);
-  return blob ? loadCachedSource(blob, prefs) : undefined;
-}
-
-export async function readRepairAlternate(storage: PracticeStoragePort, prefs: WorkspacePrefs) {
-  const repair = prefs.repairEdge;
-  if (!repair) return undefined;
+export async function readRepairAlternate(storage: PracticeStoragePort, repair: NonNullable<WorkspacePrefs["repairEdge"]>) {
   const blob = await storage.accessScoreBlob(repair.otherFingerprint);
   const source = repair.alternateCacheKey ? blob?.repairAlternate : blob;
   if (!source || (repair.alternateCacheKey && blob?.repairAlternate?.cacheKey !== repair.alternateCacheKey)) return undefined;
-  return loadCachedSource(source, prefs);
+  return source;
 }
 
 export interface WorkspaceSource extends AnchorState {
   rawXmlText: string;
-  scoreDoc: ScoreDocument;
+  scoreDoc: ScoreProfileSource;
 }
 
 export interface CurrentWorkspace extends WorkspaceSource {
   fileName: string;
-  mxlContainer?: MxlContainer;
   exportFormat: ExportFormat;
   prefs: Omit<WorkspacePrefs, "scopeKey" | "scoreFingerprint" | "repairEdge" | "updatedAtMs">;
   repair?: { direction: "undo" | "redo"; alternate: WorkspaceSource };
@@ -100,9 +91,9 @@ export interface WorkspaceChanges {
 /** Persist only changed parts. For a score edit keep a single adjacent score edge,
  * not volatile solver output or the ordinary anchor undo stack. */
 export async function saveWorkspace(storage: PracticeStoragePort, profile: PieceProfile,
-  workspace: CurrentWorkspace, changes: WorkspaceChanges) {
+  workspace: CurrentWorkspace, changes: WorkspaceChanges, compressScore: (xml: string) => Promise<Uint8Array>) {
   const now = Date.now();
-  const { scoreDoc, rawXmlText, fileName, exportFormat, mxlContainer, prefs, repair } = workspace;
+  const { scoreDoc, rawXmlText, fileName, exportFormat, prefs, repair } = workspace;
   const identity = getScoreIdentity(scoreDoc);
   // An import may have added aliases while this score was already open.
   const known = profile.fingerprints.includes(identity.fingerprint) && !changes.profile && !changes.practiced
@@ -124,11 +115,11 @@ export async function saveWorkspace(storage: PracticeStoragePort, profile: Piece
   const workspacePrefs: WorkspacePrefs[] = [];
   if (changes.prefs || changes.cache) workspacePrefs.push({ ...prefs, scopeKey: profile.pieceId,
     scoreFingerprint: identity.fingerprint, repairEdge, updatedAtMs: now });
-  if (changes.lastOpened) workspacePrefs.push({ scopeKey: GLOBAL_WORKSPACE, lastOpenedPieceId: profile.pieceId, updatedAtMs: now });
+  if (changes.lastOpened) workspacePrefs.push(lastOpenedRecord(profile.pieceId, now));
   if (workspacePrefs.length) write.workspacePrefs = workspacePrefs;
   if (changes.cache) {
     const pack = async (xml: string): Promise<ScoreBlobSource> => {
-      const bytes = await exportMxlContainer(xml, mxlContainer);
+      const bytes = await compressScore(xml);
       return { bytes, byteLength: bytes.byteLength, fileName, sourceFormat: exportFormat };
     };
     // Core data must survive unavailable storage for the (evictable) score blobs.
@@ -161,6 +152,25 @@ export async function saveWorkspace(storage: PracticeStoragePort, profile: Piece
   return nextProfile;
 }
 
+function lastOpenedRecord(pieceId: string, now: number): WorkspacePrefs {
+  return { scopeKey: GLOBAL_WORKSPACE, lastOpenedPieceId: pieceId, updatedAtMs: now };
+}
+
+export async function archivePieceAndRestart(storage: PracticeStoragePort, previous: PieceProfile,
+  score: ScoreProfileSource, prefs: CurrentWorkspace["prefs"]) {
+  const identity = getScoreIdentity(score);
+  const restarted = newPieceProfile(score, identity);
+  const now = Date.now();
+  await storage.commit({
+    pieceProfiles: [{ ...previous, archivedAtMs: now }, restarted],
+    workspacePrefs: [
+      { ...prefs, scopeKey: restarted.pieceId, scoreFingerprint: identity.fingerprint, freePracticeMinutes: 0, updatedAtMs: now },
+      lastOpenedRecord(restarted.pieceId, now),
+    ],
+  });
+  return restarted;
+}
+
 export async function requestPracticeDurability(storage: PracticeStoragePort): Promise<boolean> {
   let persisted = false;
   try { persisted = (await globalThis.navigator?.storage?.persist?.()) === true; } catch { /* browser denied */ }
@@ -168,7 +178,9 @@ export async function requestPracticeDurability(storage: PracticeStoragePort): P
   return persisted;
 }
 
-export async function isBackupReminderDue(storage: PracticeStoragePort, now = Date.now()) {
+export async function claimBackupReminder(storage: PracticeStoragePort, now = Date.now()): Promise<boolean> {
   const reminder = await storage.get("meta", "lastBackupReminderAtMs");
-  return !reminder || now - Number(reminder.value) >= 7 * 24 * 60 * 60 * 1000;
+  if (typeof reminder?.value === "number" && now - reminder.value < 7 * 24 * 60 * 60 * 1000) return false;
+  await storage.commit({ meta: [{ key: "lastBackupReminderAtMs", value: now }] });
+  return true;
 }

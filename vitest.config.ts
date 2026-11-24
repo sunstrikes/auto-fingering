@@ -8,6 +8,7 @@ export default defineConfig({
       provider: "v8",
       include: [
         "src/solver/**/*.ts",
+        "src/domain/{measureHashes,noteCoordIndex,scoreCoord,sha256}.ts",
         "src/musicxml/**/*.ts",
         "src/midi/**/*.ts",
         "src/persistence/**/*.ts",

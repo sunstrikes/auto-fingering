@@ -1,4 +1,4 @@
-import type { NoteEvent, ScoreCoord, ScoreDocument } from "../domain/types";
+import type { NoteEvent, ScoreCoord, ScoreDocument } from "./types";
 
 /** Convert an offset in ticks to reduced quarter notes within its measure. */
 export function makeScoreCoord(

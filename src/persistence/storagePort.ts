@@ -1,5 +1,4 @@
-import type { AbLoopBounds, AnchorOverride, Hand, HandSpanProfile, NoteCoordKey, PracticeMode, ScoreCoord } from "../domain/types";
-import type { ExportFormat } from "../musicxml/scoreSession";
+import type { AbLoopBounds, AnchorOverride, ExportFormat, Hand, HandSpanProfile, NoteCoordKey, PracticeMode, ScoreCoord } from "../domain/types";
 
 export const DATABASE_NAME = "auto-fingering-studio";
 export const SCHEMA_VERSION = 1;
@@ -122,20 +121,6 @@ export interface ScoreBlob extends ScoreBlobSource {
   repairAlternate?: ScoreBlobSource & { cacheKey: string };
 }
 
-export function scoreBlobCacheBytes(blob: ScoreBlob) {
-  return blob.byteLength + (blob.repairAlternate?.byteLength ?? 0);
-}
-
-export function fitScoreBlob(blob: ScoreBlob, maxBytes: number): ScoreBlob | undefined {
-  if (blob.byteLength > maxBytes) return undefined;
-  // Preserve the active source if the optional alternate cannot fit with it.
-  if (scoreBlobCacheBytes(blob) > maxBytes) {
-    const { repairAlternate: _alternate, ...current } = blob;
-    return current;
-  }
-  return blob;
-}
-
 export type MetaRecord =
   | { key: "schemaVersion" | "lastBackupReminderAtMs"; value: number }
   | { key: "storagePersisted"; value: boolean };
@@ -171,8 +156,4 @@ export interface ScoreCacheOptions {
   maxScoreCount?: number;
   maxScoreBytes?: number;
   now?: () => number;
-}
-
-export function scoreCacheLimits(options: ScoreCacheOptions) {
-  return { maxCount: options.maxScoreCount ?? 100, maxBytes: options.maxScoreBytes ?? 50 * 1024 * 1024 };
 }

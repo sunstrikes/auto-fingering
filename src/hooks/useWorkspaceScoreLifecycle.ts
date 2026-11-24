@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { HandSpanProfile, ScoreDocument, SolveResult } from "../domain/types";
 import { parseMusicXml } from "../musicxml/parser";
-import type { LoadedScoreSession } from "../musicxml/scoreSession";
+import { loadScoreInput, type LoadedScoreSession } from "../musicxml/scoreSession";
 import { applyDraft, type AnchorState } from "../persistence/anchorDrafts";
-import { getScoreIdentity } from "../persistence/fingerprint";
-import { newPieceProfile, readCachedScore, readRepairAlternate, resolvePieceOpen,
-  type CurrentWorkspace, type OpenChoice } from "../persistence/studioPersistence";
-import { GLOBAL_WORKSPACE, type WorkspacePrefs } from "../persistence/storagePort";
+import { archivePieceAndRestart, newPieceProfile, readLastOpenedPrefs, readRepairAlternate, resolvePieceOpen,
+  type CurrentWorkspace, type OpenChoice, type OpenDecision } from "../persistence/studioPersistence";
+import type { ScoreBlobSource, WorkspacePrefs } from "../persistence/storagePort";
 import { useStudioStore, type StudioSnapshot, type StudioState } from "../store/useStudioStore";
 import { SolverCancelledError } from "../workers/solverClient";
 import type { usePracticePersistence } from "./usePracticePersistence";
@@ -20,25 +19,31 @@ interface WorkspaceScoreLifecycleOptions {
   resetPracticeProgress(): void;
 }
 
+async function loadCachedSource(source: ScoreBlobSource, prefs: WorkspacePrefs): Promise<LoadedScoreSession> {
+  const session = await loadScoreInput({ fileName: source.fileName, bytes: source.bytes },
+    { singleStaffHandOverride: prefs.singleStaffHand });
+  return { ...session, sourceFormat: source.sourceFormat ?? "mxl" };
+}
+
 /** Resolve and restore score identity, the adjacent repair edge, and archive bindings. */
 export function useWorkspaceScoreLifecycle({
   persistence, durablePrefs, solveScore, restorePreferences, beforeArchive, resetPracticeProgress,
 }: WorkspaceScoreLifecycleOptions) {
   const openSequence = useRef(0);
   const [openChoice, setOpenChoice] = useState<OpenChoice | null>(null);
-  const decision = useRef<((answer: boolean) => void) | null>(null);
-  const answerOpenChoice = (answer: boolean) => {
+  const decision = useRef<((answer: OpenDecision | undefined) => void) | null>(null);
+  const answerOpenChoice = (answer: OpenDecision | undefined) => {
     decision.current?.(answer);
     decision.current = null;
     setOpenChoice(null);
   };
-  const chooseScoreOpen = (choice: OpenChoice) => new Promise<boolean>((resolve) => {
+  const chooseScoreOpen = (choice: OpenChoice) => new Promise<OpenDecision | undefined>((resolve) => {
     decision.current = resolve;
     setOpenChoice(choice);
   });
 
   const beginScoreOpen = () => {
-    answerOpenChoice(false);
+    answerOpenChoice(undefined);
     return ++openSequence.current;
   };
   const isCurrent = (generation: number) => generation === openSequence.current;
@@ -48,25 +53,27 @@ export function useWorkspaceScoreLifecycle({
   ) => {
     const { storage } = persistence;
     const store = useStudioStore.getState();
-    const current = () => {
+    const assertCurrent = () => {
       if (openSequence.current !== generation) throw new SolverCancelledError();
     };
-    current();
+    assertCurrent();
     let identity: Awaited<ReturnType<typeof resolvePieceOpen>> | undefined;
     if (storage) {
       // A file should still open if browser storage is unavailable or blocked.
       try {
         await persistence.persistCurrent();
-        current();
-        identity = await resolvePieceOpen(storage, session.scoreDoc, (choice) => {
-          current();
-          return chooseScoreOpen(choice);
+        assertCurrent();
+        identity = await resolvePieceOpen(storage, session.scoreDoc, async (choice) => {
+          assertCurrent();
+          const answer = await chooseScoreOpen(choice);
+          if (answer === undefined) throw new SolverCancelledError();
+          return answer;
         }, cachedPrefs);
       } catch (error) {
         if (cachedPrefs || error instanceof SolverCancelledError) throw error;
       }
     }
-    current();
+    assertCurrent();
     const saved = identity?.prefs;
     const profile = saved?.handSpanProfile ?? store.handSpanProfile;
     const ignore = saved?.ignoreExistingFingerings ?? store.ignoreExistingFingerings;
@@ -79,13 +86,14 @@ export function useWorkspaceScoreLifecycle({
     let restoredHistory: StudioState["history"] | undefined;
     if (storage && repair) {
       try {
-        const other = await readRepairAlternate(storage, cachedPrefs);
-        current();
-        if (other) {
-          const otherScore = other.session.scoreDoc;
+        const source = await readRepairAlternate(storage, repair);
+        if (source) {
+          const other = await loadCachedSource(source, cachedPrefs);
+          assertCurrent();
+          const otherScore = other.scoreDoc;
           const anchors = applyDraft(otherScore, repair.otherDraft);
           const solved = await solveScore(otherScore, profile, ignore, anchors);
-          const snapshot: StudioSnapshot = { rawXmlText: other.session.rawXmlText, scoreDoc: otherScore, ...anchors,
+          const snapshot: StudioSnapshot = { rawXmlText: other.rawXmlText, scoreDoc: otherScore, ...anchors,
             solveResult: solved, fingerByNoteUid: solved.fingerByNoteUid, lastDiff: [] };
           restoredHistory = repair.direction === "undo" ? { past: [snapshot], future: [] } : { past: [], future: [snapshot] };
         }
@@ -94,7 +102,7 @@ export function useWorkspaceScoreLifecycle({
         // Missing or damaged alternate must not prevent reopening the active score.
       }
     }
-    current();
+    assertCurrent();
     store.setHandSpanProfile(profile);
     store.setIgnoreExistingFingerings(ignore);
     restorePreferences(score, saved);
@@ -107,13 +115,11 @@ export function useWorkspaceScoreLifecycle({
   const restoreLastScore = async (generation: number) => {
     const { storage } = persistence;
     if (!storage) return;
-    const last = await storage.get("workspacePrefs", GLOBAL_WORKSPACE);
-    if (!last?.lastOpenedPieceId || generation !== openSequence.current) return;
-    const prefs = await storage.get("workspacePrefs", last.lastOpenedPieceId);
+    const prefs = await readLastOpenedPrefs(storage);
     if (!prefs?.scoreFingerprint || generation !== openSequence.current) return;
-    const cached = await readCachedScore(storage, prefs.scoreFingerprint, prefs);
-    if (!cached || generation !== openSequence.current) return;
-    await openScoreSession(cached.session, cached.fileName, generation, prefs);
+    const source = await storage.accessScoreBlob(prefs.scoreFingerprint);
+    if (!source || generation !== openSequence.current) return;
+    await openScoreSession(await loadCachedSource(source, prefs), source.fileName, generation, prefs);
   };
   const restoreRef = useRef(restoreLastScore);
   restoreRef.current = restoreLastScore;
@@ -127,7 +133,7 @@ export function useWorkspaceScoreLifecycle({
     });
     return () => {
       ++openSequence.current;
-      decision.current?.(false);
+      decision.current?.(undefined);
       decision.current = null;
     };
   }, [persistence.storage]);
@@ -151,17 +157,8 @@ export function useWorkspaceScoreLifecycle({
     beforeArchive();
     await persistence.persistCurrent();
     const score = parseMusicXml(state.rawXmlText, { singleStaffHandOverride: state.singleStaffHand });
-    const identity = getScoreIdentity(score);
-    const restarted = newPieceProfile(score, identity);
     const result = await solveScore(score, state.handSpanProfile, state.ignoreExistingFingerings, applyDraft(score));
-    const now = Date.now();
-    await storage.commit({
-      pieceProfiles: [{ ...active.profile, archivedAtMs: now }, restarted],
-      workspacePrefs: [
-        { ...durablePrefs, scopeKey: restarted.pieceId, scoreFingerprint: identity.fingerprint, freePracticeMinutes: 0, updatedAtMs: now },
-        { scopeKey: GLOBAL_WORKSPACE, lastOpenedPieceId: restarted.pieceId, updatedAtMs: now },
-      ],
-    });
+    const restarted = await archivePieceAndRestart(storage, active.profile, score, durablePrefs);
     resetPracticeProgress();
     persistence.activate(restarted);
     state.setSolvedScore({ scoreDoc: score, rawXmlText: state.rawXmlText, mxlContainer: state.mxlContainer,

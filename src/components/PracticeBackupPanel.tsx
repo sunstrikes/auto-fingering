@@ -1,13 +1,13 @@
 import { useEffect, useState, type ChangeEvent } from "react";
 import { createPracticeBackup, importPracticeBackup, type PracticeBackupExport } from "../persistence/backupMerge";
 import type { PracticeStoragePort } from "../persistence/storagePort";
-import type { OpenChoice } from "../persistence/studioPersistence";
+import type { OpenChoice, OpenDecision } from "../persistence/studioPersistence";
 
 const overlay = "fixed inset-0 z-50 flex items-center justify-center bg-slate-950/30 p-4";
 const panel = "w-full max-w-md space-y-3 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-800 shadow-xl";
 const button = "rounded-md border border-slate-300 px-2.5 py-1.5 hover:bg-slate-50 disabled:opacity-50";
 
-export function ScoreOpenChoice({ choice, onAnswer }: { choice: OpenChoice; onAnswer(answer: boolean): void }) {
+export function ScoreOpenChoice({ choice, onAnswer }: { choice: OpenChoice; onAnswer(answer: OpenDecision): void }) {
   const link = choice.kind === "link";
   return (
     <div className={overlay}>
@@ -16,10 +16,12 @@ export function ScoreOpenChoice({ choice, onAnswer }: { choice: OpenChoice; onAn
         <p>{link ? `此乐谱与「${choice.title}」相似。是否继续使用原曲目的练习记录？`
           : `「${choice.title}」在导入文件中的原谱指法已改变。请选择要使用的指法。`}</p>
         <div className="flex flex-wrap gap-2">
-          <button type="button" className={button} data-testid="practice-score-choice-accept" onClick={() => onAnswer(true)}>
+          <button type="button" className={button} data-testid="practice-score-choice-accept"
+            onClick={() => onAnswer(link ? "link-existing" : "keep-local-draft")}>
             {link ? "关联已有曲目" : "保留本地草稿"}
           </button>
-          <button type="button" className={button} data-testid="practice-score-choice-decline" onClick={() => onAnswer(false)}>
+          <button type="button" className={button} data-testid="practice-score-choice-decline"
+            onClick={() => onAnswer(link ? "open-as-new" : "adopt-imported")}>
             {link ? "作为新曲目" : "采纳导入指法"}
           </button>
         </div>
@@ -56,7 +58,7 @@ export function PracticeBackupPanel({ storage, onClose, flush, onImported, onArc
 
   const download = () => {
     if (!backup) return;
-    const url = URL.createObjectURL(new Blob([includeScores ? backup.full : backup.data], { type: "application/json" }));
+    const url = URL.createObjectURL(new Blob([includeScores ? backup.fullJson : backup.metadataOnlyJson], { type: "application/json" }));
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `piano-practice-${includeScores ? "with-scores" : "data-only"}.json`;
@@ -111,7 +113,7 @@ export function PracticeBackupPanel({ storage, onClose, flush, onImported, onArc
         <div className="text-xs text-slate-600">
           含乐谱：<output data-testid="practice-backup-full-size">{backup ? `${backup.fullBytes.toLocaleString()} B` : "…"}</output>
           <span className="mx-2">·</span>
-          纯数据：<output data-testid="practice-backup-data-size">{backup ? `${backup.dataBytes.toLocaleString()} B` : "…"}</output>
+          纯数据：<output data-testid="practice-backup-data-size">{backup ? `${backup.metadataOnlyBytes.toLocaleString()} B` : "…"}</output>
         </div>
         {Boolean(backup?.skippedScores) && <p className="text-xs text-slate-500">超过 2 MB 的乐谱仅备份练习数据。</p>}
         <div className="flex flex-wrap gap-2">

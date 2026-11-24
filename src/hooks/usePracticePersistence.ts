@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStudioStore, type StudioState } from "../store/useStudioStore";
+import { exportMxlContainer } from "../musicxml/mxl";
 import { createIndexedDbStorage } from "../persistence/indexedDbStorage";
 import { createInMemoryStorage } from "../persistence/inMemoryStorage";
 import type { PieceProfile, PracticeStoragePort } from "../persistence/storagePort";
-import { isBackupReminderDue, requestPracticeDurability, saveWorkspace, type CurrentWorkspace } from "../persistence/studioPersistence";
+import { claimBackupReminder, requestPracticeDurability, saveWorkspace, type CurrentWorkspace } from "../persistence/studioPersistence";
 
 type Prefs = CurrentWorkspace["prefs"];
 interface ActivePiece {
@@ -34,6 +35,7 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
   const activeRef = useRef(active);
   const [saveError, setSaveError] = useState(false);
   const [backupReminder, setBackupReminder] = useState(false);
+  const mounted = useRef(false);
   const startup = useRef<{ storage: PracticeStoragePort; run: Promise<boolean> } | undefined>(undefined);
   const queue = useRef(Promise.resolve());
   const last = useRef<{ active: ActivePiece; source: Omit<CurrentWorkspace, "prefs" | "repair">;
@@ -48,9 +50,14 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
   const exportFormat = useStudioStore((s) => s.exportFormat);
   const clock = useRef<{ active: ActivePiece; from: number } | null>(null);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
   function enqueue(task: () => Promise<void>) {
     const run = queue.current.then(task);
-    queue.current = run.catch(() => { setSaveError(true); });
+    queue.current = run.catch(() => { if (mounted.current) setSaveError(true); });
     return run;
   }
 
@@ -70,13 +77,15 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
       const draft = sourceChanged || previous?.source.anchors !== anchors || previous?.source.removedRawAnchorUids !== removedRawAnchorUids;
       const preferences = cache || previous?.prefs !== next.prefs || previous?.history !== history || next.minutes !== previous?.minutes;
       if (!preferences && !draft) return;
+      const { mxlContainer: container, ...workspace } = source;
       binding.profile = await saveWorkspace(storage, binding.profile, {
-        ...source, prefs: { ...next.prefs, freePracticeMinutes: next.minutes },
+        ...workspace, prefs: { ...next.prefs, freePracticeMinutes: next.minutes },
         ...(preferences || cache ? { repair: repairInHistory(rawXmlText, history) } : {}),
       }, { profile: opened, prefs: preferences, draft, cache, lastOpened: opened,
-        practiced: !opened && next.minutes > (previous?.minutes ?? 0) });
+        practiced: !opened && next.minutes > (previous?.minutes ?? 0) },
+      (xml) => exportMxlContainer(xml, container));
       last.current = next;
-      setSaveError(false);
+      if (mounted.current) setSaveError(false);
     });
   }
 
@@ -101,9 +110,8 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
       if (checking) return;
       checking = true;
       void (async () => {
-        if (await durability || !mounted || !await isBackupReminderDue(storage) || !mounted) return;
-        await storage.commit({ meta: [{ key: "lastBackupReminderAtMs", value: Date.now() }] });
-        if (mounted) setBackupReminder(true);
+        if (await durability || !mounted) return;
+        if (await claimBackupReminder(storage) && mounted) setBackupReminder(true);
       })().catch(() => { if (mounted) setSaveError(true); }).finally(() => { checking = false; });
     };
     const onVisibilityChange = () => { if (document.visibilityState === "visible") check(); };

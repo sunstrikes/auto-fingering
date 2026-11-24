@@ -1,8 +1,8 @@
-import type { ScoreDocument } from "../domain/types";
+import type { ExportFormat, ScoreDocument } from "../domain/types";
 import { exportMxlContainer, readMxlContainer, type MxlContainer } from "./mxl";
 import { parseMusicXml, type ParseMusicXmlOptions } from "./parser";
 
-export type ExportFormat = "musicxml" | "mxl";
+export type { ExportFormat } from "../domain/types";
 
 export interface ScoreInputPayload {
   fileName: string;

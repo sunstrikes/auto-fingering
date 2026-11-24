@@ -14,6 +14,7 @@ import { exportMxlContainer } from "../src/musicxml/mxl";
 import { parseMusicXml } from "../src/musicxml/parser";
 import { solveFingering } from "../src/solver/solveFingering";
 import { useStudioStore } from "../src/store/useStudioStore";
+import type { SolverClient } from "../src/workers/solverClient";
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 const xml = `<score-partwise version="4.0"><work><work-title>First Étude</work-title></work>
@@ -31,7 +32,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function mount(practiceStorage: PracticeStoragePort) {
+async function mount(practiceStorage: PracticeStoragePort, solverClient?: SolverClient) {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
   const element = document.createElement("div");
   document.body.append(element);
@@ -46,7 +47,10 @@ async function mount(practiceStorage: PracticeStoragePort) {
   await act(async () => {
     root.render(createElement(StrictMode, {}, createElement(App, {
       practiceStorage,
-      solverClientFactory: () => ({ solve: async (slices, profile, options) => solveFingering(slices, profile, options), dispose() {} }),
+      solverClientFactory: () => solverClient ?? ({
+        solve: async (slices, profile, options) => solveFingering(slices, profile, options),
+        dispose() {},
+      }),
       scoreRendererFactory,
     })));
   });
@@ -104,6 +108,58 @@ async function openFile(element: HTMLElement, source: string) {
   Object.defineProperty(input, "files", { value: [{ name: "external.musicxml", text: async () => source }], configurable: true });
   await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
 }
+
+it("reports model progress and classic fallback when solving a repaired score", async () => {
+  let finishRepair!: (reason: string) => void;
+  const pending = new Promise<string>((resolve) => { finishRepair = resolve; });
+  const solver: SolverClient = {
+    async solve(slices, handSpan, options) {
+      const solved = solveFingering(slices, handSpan, options);
+      if (solved.repairSuggestions?.length) return solved;
+      options?.onPriorProgress?.({ loadedBytes: 512, totalBytes: 1024 });
+      return { ...solved, priorFallbackReason: await pending };
+    },
+    dispose() {},
+  };
+  const ui = await mount(createInMemoryStorage(), solver);
+  const wideChord = xml.replace("</note>", `</note>
+    <note><chord/><pitch><step>G</step><octave>5</octave></pitch><duration>1</duration><staff>1</staff></note>`);
+  await openFile(ui.element, wideChord);
+  const click = async (testId: string) => {
+    await act(async () => ui.element.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!.click());
+  };
+  await click("score-repair-toggle-btn");
+  await act(async () => [...ui.element.querySelectorAll<HTMLButtonElement>('[data-testid^="repair-opt-"]')]
+    .find((button) => button.textContent?.includes("八度折叠"))!.click());
+  await act(async () => ui.element.querySelector<HTMLButtonElement>('[data-testid^="repair-apply-"]')!.click());
+  await click("header-midi-status-btn");
+  expect(ui.element.querySelector('[data-testid="prior-download-progress"]')?.textContent).toContain("50%");
+  await act(async () => finishRepair("模型离线"));
+  expect(ui.element.querySelector('[data-testid="prior-fallback-alert"]')?.textContent).toContain("模型离线");
+  expect(ui.element.textContent).toContain("已应用乐谱修复");
+});
+
+it("archives the old draft and practice time while reopening the same score as a fresh piece", async () => {
+  const storage = createInMemoryStorage();
+  const { identity, pieceId } = await seed(storage);
+  const ui = await mount(storage);
+  await act(async () => { await vi.waitFor(() => expect(ui.rendered()).toContain("First Étude")); });
+  for (const id of ["practice-backup-open", "practice-archive-piece", "practice-archive-confirm"]) {
+    await act(async () => ui.element.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`)!.click());
+  }
+  const profiles = await storage.findPieceProfiles(identity.fingerprint);
+  const archived = profiles.find((row) => row.pieceId === pieceId);
+  const restarted = profiles.find((row) => row.pieceId !== pieceId);
+  expect(archived?.archivedAtMs).toEqual(expect.any(Number));
+  expect((await storage.get("workspacePrefs", pieceId))?.freePracticeMinutes).toBe(1.5);
+  expect(await storage.get("fingerAnchorDrafts", pieceId)).toMatchObject({ pieceId });
+  expect(restarted?.archivedAtMs).toBeUndefined();
+  const newPieceId = restarted!.pieceId;
+  expect((await storage.get("workspacePrefs", "__global__"))?.lastOpenedPieceId).toBe(newPieceId);
+  expect(await storage.get("workspacePrefs", newPieceId)).toMatchObject({ freePracticeMinutes: 0, speedMultiplier: 0.75 });
+  await act(async () => { await vi.waitFor(async () =>
+    expect((await storage.get("fingerAnchorDrafts", newPieceId))?.anchorsByCoord).toEqual({})); });
+});
 
 it.each([["accept", 4], ["decline", 2]] as const)("lets the user %s a local draft when external fingerings change", async (answer, finger) => {
   const storage = createInMemoryStorage();
@@ -235,9 +291,9 @@ it("restores same-fingerprint repair Undo and Redo from a full backup without a 
   expect((await storage.all("scoreBlobs")).map((blob) => blob.fingerprint)).toEqual([identity.fingerprint]);
   const restored = createInMemoryStorage();
   const backup = await createPracticeBackup(storage);
-  await importPracticeBackup(restored, backup.full);
+  await importPracticeBackup(restored, backup.fullJson);
   const dataOnly = createInMemoryStorage();
-  await importPracticeBackup(dataOnly, backup.data);
+  await importPracticeBackup(dataOnly, backup.metadataOnlyJson);
   expect(await dataOnly.all("scoreBlobs")).toEqual([]);
 
   const remount = async () => {

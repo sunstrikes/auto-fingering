@@ -90,10 +90,10 @@ it("excludes BYOK secrets from storage and versioned backups, with or without th
   expect(JSON.stringify(await storage.all("derivedSnapshots"))).not.toContain(secret);
 
   const backup = await createPracticeBackup(storage);
-  expect(backup.fullBytes).toBeGreaterThan(backup.dataBytes);
-  expect(backup.full).not.toContain(secret);
-  expect(backup.data).not.toContain(secret);
-  for (const [json, hasScore] of [[backup.full, true], [backup.data, false]] as const) {
+  expect(backup.fullBytes).toBeGreaterThan(backup.metadataOnlyBytes);
+  expect(backup.fullJson).not.toContain(secret);
+  expect(backup.metadataOnlyJson).not.toContain(secret);
+  for (const [json, hasScore] of [[backup.fullJson, true], [backup.metadataOnlyJson, false]] as const) {
     const restored = createIndexedDbStorage({ indexedDB: new IDBFactory() });
     await importPracticeBackup(restored, json);
     expect(await restored.findPieceProfiles("original")).toEqual([piece]);

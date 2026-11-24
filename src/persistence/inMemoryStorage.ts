@@ -1,8 +1,9 @@
 import {
-  SCHEMA_VERSION, scoreCacheLimits, storeKeyPaths, fitScoreBlob, scoreBlobCacheBytes, type PracticeStoragePort, type PracticeStorageRecords,
-  type PracticeStore, type ScoreBlob, type ScoreCacheOptions,
+  SCHEMA_VERSION, storeKeyPaths, type PracticeStoragePort, type PracticeStorageRecords,
+  type PracticeStore, type ScoreCacheOptions,
 } from "./storagePort";
 import { copyStorageRecord } from "./storageRecords";
+import { createScoreCachePolicy } from "./scoreCache";
 
 export function createInMemoryStorage(options: ScoreCacheOptions = {}): PracticeStoragePort {
   const records = {
@@ -11,7 +12,7 @@ export function createInMemoryStorage(options: ScoreCacheOptions = {}): Practice
     fingerAnchorDrafts: new Map(), workspacePrefs: new Map(), scoreBlobs: new Map(),
   } as { [K in PracticeStore]: Map<string, PracticeStorageRecords[K]> };
   const now = options.now ?? Date.now;
-  const { maxCount, maxBytes } = scoreCacheLimits(options);
+  const scoreCache = createScoreCachePolicy(options);
   return {
     async get<K extends PracticeStore>(store: K, key: string) {
       const record = records[store].get(key);
@@ -35,27 +36,17 @@ export function createInMemoryStorage(options: ScoreCacheOptions = {}): Practice
       return copyStorageRecord("scoreBlobs", next);
     },
     async commit(write) {
-      const writes = (Object.keys(storeKeyPaths) as PracticeStore[]).flatMap((store) =>
+      const writes = (Object.keys(storeKeyPaths) as PracticeStore[]).flatMap((store) => store === "scoreBlobs" ? [] :
         (write[store] ?? []).map((record) => ({ store, record: copyStorageRecord(store, record) })));
+      const blobs = (write.scoreBlobs ?? []).flatMap((record) => scoreCache.prepare(record) ?? []);
       for (const { store, record } of writes) {
-        if (store === "scoreBlobs") {
-          const blob = maxCount > 0 ? fitScoreBlob(record as ScoreBlob, maxBytes) : undefined;
-          if (blob) records.scoreBlobs.set(blob.fingerprint, blob);
-          continue;
-        }
         const key = (record as unknown as Record<string, string>)[storeKeyPaths[store]];
         if (store === "practiceEvents" && records[store].has(key)) continue;
         (records[store] as Map<string, typeof record>).set(key, record);
       }
-      if (!write.scoreBlobs?.length) return;
-      const rows = [...records.scoreBlobs.values()].sort((a, b) => a.lastAccessedAtMs - b.lastAccessedAtMs ||
-        (a.fingerprint < b.fingerprint ? -1 : 1));
-      let bytes = rows.reduce((total, row) => total + scoreBlobCacheBytes(row), 0);
-      for (const row of rows) {
-        if (records.scoreBlobs.size <= maxCount && bytes <= maxBytes) break;
-        records.scoreBlobs.delete(row.fingerprint);
-        bytes -= scoreBlobCacheBytes(row);
-      }
+      if (!blobs.length) return;
+      for (const blob of blobs) records.scoreBlobs.set(blob.fingerprint, blob);
+      for (const key of scoreCache.evictionKeys([...records.scoreBlobs.values()])) records.scoreBlobs.delete(key);
     },
   };
 }

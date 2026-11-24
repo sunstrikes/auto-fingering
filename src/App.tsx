@@ -183,13 +183,16 @@ export default function App({
   const [activeMetronomeBeat, setActiveMetronomeBeat] = useState<MetronomeBeatEvent | null>(null);
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("both");
   const [waitingModeEnabled, setWaitingModeEnabled] = useState<boolean>(false);
+  const setWaitingModeEnabledSync = (enabled: boolean) => {
+    midiCapture.setMode(enabled ? "waiting" : "continuous");
+    setWaitingModeEnabled(enabled);
+  };
   useScreenWakeLock(playbackState === "playing" || waitingModeEnabled);
   const [skipGraceNotes, setSkipGraceNotes] = useState<boolean>(false);
   const [absoluteStrictnessEnabled, setAbsoluteStrictnessEnabled] = useState(false);
   const [strictHoldDurationEnabled, setStrictHoldDurationEnabled] = useState<boolean>(false);
   const [waitingState, setWaitingState] = useState<WaitingModeState>(() => createWaitingModeState(0));
   const waitingStateRef = useRef<WaitingModeState>(waitingState);
-  waitingStateRef.current = waitingState;
   const setWaitingStateSync = (next: WaitingModeState) => {
     waitingStateRef.current = next;
     setWaitingState(next);
@@ -936,11 +939,11 @@ export default function App({
     const startIdx = range ? range.startStepIndex : 0;
 
     if (!waitingModeEnabled) {
-      setWaitingModeEnabled(true);
+      setWaitingModeEnabledSync(true);
       setMidiLocalSound(false);
     }
     cancelWaitingLoopGapIfActive(false);
-    setWaitingState(createWaitingModeState(startIdx));
+    setWaitingStateSync(createWaitingModeState(startIdx));
     updatePlaybackState("playing");
     playbackEngineRef.current?.setMetronomePaused(true);
     syncToPracticeStep(nextSteps[startIdx] ?? null, "playing");
@@ -988,7 +991,7 @@ export default function App({
           nextSteps.findIndex((s) => s.measureIndex >= practiceProgression.startMeasureIndex)
         );
     cancelWaitingLoopGapIfActive(false);
-    setWaitingState(createWaitingModeState(startIdx));
+    setWaitingStateSync(createWaitingModeState(startIdx));
     updatePlaybackState("playing");
     playbackEngineRef.current?.setMetronomePaused(true);
     syncToPracticeStep(nextSteps[startIdx] ?? null, "playing");
@@ -1009,7 +1012,7 @@ export default function App({
           practiceSteps.findIndex((s) => s.measureIndex >= practiceProgression.startMeasureIndex)
         );
     cancelWaitingLoopGapIfActive(false);
-    setWaitingState(createWaitingModeState(startIdx));
+    setWaitingStateSync(createWaitingModeState(startIdx));
     updatePlaybackState("playing");
     playbackEngineRef.current?.setMetronomePaused(true);
     syncToPracticeStep(practiceSteps[startIdx] ?? null, "playing");
@@ -1057,11 +1060,11 @@ export default function App({
     const startIdx = range ? range.startStepIndex : 0;
 
     if (!waitingModeEnabled) {
-      setWaitingModeEnabled(true);
+      setWaitingModeEnabledSync(true);
       setMidiLocalSound(false);
     }
     cancelWaitingLoopGapIfActive(false);
-    setWaitingState(createWaitingModeState(startIdx));
+    setWaitingStateSync(createWaitingModeState(startIdx));
     updatePlaybackState("playing");
     playbackEngineRef.current?.setMetronomePaused(true);
     syncToPracticeStep(nextSteps[startIdx] ?? null, "playing");
@@ -1211,36 +1214,13 @@ export default function App({
     const store = useStudioStore.getState();
     if (!solverClientRef.current || !store.scoreDoc) return;
 
-    const { anchors: nextAnchors, removedRawAnchorUids: nextRemoved } = remapAnchorState(store.scoreDoc, nextDoc, store);
-    const slicesToSolve = applyAnchorOverridesToSlices(
-      nextDoc.onsetSlices,
-      nextAnchors,
-      nextRemoved,
-      store.ignoreExistingFingerings
-    );
-    const isModelAssist = store.priorMode === "model-assist";
-    const nextResult = await solverClientRef.current.solve(
-      slicesToSolve,
-      store.handSpanProfile,
-      {
-        ignoreExistingFingerings: false,
-        ...(isModelAssist
-          ? {
-              priorMode: store.priorMode,
-              lambda: store.priorLambda,
-              ...(store.customModelBaseUrl
-                ? { customModelBaseUrl: store.customModelBaseUrl }
-                : {}),
-            }
-          : {}),
-      }
-    );
+    const remapped = remapAnchorState(store.scoreDoc, nextDoc, store);
+    const nextResult = await solveScore(nextDoc, store.handSpanProfile, store.ignoreExistingFingerings, remapped);
     store.applyScoreRepair({
       rawXmlText: nextRawXml,
       scoreDoc: nextDoc,
       solveResult: nextResult,
-      anchors: nextAnchors,
-      removedRawAnchorUids: nextRemoved,
+      ...remapped,
       repairSummary,
     });
   };
@@ -1336,7 +1316,7 @@ export default function App({
       cancelWaitingLoopGapIfActive(currentPlaybackState === "playing");
       const stepIdx = practiceSteps.findIndex((s) => s.measureIndex >= measureIndex);
       const targetIdx = stepIdx >= 0 ? stepIdx : 0;
-      setWaitingState(createWaitingModeState(targetIdx));
+      setWaitingStateSync(createWaitingModeState(targetIdx));
       if (currentPlaybackState !== "stopped") {
         syncToPracticeStep(practiceSteps[targetIdx] ?? null, currentPlaybackState);
       }
@@ -1368,7 +1348,7 @@ export default function App({
     }
     if (waitingModeEnabled) {
       cancelWaitingLoopGapIfActive(currentPlaybackState === "playing");
-      setWaitingState(createWaitingModeState(0));
+      setWaitingStateSync(createWaitingModeState(0));
       if (currentPlaybackState !== "stopped") {
         syncToPracticeStep(practiceSteps[0] ?? null, currentPlaybackState);
       }
@@ -1411,7 +1391,7 @@ export default function App({
               (s.measureIndex === targetSlice.measureIndex && s.onsetTick >= targetSlice.onsetTick)
           );
           const targetIdx = stepIdx >= 0 ? stepIdx : 0;
-          setWaitingState(createWaitingModeState(targetIdx));
+          setWaitingStateSync(createWaitingModeState(targetIdx));
           if (currentPlaybackState !== "stopped") {
             syncToPracticeStep(practiceSteps[targetIdx] ?? null, currentPlaybackState);
           }
@@ -1718,7 +1698,7 @@ export default function App({
         const idx = practiceSteps.findIndex((s) => s.measureIndex >= selectedMeasureIndex);
         startIdx = idx >= 0 ? idx : 0;
       }
-      setWaitingState(createWaitingModeState(startIdx));
+      setWaitingStateSync(createWaitingModeState(startIdx));
       updatePlaybackState("playing");
       playbackEngineRef.current.setMetronomePaused(true);
       syncToPracticeStep(practiceSteps[startIdx] ?? null, "playing");
@@ -1750,7 +1730,7 @@ export default function App({
           )
         : 0;
       const startIdx = idx >= 0 ? idx : 0;
-      setWaitingState(createWaitingModeState(startIdx));
+      setWaitingStateSync(createWaitingModeState(startIdx));
       updatePlaybackState("playing");
       playbackEngineRef.current.setMetronomePaused(true);
       syncToPracticeStep(practiceSteps[startIdx] ?? null, "playing");
@@ -1852,7 +1832,7 @@ export default function App({
 
   const handleToggleWaitingMode = () => {
     const next = !waitingModeEnabled;
-    setWaitingModeEnabled(next);
+    setWaitingModeEnabledSync(next);
     if (next) {
       // Keep MIDI Local Sound off by default whenever Waiting Mode is enabled
       setMidiLocalSound(false);
@@ -1865,7 +1845,7 @@ export default function App({
               practiceSteps.findIndex((s) => s.primarySliceId === selectedSliceId)
             )
           : 0;
-        setWaitingState(createWaitingModeState(currentIdx));
+        setWaitingStateSync(createWaitingModeState(currentIdx));
         updatePlaybackState("playing");
         playbackEngineRef.current.setMetronomePaused(true);
         syncToPracticeStep(practiceSteps[currentIdx] ?? null, "playing");
@@ -1883,7 +1863,7 @@ export default function App({
 
   const handleToggleSkipGraceNotes = () => {
     setSkipGraceNotes((prev) => !prev);
-    setWaitingState(createWaitingModeState(0));
+    setWaitingStateSync(createWaitingModeState(0));
   };
 
   const handleSpeedChange = (nextSpeed: SpeedMultiplier) => {
