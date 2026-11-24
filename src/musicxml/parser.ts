@@ -226,7 +226,6 @@ function getExplicitBarlineKind(barline: Element): ExplicitBarlineKind | undefin
       return "double";
     case "light-heavy":
       return "final";
-    case null:
     case "regular":
       return "regular";
   }
@@ -1087,6 +1086,7 @@ export function parseMusicXml(xmlText: string, deps?: ParseMusicXmlOptions): Sco
     onsetSlices,
     isSingleStaff,
     defaultSingleStaffHand,
+    ...(isSingleStaff ? { singleStaffHand: activeSingleStaffHand } : {}),
     measureCount,
     ticksPerQuarter: globalLcm,
     tempoPoints: normalizedTempoPoints,

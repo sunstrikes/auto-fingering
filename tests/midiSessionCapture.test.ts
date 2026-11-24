@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createMidiSessionCapture } from "../src/midi/midiSessionCapture";
-import { createWebMidiController, type MIDIInputLike, type MidiInputEvent } from "../src/midi/webMidi";
+import { createLocalMidiNoteEvent, createWebMidiController, type MIDIInputLike, type MidiInputEvent } from "../src/midi/webMidi";
 
 const input = { channel: 0, portId: "piano", source: "midi" } as const;
 const strike = { ...input, type: "noteon", midi: 60, velocity: 127, timeStampMs: 1 } as const;
@@ -35,17 +35,17 @@ it("isolates waiting and paused packets from continuous playback while retaining
   expect(capture.sliceWindow(0, 10, { mode: "waiting" })).toEqual([]);
 });
 
-it("clocks virtual and QWERTY input without changing its source or inventing a hardware timestamp", () => {
-  const capture = createMidiSessionCapture(() => 4.25);
-  capture.setTransport("playing", true);
-  const { timeStampMs: _timestamp, ...unclocked } = strike;
-  capture.record(unclocked);
-  capture.record({ ...unclocked, source: "virtual", portId: "screen" });
-  capture.record({ ...unclocked, source: "qwerty", portId: "keyboard" });
-  expect(capture.sliceWindow(0, 10, { mode: "continuous" })).toEqual([
-    { ...unclocked, source: "virtual", portId: "screen", timeStampMs: 4.25 },
-    { ...unclocked, source: "qwerty", portId: "keyboard", timeStampMs: 4.25 },
-  ]);
+it("timestamps virtual and QWERTY strikes and releases before session capture", () => {
+  const now = vi.spyOn(performance, "now").mockReturnValue(4.25);
+  try {
+    expect(createLocalMidiNoteEvent("virtual", 60, 96)).toMatchObject({
+      type: "noteon", source: "virtual", midi: 60, velocity: 96, timeStampMs: 4.25,
+    });
+    now.mockReturnValue(6.75);
+    expect(createLocalMidiNoteEvent("qwerty", 60, 0)).toMatchObject({
+      type: "noteoff", source: "qwerty", midi: 60, velocity: 0, timeStampMs: 6.75,
+    });
+  } finally { now.mockRestore(); }
 });
 
 describe("Web MIDI acquisition", () => {
@@ -74,6 +74,6 @@ describe("Web MIDI acquisition", () => {
       { type: "noteoff", midi: 60, timeStampMs: 2.0625 },
       { type: "noteon", midi: 62, velocity: 1 },
     ]);
-    expect(events[5]).not.toHaveProperty("timeStampMs");
+    expect(events[5]?.timeStampMs).toEqual(expect.any(Number));
   });
 });

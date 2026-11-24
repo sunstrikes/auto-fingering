@@ -95,6 +95,13 @@ export interface PracticeProgressionEvaluation {
   detail: string;
 }
 
+interface MeasurePassProgress {
+  completedPasses: number;
+  fluencyCredit: number;
+  fluentSpeed?: number;
+  lastPassHesitated: boolean;
+}
+
 export interface PracticeAnalyticsState {
   currentPassIndex: number;
   completedPasses: number;
@@ -106,10 +113,7 @@ export interface PracticeAnalyticsState {
   currentPassMeasuresTouched: Set<number>;
   currentPassFaultWeightByMeasure: Record<number, number>;
   currentPassHesitationMeasures: Set<number>;
-  measureFluencyByIndex: Record<number, number>;
-  fluentSpeedByMode: Record<PracticeMode, Record<number, number>>;
-  measurePassCountByIndex: Record<number, number>;
-  lastPassHesitationByMeasure: Record<number, number>;
+  measureProgressByMode: Record<PracticeMode, Record<number, MeasurePassProgress>>;
   lastStepCompletedAtSec: number | null;
   lastCompletedStep: PracticeStep | null;
 }
@@ -126,10 +130,7 @@ export function createPracticeAnalyticsState(): PracticeAnalyticsState {
     currentPassMeasuresTouched: new Set<number>(),
     currentPassFaultWeightByMeasure: {},
     currentPassHesitationMeasures: new Set<number>(),
-    measureFluencyByIndex: {},
-    fluentSpeedByMode: { both: {}, "rh-only": {}, "lh-only": {} },
-    measurePassCountByIndex: {},
-    lastPassHesitationByMeasure: {},
+    measureProgressByMode: { both: {}, "rh-only": {}, "lh-only": {} },
     lastStepCompletedAtSec: null,
     lastCompletedStep: null,
   };
@@ -315,35 +316,26 @@ export function recordPracticeStepCompleted(
     nextPassMeasuresTouched.add(completedStep.measureIndex);
   }
 
-  let nextMeasureFluencyByIndex = analytics.measureFluencyByIndex;
   const practiceMode = options.practiceMode ?? "both";
-  let nextFluentSpeedByMode = analytics.fluentSpeedByMode;
-  let nextMeasurePassCountByIndex = analytics.measurePassCountByIndex;
-  let nextLastPassHesitationByMeasure = analytics.lastPassHesitationByMeasure;
-
+  let measureProgressByMode = analytics.measureProgressByMode;
   if (passCompleted) {
-    nextMeasureFluencyByIndex = { ...analytics.measureFluencyByIndex };
-    nextMeasurePassCountByIndex = { ...analytics.measurePassCountByIndex };
-    nextLastPassHesitationByMeasure = { ...analytics.lastPassHesitationByMeasure };
-    const fluentSpeeds = { ...analytics.fluentSpeedByMode[practiceMode] };
-    nextFluentSpeedByMode = { ...analytics.fluentSpeedByMode, [practiceMode]: fluentSpeeds };
-
+    const progress = { ...measureProgressByMode[practiceMode] };
     for (const mIdx of nextPassMeasuresTouched) {
-      nextMeasurePassCountByIndex[mIdx] = (nextMeasurePassCountByIndex[mIdx] ?? 0) + 1;
+      const previous = progress[mIdx];
       const hesitated = nextPassHesitationMeasures.has(mIdx);
       const faultWeight = analytics.currentPassFaultWeightByMeasure[mIdx] ?? 0;
       // A smooth clean pass is enough. An isolated pitch slip earns partial credit;
       // a shaky pass earns none but never erases earlier progress.
       const earned = hesitated ? 0 : Math.max(0, FLUENCY_CREDIT_TARGET - faultWeight);
-      nextMeasureFluencyByIndex[mIdx] = Math.min(
-        FLUENCY_CREDIT_TARGET,
-        (nextMeasureFluencyByIndex[mIdx] ?? 0) + earned
-      );
-      if (earned > 0 && nextMeasureFluencyByIndex[mIdx] >= FLUENCY_CREDIT_TARGET) {
-        fluentSpeeds[mIdx] = speed;
-      }
-      nextLastPassHesitationByMeasure[mIdx] = hesitated ? 1 : 0;
+      const fluencyCredit = Math.min(FLUENCY_CREDIT_TARGET, (previous?.fluencyCredit ?? 0) + earned);
+      progress[mIdx] = {
+        completedPasses: (previous?.completedPasses ?? 0) + 1,
+        fluencyCredit,
+        fluentSpeed: earned > 0 && fluencyCredit >= FLUENCY_CREDIT_TARGET ? speed : previous?.fluentSpeed,
+        lastPassHesitated: hesitated,
+      };
     }
+    measureProgressByMode = { ...measureProgressByMode, [practiceMode]: progress };
   }
 
   return {
@@ -360,10 +352,7 @@ export function recordPracticeStepCompleted(
     currentPassHesitationMeasures: passCompleted
       ? new Set<number>()
       : nextPassHesitationMeasures,
-    measureFluencyByIndex: nextMeasureFluencyByIndex,
-    fluentSpeedByMode: nextFluentSpeedByMode,
-    measurePassCountByIndex: nextMeasurePassCountByIndex,
-    lastPassHesitationByMeasure: nextLastPassHesitationByMeasure,
+    measureProgressByMode,
     lastStepCompletedAtSec: passCompleted ? null : (nowSec ?? analytics.lastStepCompletedAtSec),
     lastCompletedStep: passCompleted ? null : (completedStep ?? analytics.lastCompletedStep),
   };
@@ -371,8 +360,10 @@ export function recordPracticeStepCompleted(
 
 /** Aggregates recorded pitch, duration and hesitation faults alongside earned fluency. */
 export function buildMeasureErrorSummaries(
-  analytics: PracticeAnalyticsState
+  analytics: PracticeAnalyticsState,
+  practiceMode: PracticeMode = "both",
 ): Map<number, MeasureErrorSummary> {
+  const progress = analytics.measureProgressByMode[practiceMode];
   const byMeasure = new Map<
     number,
     {
@@ -410,7 +401,7 @@ export function buildMeasureErrorSummaries(
     byMeasure.set(stat.measureIndex, entry);
   }
 
-  for (const key of Object.keys(analytics.measurePassCountByIndex)) {
+  for (const key of Object.keys(progress)) {
     const mIdx = Number(key);
     if (!byMeasure.has(mIdx)) {
       byMeasure.set(mIdx, {
@@ -428,8 +419,8 @@ export function buildMeasureErrorSummaries(
   const summaries = new Map<number, MeasureErrorSummary>();
   for (const [measureIndex, m] of byMeasure.entries()) {
     const totalErrors = m.pitchErrors + m.durationErrors;
-    const fluencyCredit = analytics.measureFluencyByIndex[measureIndex] ?? 0;
-    const completedPasses = analytics.measurePassCountByIndex[measureIndex] ?? 0;
+    const fluencyCredit = progress[measureIndex]?.fluencyCredit ?? 0;
+    const completedPasses = progress[measureIndex]?.completedPasses ?? 0;
     const mastered = fluencyCredit >= FLUENCY_CREDIT_TARGET;
 
     const status: MeasureMasteryStatus = mastered
@@ -502,7 +493,7 @@ export function buildPracticeRepeatRecommendations(
     maxRecommendations?: number;
   }
 ): PracticeRepeatRecommendation[] {
-  const summaries = buildMeasureErrorSummaries(analytics);
+  const summaries = buildMeasureErrorSummaries(analytics, options.currentPracticeMode);
   if (summaries.size === 0) return [];
 
   // Filter out measures that have already graduated (mastered) or have 0 errors
@@ -701,6 +692,7 @@ export function evaluatePracticeProgression(
 ): PracticeProgressionEvaluation {
   const totalMeasures = Math.max(1, options.measureCount);
   const targetSpeed = options.targetSpeed ?? 1.0;
+  const progress = analytics.measureProgressByMode[options.currentPracticeMode];
 
   let startMeasureIndex = 0;
   let endMeasureIndex = totalMeasures - 1;
@@ -715,7 +707,7 @@ export function evaluatePracticeProgression(
       Math.min(totalMeasures - 1, options.abLoop.endMeasureIndex)
     );
   } else {
-    const practicedMeasures = Object.keys(analytics.measurePassCountByIndex)
+    const practicedMeasures = Object.keys(progress)
       .map(Number)
       .filter((m) => Number.isFinite(m) && m >= 0 && m < totalMeasures)
       .sort((a, b) => a - b);
@@ -738,8 +730,8 @@ export function evaluatePracticeProgression(
   let recentHesitation = false;
 
   for (let m = startMeasureIndex; m <= endMeasureIndex; m += 1) {
-    minCredit = Math.min(minCredit, analytics.measureFluencyByIndex[m] ?? 0);
-    if ((analytics.lastPassHesitationByMeasure[m] ?? 0) > 0) {
+    minCredit = Math.min(minCredit, progress[m]?.fluencyCredit ?? 0);
+    if (progress[m]?.lastPassHesitated) {
       recentHesitation = true;
     }
   }
@@ -755,10 +747,9 @@ export function evaluatePracticeProgression(
 
   const needsBothHands = !options.isSingleStaff && options.currentPracticeMode !== "both";
   const sectionPaceSuggestions: PracticeSectionPaceSuggestion[] = [];
-  const fluentSpeeds = analytics.fluentSpeedByMode[options.currentPracticeMode];
   for (let index = 0; index < totalMeasures; index++) {
-    const practicedSpeed = fluentSpeeds[index];
-    if (!practicedSpeed || practicedSpeed >= targetSpeed || analytics.lastPassHesitationByMeasure[index]) {
+    const practicedSpeed = progress[index]?.fluentSpeed;
+    if (!practicedSpeed || practicedSpeed >= targetSpeed || progress[index]?.lastPassHesitated) {
       continue;
     }
     const suggestedSpeed = Number(Math.min(targetSpeed, practicedSpeed * 1.1).toFixed(2));

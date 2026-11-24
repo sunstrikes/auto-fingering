@@ -1,33 +1,22 @@
 export type MidiInputSource = "midi" | "virtual" | "qwerty";
 
-export type MidiInputEvent = {
-  /** Monotonic milliseconds in the performance.now() time domain, when provided by the input. */
-  timeStampMs?: number;
+type MidiMessage = {
+  channel: number;
+  portId: string;
+  source: MidiInputSource;
 } & (
-  | {
-      type: "noteon";
-      midi: number;
-      velocity: number;
-      channel: number;
-      portId: string;
-      source: MidiInputSource;
-    }
-  | {
-      type: "noteoff";
-      midi: number;
-      velocity: 0;
-      channel: number;
-      portId: string;
-      source: MidiInputSource;
-    }
-  | {
-      type: "sustain";
-      value: number;
-      pressed: boolean;
-      channel: number;
-      portId: string;
-      source: MidiInputSource;
-    });
+  | { type: "noteon"; midi: number; velocity: number }
+  | { type: "noteoff"; midi: number; velocity: 0 }
+  | { type: "sustain"; value: number; pressed: boolean }
+);
+
+/** An input event ready for dispatch, clocked in monotonic performance.now() milliseconds. */
+export type MidiInputEvent = MidiMessage & { timeStampMs: number };
+
+export function createLocalMidiNoteEvent(source: Exclude<MidiInputSource, "midi">, midi: number, velocity: number): MidiInputEvent {
+  const context = { source, midi, channel: 0, portId: `${source}-keyboard`, timeStampMs: performance.now() };
+  return velocity === 0 ? { ...context, type: "noteoff", velocity: 0 } : { ...context, type: "noteon", velocity };
+}
 
 export interface MIDIMessageEventLike {
   data: Uint8Array | number[] | null;
@@ -123,13 +112,14 @@ export const QWERTY_TO_MIDI: Readonly<Record<string, number>> = {
 
 /**
  * Normalizes a raw Web MIDI packet into NoteOn, NoteOff, or Sustain (CC 64).
+ * Legacy callers may decode without a timestamp; dispatched events are always clocked.
  */
 export function parseMidiMessage(
   data: Uint8Array | number[] | null | undefined,
   portId: string,
   source: MidiInputSource = "midi",
   timeStampMs?: number,
-): MidiInputEvent | null {
+): (MidiMessage & { timeStampMs?: number }) | null {
   if (!data || data.length < 2) return null;
   const status = data[0];
   const data1 = data[1];
@@ -243,7 +233,7 @@ export function createWebMidiController(deps: WebMidiControllerDeps): WebMidiCon
           return;
         }
         const parsed = parseMidiMessage(msgEvent.data, input.id, "midi", msgEvent.timeStamp);
-        if (parsed) deps.onMidiEvent(parsed);
+        if (parsed) deps.onMidiEvent({ ...parsed, timeStampMs: parsed.timeStampMs ?? performance.now() });
       };
       boundInputs.add(input);
     }

@@ -573,7 +573,7 @@ export function applyScoreRepairToXml(
 ): string {
   const freshDoc = parseMusicXml(rawXmlText, {
     ...deps,
-    ...(scoreDoc.isSingleStaff ? { singleStaffHandOverride: scoreDoc.defaultSingleStaffHand } : {}),
+    ...(scoreDoc.isSingleStaff ? { singleStaffHandOverride: scoreDoc.singleStaffHand ?? scoreDoc.defaultSingleStaffHand } : {}),
   });
   const { xmlDoc } = freshDoc;
   const noteByUid = new Map<string, NoteEvent>();
@@ -848,7 +848,7 @@ export function verifyScoreRepairOption(
     nextDoc = parseMusicXml(nextXml, {
       ...deps,
       ...(scoreDoc.isSingleStaff
-        ? { singleStaffHandOverride: scoreDoc.defaultSingleStaffHand }
+        ? { singleStaffHandOverride: scoreDoc.singleStaffHand ?? scoreDoc.defaultSingleStaffHand }
         : {}),
     });
   } catch {

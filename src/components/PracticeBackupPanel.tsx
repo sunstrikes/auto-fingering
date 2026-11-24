@@ -1,5 +1,5 @@
 import { useEffect, useState, type ChangeEvent } from "react";
-import { createPracticeBackup, importPracticeBackup, type PracticeBackupExport } from "../persistence/backupMerge";
+import { createPracticeBackup, type PracticeBackupExport } from "../persistence/backupMerge";
 import type { PracticeStoragePort } from "../persistence/storagePort";
 import type { OpenChoice, OpenDecision } from "../persistence/studioPersistence";
 
@@ -34,13 +34,13 @@ interface PracticeBackupPanelProps {
   storage: PracticeStoragePort;
   onClose(): void;
   flush(): Promise<void>;
-  onImported(): Promise<void>;
+  onImport(json: string): Promise<void>;
   onArchive?: () => Promise<void>;
 }
 
 function errorText(error: unknown) { return error instanceof Error ? error.message : String(error); }
 
-export function PracticeBackupPanel({ storage, onClose, flush, onImported, onArchive }: PracticeBackupPanelProps) {
+export function PracticeBackupPanel({ storage, onClose, flush, onImport, onArchive }: PracticeBackupPanelProps) {
   const [backup, setBackup] = useState<PracticeBackupExport | null>(null);
   const [includeScores, setIncludeScores] = useState(true);
   const [status, setStatus] = useState("");
@@ -73,9 +73,7 @@ export function PracticeBackupPanel({ storage, onClose, flush, onImported, onArc
     setBusy(true);
     setStatus("正在读取备份…");
     try {
-      await flush();
-      await importPracticeBackup(storage, await file.text());
-      await onImported();
+      await onImport(await file.text());
       setStatus("已导入备份。未随文件附带的乐谱可重新上传，匹配后会自动关联。");
       setBackup(await createPracticeBackup(storage));
     } catch (error) {

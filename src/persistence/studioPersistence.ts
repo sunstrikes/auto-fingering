@@ -51,8 +51,9 @@ export async function resolvePieceOpen(storage: PracticeStoragePort, score: Scor
   const sourceDraft = prefs?.repairEdge?.otherFingerprint === identity.fingerprint &&
       prefs.scoreFingerprint !== identity.fingerprint ? prefs.repairEdge.otherDraft : draft;
   const conflict = exact && !existing && sourceDraft && sourceDraft.sourceFingeringHash !== hashSourceFingerings(score);
-  const keepDraft = !conflict || await choose({ kind: "fingering", title: profile.title }) === "keep-local-draft";
-  return { profile: addScoreAlias(profile, identity), prefs, draft: keepDraft ? sourceDraft : undefined };
+  const fingeringDecision = conflict ? await choose({ kind: "fingering", title: profile.title }) : undefined;
+  return { profile: addScoreAlias(profile, identity), prefs, fingeringDecision,
+    draft: fingeringDecision === "adopt-imported" ? undefined : sourceDraft };
 }
 
 export async function readLastOpenedPrefs(storage: PracticeStoragePort) {
@@ -61,7 +62,8 @@ export async function readLastOpenedPrefs(storage: PracticeStoragePort) {
 }
 
 export async function readRepairAlternate(storage: PracticeStoragePort, repair: NonNullable<WorkspacePrefs["repairEdge"]>) {
-  const blob = await storage.accessScoreBlob(repair.otherFingerprint);
+  // Loading an Undo/Redo snapshot does not make it the currently opened score.
+  const blob = await storage.get("scoreBlobs", repair.otherFingerprint);
   const source = repair.alternateCacheKey ? blob?.repairAlternate : blob;
   if (!source || (repair.alternateCacheKey && blob?.repairAlternate?.cacheKey !== repair.alternateCacheKey)) return undefined;
   return source;
@@ -133,7 +135,8 @@ export async function saveWorkspace(storage: PracticeStoragePort, profile: Piece
         scoreBlobs = [{ ...scoreBlob, repairAlternate: { ...alternate, cacheKey: repairEdge.alternateCacheKey } }];
       } else {
         scoreBlobs = [scoreBlob, ...(alternate && repairEdge ? [{ ...alternate, fingerprint: repairEdge.otherFingerprint,
-          lastAccessedAtMs: now }] : [])];
+          // An undo candidate must lose to the active score if only one revision fits.
+          lastAccessedAtMs: now - 1 }] : [])];
       }
     } catch (error) {
       await storage.commit(write);

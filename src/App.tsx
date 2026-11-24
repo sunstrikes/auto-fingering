@@ -81,6 +81,7 @@ import {
   createWebMidiController,
   getDefaultRequestMIDIAccess,
   QWERTY_TO_MIDI,
+  createLocalMidiNoteEvent,
   type MIDIAccessLike,
   type MidiConnectionState,
   type MidiInputEvent,
@@ -519,7 +520,7 @@ export default function App({
       resetPracticeProgress();
       playbackEngineRef.current?.setAbLoop(loop);
     },
-    beforeArchive() {
+    stopPlayback() {
       playbackEngineRef.current?.stop();
     },
   });
@@ -854,8 +855,8 @@ export default function App({
   );
 
   const measureErrorsByIndex = useMemo(
-    () => buildMeasureErrorSummaries(practiceAnalytics),
-    [practiceAnalytics]
+    () => buildMeasureErrorSummaries(practiceAnalytics, effectivePracticeMode),
+    [practiceAnalytics, effectivePracticeMode]
   );
 
   const repeatRecommendations = useMemo(
@@ -1627,14 +1628,7 @@ export default function App({
         const mappedMidi = QWERTY_TO_MIDI[keyLower];
         if (mappedMidi !== undefined) {
           activeQwertyMidis.set(keyLower, mappedMidi);
-          handleMidiInputEventRef.current({
-            type: "noteon",
-            midi: mappedMidi,
-            velocity: 96,
-            channel: 0,
-            portId: "qwerty-keyboard",
-            source: "qwerty",
-          });
+          handleMidiInputEventRef.current(createLocalMidiNoteEvent("qwerty", mappedMidi, 96));
         }
       }
     };
@@ -1644,27 +1638,13 @@ export default function App({
       const mappedMidi = activeQwertyMidis.get(keyLower) ?? QWERTY_TO_MIDI[keyLower];
       if (mappedMidi !== undefined && activeQwertyMidis.has(keyLower)) {
         activeQwertyMidis.delete(keyLower);
-        handleMidiInputEventRef.current({
-          type: "noteoff",
-          midi: mappedMidi,
-          velocity: 0,
-          channel: 0,
-          portId: "qwerty-keyboard",
-          source: "qwerty",
-        });
+        handleMidiInputEventRef.current(createLocalMidiNoteEvent("qwerty", mappedMidi, 0));
       }
     };
 
     const onBlur = () => {
       for (const midi of activeQwertyMidis.values()) {
-        handleMidiInputEventRef.current({
-          type: "noteoff",
-          midi,
-          velocity: 0,
-          channel: 0,
-          portId: "qwerty-keyboard",
-          source: "qwerty",
-        });
+        handleMidiInputEventRef.current(createLocalMidiNoteEvent("qwerty", midi, 0));
       }
       activeQwertyMidis.clear();
     };
@@ -2110,7 +2090,7 @@ export default function App({
           无法写入本地练习数据，请检查浏览器存储设置或备份已有记录。
         </p>}
         {backupOpen && persistence.storage && <PracticeBackupPanel storage={persistence.storage}
-          onClose={() => setBackupOpen(false)} flush={persistence.persistCurrent} onImported={workspaceScores.handleBackupImported}
+          onClose={() => setBackupOpen(false)} flush={persistence.persistCurrent} onImport={workspaceScores.handleBackupImport}
           onArchive={scoreDoc && persistence.getActive() ? workspaceScores.handleArchivePiece : undefined} />}
         {workspaceScores.openChoice && <ScoreOpenChoice choice={workspaceScores.openChoice} onAnswer={workspaceScores.answerOpenChoice} />}
 
@@ -2663,24 +2643,10 @@ export default function App({
           waitingHoldProgress={waitingState.holdProgress}
           onSelectSlice={handleSelectSlice}
           onVirtualNoteOn={(midi, velocity = 96) =>
-            handleMidiInputEvent({
-              type: "noteon",
-              midi,
-              velocity,
-              channel: 0,
-              portId: "virtual-keyboard",
-              source: "virtual",
-            })
+            handleMidiInputEvent(createLocalMidiNoteEvent("virtual", midi, velocity))
           }
           onVirtualNoteOff={(midi) =>
-            handleMidiInputEvent({
-              type: "noteoff",
-              midi,
-              velocity: 0,
-              channel: 0,
-              portId: "virtual-keyboard",
-              source: "virtual",
-            })
+            handleMidiInputEvent(createLocalMidiNoteEvent("virtual", midi, 0))
           }
         />
       </div>

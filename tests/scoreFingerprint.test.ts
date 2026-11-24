@@ -107,6 +107,26 @@ describe("Score Document structural metadata", () => {
     expect(doc.measureStructuralMeta?.[0].isFullMeasureRest).not.toBe(true);
   });
 
+  it.each([
+    ["repeat-backward", '<repeat direction="backward"/>'],
+    ["double", '<bar-style>light-light</bar-style>'],
+    ["final", '<bar-style>light-heavy</bar-style>'],
+  ])("retains a %s barline after an ending-only barline in another part", (kind, markup) => {
+    const doc = parse(`<score-partwise>
+      <part id="P1"><measure number="1">
+        <note><rest/><duration>1</duration></note>
+        <barline location="right"><ending number="1" type="stop"/></barline>
+      </measure></part>
+      <part id="P2"><measure number="1">
+        <note><rest/><duration>1</duration></note>
+        <barline location="right">${markup}</barline>
+      </measure></part>
+    </score-partwise>`);
+    expect(doc.measureStructuralMeta?.[0]).toMatchObject({
+      barlineRight: kind, endings: [{ location: "right", type: "stop", numbers: [1] }],
+    });
+  });
+
   it("uses reduced quarter offsets per part, with shared order for members of a grace chord", () => {
     const makeXml = (scale: number) => `
       <score-partwise>

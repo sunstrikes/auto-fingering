@@ -91,6 +91,26 @@ it("opens the cached score on startup and restores Free Studio preferences and c
 });
 
 
+it("keeps a single-staff hand override and its effective Practice Mode after reloading", async () => {
+  const storage = createInMemoryStorage();
+  const singleStaff = xml.replace("<staves>2</staves>", "").replace("<staff>2</staff>", "<staff>1</staff>");
+  const { pieceId } = await seed(storage, singleStaff);
+  const ui = await mount(storage);
+  await act(async () => { await vi.waitFor(() => expect(ui.rendered()).toContain("First Étude")); });
+  const handGroup = ui.element.querySelector('[aria-label="单谱表声部手别"]')!;
+  await act(async () => [...handGroup.querySelectorAll("button")].find((button) => button.textContent === "左手")!.click());
+  await act(async () => { await vi.waitFor(async () =>
+    expect(await storage.get("workspacePrefs", pieceId)).toMatchObject({ singleStaffHand: "LH" })); });
+  act(() => roots.pop()!.unmount());
+
+  const refreshed = await mount(storage);
+  await act(async () => { await vi.waitFor(() => expect(refreshed.rendered()).toContain("First Étude")); });
+  expect(refreshed.element.querySelector('[data-testid="practice-mode-lh-only"]')?.getAttribute("aria-pressed")).toBe("true");
+  expect(useStudioStore.getState().scoreDoc?.onsetSlices.every((slice) => slice.hand === "LH")).toBe(true);
+  await act(async () => refreshed.element.querySelector<HTMLButtonElement>('[data-testid="speed-preset-1"]')!.click());
+  expect(await storage.get("workspacePrefs", pieceId)).toMatchObject({ singleStaffHand: "LH", speedMultiplier: 1 });
+});
+
 it("opens a backup panel with cached scores included by default and both sizes visible", async () => {
   const ui = await mount(createInMemoryStorage());
   await act(async () => { ui.element.querySelector<HTMLButtonElement>('[data-testid="practice-backup-open"]')!.click(); });
@@ -102,6 +122,52 @@ it("opens a backup panel with cached scores included by default and both sizes v
   expect(include.checked).toBe(false);
 });
 
+
+it.each(["full", "metadata-only"] as const)("applies a %s backup to an already open workspace", async (kind) => {
+  const now = vi.spyOn(Date, "now").mockReturnValue(100);
+  const storage = createInMemoryStorage(kind === "full" ? {} : { maxScoreCount: 0 });
+  const { pieceId, identity, score, coord } = await seed(storage, xml, kind === "full");
+  const ui = await mount(storage);
+  if (kind === "metadata-only") await openFile(ui.element, xml);
+  await act(async () => { await vi.waitFor(() => expect(ui.rendered()).toMatch(/<fingering[^>]*>4<\/fingering>/)); });
+  const click = async (id: string) => {
+    await act(async () => ui.element.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`)!.click());
+  };
+  await click("practice-backup-open");
+
+  const backupStorage = createInMemoryStorage();
+  const importedXml = xml.replace("First Étude", "Updated Étude");
+  const bytes = await exportMxlContainer(importedXml);
+  await backupStorage.commit({
+    pieceProfiles: [(await storage.get("pieceProfiles", pieceId))!],
+    fingerAnchorDrafts: [{ pieceId, sourceFingeringHash: hashSourceFingerings(score),
+      anchorsByCoord: { [coord]: { finger: 3, mode: "pinOnly" } }, removedRawCoords: [], updatedAtMs: 200 }],
+    workspacePrefs: [{ scopeKey: "__global__", lastOpenedPieceId: pieceId, updatedAtMs: 200 },
+      { scopeKey: pieceId, scoreFingerprint: identity.fingerprint, speedMultiplier: 0.5,
+        practiceMode: "rh-only", freePracticeMinutes: 7, handSpanProfile: profile, updatedAtMs: 200 }],
+    scoreBlobs: [{ fingerprint: identity.fingerprint, fileName: "updated.mxl", bytes,
+      byteLength: bytes.byteLength, lastAccessedAtMs: 200 }],
+  });
+  const backup = await createPracticeBackup(backupStorage);
+  const input = ui.element.querySelector<HTMLInputElement>('[data-testid="practice-backup-import"]')!;
+  const json = kind === "full" ? backup.fullJson : backup.metadataOnlyJson;
+  Object.defineProperty(input, "files", { value: [{ name: "backup.json", text: async () => json }] });
+  now.mockReturnValue(300);
+  await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+  await vi.waitFor(async () => {
+    await act(async () => {});
+    expect(ui.element.querySelector('[data-testid="practice-backup-status"]')?.textContent).toContain("已导入备份");
+    expect(ui.rendered()).toMatch(/<fingering[^>]*>3<\/fingering>/);
+  });
+  expect(ui.rendered()).toContain(kind === "full" ? "Updated Étude" : "First Étude");
+  expect(ui.element.querySelector('[data-testid="practice-mode-rh-only"]')?.getAttribute("aria-pressed")).toBe("true");
+  expect(await storage.get("workspacePrefs", pieceId)).toMatchObject({ speedMultiplier: 0.5, updatedAtMs: 200 });
+  await click("speed-preset-1");
+  expect(await storage.get("workspacePrefs", pieceId)).toMatchObject({
+    speedMultiplier: 1, practiceMode: "rh-only", freePracticeMinutes: 7,
+  });
+  expect(await storage.get("fingerAnchorDrafts", pieceId)).toMatchObject({ anchorsByCoord: { [coord]: { finger: 3 } } });
+});
 
 async function openFile(element: HTMLElement, source: string) {
   const input = element.querySelector<HTMLInputElement>('input[accept=".musicxml,.xml,.mxl"]')!;
@@ -161,15 +227,19 @@ it("archives the old draft and practice time while reopening the same score as a
     expect((await storage.get("fingerAnchorDrafts", newPieceId))?.anchorsByCoord).toEqual({})); });
 });
 
-it.each([["accept", 4], ["decline", 2]] as const)("lets the user %s a local draft when external fingerings change", async (answer, finger) => {
+it.each([["accept", 4], ["decline", 5]] as const)("lets the user %s a local draft when external fingerings change", async (answer, finger) => {
   const storage = createInMemoryStorage();
   const seeded = await seed(storage, xml, false);
+  const prefs = (await storage.get("workspacePrefs", seeded.pieceId))!;
+  await storage.commit({ workspacePrefs: [{ ...prefs, ignoreExistingFingerings: true }] });
   const ui = await mount(storage);
-  const edited = xml.replace("<staff>1</staff>", "<staff>1</staff><notations><technical><fingering>2</fingering></technical></notations>");
+  const edited = xml.replace("<staff>1</staff>", "<staff>1</staff><notations><technical><fingering>5</fingering></technical></notations>");
   await openFile(ui.element, edited);
   expect(ui.element.querySelector('[data-testid="practice-score-fingering-prompt"]')).not.toBeNull();
   await act(async () => { ui.element.querySelector<HTMLButtonElement>(`[data-testid="practice-score-choice-${answer}"]`)!.click(); });
   expect(ui.rendered()).toMatch(new RegExp(`<fingering[^>]*>${finger}</fingering>`));
+  await act(async () => { await vi.waitFor(async () =>
+    expect(await storage.get("workspacePrefs", seeded.pieceId)).toMatchObject({ ignoreExistingFingerings: answer === "accept" })); });
   expect((await storage.findPieceProfiles(seeded.identity.fingerprint)).map((row) => row.pieceId)).toEqual([seeded.pieceId]);
 });
 
@@ -268,6 +338,28 @@ it("retries a failed workspace write before preparing a backup", async () => {
   expect((await storage.get("workspacePrefs", pieceId))?.speedMultiplier).toBe(1);
 });
 
+
+it("keeps the active repair revision cached when only one score fits", async () => {
+  vi.spyOn(Date, "now").mockReturnValue(100);
+  const storage = createInMemoryStorage({ maxScoreCount: 1 });
+  const changed = xml.replace("<step>C</step>", "<step>D</step>");
+  // Reproduce the bad tie-break order: the main score's fingerprint sorts before the alternate's.
+  const revisions = [xml, changed].map((source) => ({ source, score: parseMusicXml(source) }))
+    .map((revision) => ({ ...revision, fingerprint: getScoreIdentity(revision.score).fingerprint }))
+    .sort((a, b) => a.fingerprint.localeCompare(b.fingerprint));
+  const [active, alternate] = revisions;
+  const { pieceId } = await seed(storage, alternate.source);
+  const ui = await mount(storage);
+  await act(async () => { await vi.waitFor(() => expect(ui.rendered()).toContain("First Étude")); });
+  await act(async () => {
+    const state = useStudioStore.getState();
+    state.applyScoreRepair({ scoreDoc: active.score, rawXmlText: active.source,
+      solveResult: solveFingering(active.score.onsetSlices, state.handSpanProfile) });
+  });
+  await act(async () => { await vi.waitFor(async () =>
+    expect(await storage.get("workspacePrefs", pieceId)).toMatchObject({ scoreFingerprint: active.fingerprint })); });
+  expect((await storage.all("scoreBlobs")).map((blob) => blob.fingerprint)).toEqual([active.fingerprint]);
+});
 
 it("restores same-fingerprint repair Undo and Redo from a full backup without a noncanonical score fingerprint", async () => {
   const storage = createInMemoryStorage();

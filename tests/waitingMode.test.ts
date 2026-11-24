@@ -472,6 +472,21 @@ describe("Multi-pass PracticeAnalytics & Repeat Recommendations", () => {
     expect(summary(hesitated)).toMatchObject({ mastered: false, hesitationCount: 1 });
   });
 
+  it("requires a fresh fluent pass when joining both hands and retains each mode's own progress", () => {
+    const [step] = buildPracticeSteps(makeScoreDoc([
+      makeNote({ noteUid: "c", midi: 60, hand: "RH", onsetSec: 0 }),
+    ]), "rh-only");
+    const options = { measureCount: 2, activeMeasureIndex: 0, currentSpeed: 1 };
+    const oneHand = recordPracticeStepCompleted(createPracticeAnalyticsState(), {
+      completedStep: step, passCompleted: true, practiceMode: "rh-only",
+    });
+    expect(evaluatePracticeProgression(oneHand, { ...options, currentPracticeMode: "rh-only" }).stage).toBe("step-up-hand");
+    expect(evaluatePracticeProgression(oneHand, { ...options, currentPracticeMode: "both" }).stage).toBe("practicing");
+    const bothHands = recordPracticeStepCompleted(oneHand, { completedStep: step, passCompleted: true, practiceMode: "both" });
+    expect(evaluatePracticeProgression(bothHands, { ...options, currentPracticeMode: "both" }).stage).toBe("ready-next-measure");
+    expect(evaluatePracticeProgression(bothHands, { ...options, currentPracticeMode: "lh-only" }).stage).toBe("practicing");
+  });
+
   it("suggests relative tempo increases for fluent sections, but not a hesitant section", () => {
     const steps = buildPracticeSteps(makeScoreDoc([
       makeNote({ noteUid: "a", midi: 60, hand: "RH", measureIndex: 0, onsetTick: 0, onsetSec: 0 }),

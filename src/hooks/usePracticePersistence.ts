@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStudioStore, type StudioState } from "../store/useStudioStore";
 import { exportMxlContainer } from "../musicxml/mxl";
+import { importPracticeBackup } from "../persistence/backupMerge";
 import { createIndexedDbStorage } from "../persistence/indexedDbStorage";
 import { createInMemoryStorage } from "../persistence/inMemoryStorage";
 import type { PieceProfile, PracticeStoragePort } from "../persistence/storagePort";
@@ -10,6 +11,15 @@ type Prefs = CurrentWorkspace["prefs"];
 interface ActivePiece {
   profile: PieceProfile;
   freePracticeMinutes: number;
+  needsBaseline: boolean;
+}
+
+interface WorkspaceSnapshot {
+  active: ActivePiece;
+  source: Omit<CurrentWorkspace, "prefs" | "repair"> & Pick<StudioState, "mxlContainer">;
+  prefs: Prefs;
+  history: StudioState["history"];
+  minutes: number;
 }
 
 function repairInHistory(rawXmlText: string, history: StudioState["history"]): CurrentWorkspace["repair"] {
@@ -38,8 +48,8 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
   const mounted = useRef(false);
   const startup = useRef<{ storage: PracticeStoragePort; run: Promise<boolean> } | undefined>(undefined);
   const queue = useRef(Promise.resolve());
-  const last = useRef<{ active: ActivePiece; source: Omit<CurrentWorkspace, "prefs" | "repair">;
-    prefs: Prefs; history: StudioState["history"]; minutes: number } | null>(null);
+  const last = useRef<WorkspaceSnapshot | null>(null);
+  const importing = useRef(false);
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
   const scoreDoc = useStudioStore((s) => s.scoreDoc);
@@ -61,13 +71,20 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
     return run;
   }
 
-  function persistCurrent() {
-    if (!storage) return queue.current;
+  function snapshotCurrent(): WorkspaceSnapshot | undefined {
     const binding = activeRef.current;
     const { scoreDoc, rawXmlText, history, fileName, exportFormat, mxlContainer, anchors, removedRawAnchorUids } = useStudioStore.getState();
-    if (!binding || !scoreDoc || !rawXmlText) return queue.current;
-    const source = { scoreDoc, rawXmlText, fileName, exportFormat, mxlContainer, anchors, removedRawAnchorUids };
-    const next = { active: binding, source, history, prefs: prefsRef.current, minutes: binding.freePracticeMinutes };
+    if (!binding || !scoreDoc || !rawXmlText) return;
+    return { active: binding, source: { scoreDoc, rawXmlText, fileName, exportFormat, mxlContainer, anchors, removedRawAnchorUids },
+      history, prefs: prefsRef.current, minutes: binding.freePracticeMinutes };
+  }
+
+  function persistCurrent() {
+    if (!storage || importing.current || activeRef.current?.needsBaseline) return queue.current;
+    const next = snapshotCurrent();
+    if (!next) return queue.current;
+    const { active: binding, source, history } = next;
+    const { rawXmlText, exportFormat, anchors, removedRawAnchorUids } = source;
     return enqueue(async () => {
       // Compare against the last committed snapshot, not an earlier queued attempt.
       const previous = last.current;
@@ -89,10 +106,26 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
     });
   }
 
-  function activate(profile: PieceProfile, freePracticeMinutes = 0) {
-    const binding = { profile, freePracticeMinutes };
+  function activate(profile: PieceProfile, freePracticeMinutes = 0, mode: "open" | "restore" = "open") {
+    const binding = { profile, freePracticeMinutes, needsBaseline: mode === "restore" };
     activeRef.current = binding;
     setActive(binding);
+  }
+
+  async function importBackup(json: string, restore: () => Promise<void>) {
+    if (!storage || importing.current) return;
+    const flush = persistCurrent();
+    importing.current = true;
+    try {
+      await flush;
+      await importPracticeBackup(storage, json);
+      // Do not let the pre-import score write back after the merge (even if restore fails).
+      activeRef.current = null;
+      setActive(null);
+      await restore();
+    } finally {
+      importing.current = false;
+    }
   }
 
   useEffect(() => {
@@ -125,7 +158,14 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
     };
   }, [storage]);
   useEffect(() => {
-    if (!active) return;
+    if (!active || activeRef.current !== active) return;
+    if (active.needsBaseline) {
+      // The merged snapshot is already on disk. Capture its rendered preferences
+      // as the baseline, without replacing any imported record or timestamp.
+      last.current = snapshotCurrent() ?? null;
+      active.needsBaseline = false;
+      return;
+    }
     void persistCurrent().catch(() => undefined);
   }, [active, scoreDoc, rawXmlText, anchors, removedRawAnchorUids, history, prefs, exportFormat]);
 
@@ -151,7 +191,7 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
   }, [storage, active, playing]);
 
   return {
-    storage, activate, persistCurrent, saveError, backupReminder, dismissReminder: () => setBackupReminder(false),
+    storage, activate, persistCurrent, importBackup, saveError, backupReminder, dismissReminder: () => setBackupReminder(false),
     getActive: () => activeRef.current,
   };
 }

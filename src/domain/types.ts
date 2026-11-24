@@ -278,6 +278,8 @@ export interface ScoreDocument {
   onsetSlices: OnsetSlice[];
   isSingleStaff: boolean;
   defaultSingleStaffHand: Hand;
+  /** The hand actually assigned by the parser, including a workspace override. */
+  singleStaffHand?: Hand;
   measureCount: number;
   ticksPerQuarter: number;
   tempoPoints: TempoPoint[];
