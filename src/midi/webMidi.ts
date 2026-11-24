@@ -127,7 +127,8 @@ export const QWERTY_TO_MIDI: Readonly<Record<string, number>> = {
 export function parseMidiMessage(
   data: Uint8Array | number[] | null | undefined,
   portId: string,
-  source: MidiInputSource = "midi"
+  source: MidiInputSource = "midi",
+  timeStampMs?: number,
 ): MidiInputEvent | null {
   if (!data || data.length < 2) return null;
   const status = data[0];
@@ -139,6 +140,10 @@ export function parseMidiMessage(
 
   const command = status & 0xf0;
   const channel = status & 0x0f;
+  const context = {
+    channel, portId, source,
+    ...(timeStampMs !== undefined && Number.isFinite(timeStampMs) ? { timeStampMs } : {}),
+  };
 
   if (command === 0x90) {
     if (data2 > 0) {
@@ -146,18 +151,14 @@ export function parseMidiMessage(
         type: "noteon",
         midi: data1,
         velocity: data2,
-        channel,
-        portId,
-        source,
+        ...context,
       };
     }
     return {
       type: "noteoff",
       midi: data1,
       velocity: 0,
-      channel,
-      portId,
-      source,
+      ...context,
     };
   }
 
@@ -166,9 +167,7 @@ export function parseMidiMessage(
       type: "noteoff",
       midi: data1,
       velocity: 0,
-      channel,
-      portId,
-      source,
+      ...context,
     };
   }
 
@@ -177,9 +176,7 @@ export function parseMidiMessage(
       type: "sustain",
       value: data2,
       pressed: data2 >= 64,
-      channel,
-      portId,
-      source,
+      ...context,
     };
   }
 
@@ -245,15 +242,8 @@ export function createWebMidiController(deps: WebMidiControllerDeps): WebMidiCon
         if (state.selectedDeviceId !== null && state.selectedDeviceId !== input.id) {
           return;
         }
-        const parsed = parseMidiMessage(msgEvent.data, input.id, "midi");
-        if (parsed) {
-          const timeStampMs = msgEvent.timeStamp;
-          deps.onMidiEvent(
-            timeStampMs !== undefined && Number.isFinite(timeStampMs)
-              ? { ...parsed, timeStampMs }
-              : parsed
-          );
-        }
+        const parsed = parseMidiMessage(msgEvent.data, input.id, "midi", msgEvent.timeStamp);
+        if (parsed) deps.onMidiEvent(parsed);
       };
       boundInputs.add(input);
     }
