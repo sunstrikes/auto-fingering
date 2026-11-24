@@ -186,6 +186,7 @@ function formatTextSummary(summary: ReturnType<typeof buildDiagnosticSummary>): 
     `svgPagesParsed: ${summary.svgPagesParsed}`,
     `pngPagesSkipped: ${summary.pngPagesSkipped}`,
     `measuresAligned: ${summary.measuresAligned}`,
+    `alignmentConfidence: ${(summary.alignmentConfidence * 100).toFixed(1)}%`,
     `warnings: ${summary.warnings.length}`,
   ];
   for (const w of summary.warnings) {

@@ -412,7 +412,7 @@ function scanSvgShapes(svgText: string): {
       const subpathCount =
         tag === "path" && attrs.d ? (attrs.d.match(/[Mm]/g) ?? []).length : 1;
 
-      shapes.push({
+      const rawShape: RawSvgShape = {
         tag,
         classes,
         matrix: currentMatrix,
@@ -420,7 +420,13 @@ function scanSvgShapes(svgText: string): {
         points: pts,
         bbox,
         subpathCount,
-      });
+      };
+      const isBatchedGlyph = Array.from(classes).some((c) => BATCHED_GLYPH_CLASSES.has(c));
+      if (isBatchedGlyph && subpathCount > 1) {
+        shapes.push(...expandPathSubpaths(rawShape));
+      } else {
+        shapes.push(rawShape);
+      }
     }
   }
 
@@ -455,6 +461,39 @@ function cyToDiatonicPitch(
   return { step, octave };
 }
 
+const BATCHED_GLYPH_CLASSES = new Set([
+  "StaffLines",
+  "BarLine",
+  "Note",
+  "Stem",
+  "Rest",
+  "Clef",
+  "Accidental",
+  "LedgerLine",
+  "NoteDot",
+  "Beam",
+  "Hook",
+  "TieSegment",
+  "SlurSegment",
+  "HairpinSegment",
+  "Articulation",
+]);
+
+function isBboxContained(inner: BBox, outer: BBox, tol = 1): boolean {
+  return (
+    inner.minX >= outer.minX - tol &&
+    inner.maxX <= outer.maxX + tol &&
+    inner.minY >= outer.minY - tol &&
+    inner.maxY <= outer.maxY + tol
+  );
+}
+
+function isBboxNearby(a: BBox, b: BBox, maxDist: number): boolean {
+  const dx = Math.max(0, b.minX - a.maxX, a.minX - b.maxX);
+  const dy = Math.max(0, b.minY - a.maxY, a.minY - b.maxY);
+  return Math.hypot(dx, dy) <= maxDist;
+}
+
 function expandPathSubpaths(shape: RawSvgShape): RawSvgShape[] {
   if (shape.tag !== "path" || (shape.subpathCount ?? 1) <= 1 || !shape.attrs.d) {
     return [shape];
@@ -466,22 +505,50 @@ function expandPathSubpaths(shape: RawSvgShape): RawSvgShape[] {
   if (parts.length <= 1) {
     return [shape];
   }
-  const expanded: RawSvgShape[] = [];
+
+  const isLineOrBar = shape.classes.has("StaffLines") || shape.classes.has("BarLine");
+  const isMultiPartGlyph =
+    shape.classes.has("Clef") ||
+    shape.classes.has("Rest") ||
+    shape.classes.has("Accidental") ||
+    shape.classes.has("Articulation");
+
+  const clusters: Array<{ d: string; pts: ReturnType<typeof extractPathPoints>; bbox: BBox }> = [];
+
   for (const part of parts) {
     const pts = extractPathPoints(part, shape.matrix);
     const bbox = computeBBox(pts);
     if (!bbox) continue;
-    expanded.push({
-      tag: shape.tag,
-      classes: shape.classes,
-      matrix: shape.matrix,
-      attrs: { ...shape.attrs, d: part },
-      points: pts,
-      bbox,
-      subpathCount: 1,
-    });
+
+    const prev = clusters[clusters.length - 1];
+    if (
+      !isLineOrBar &&
+      prev &&
+      (isBboxContained(bbox, prev.bbox) ||
+        isBboxContained(prev.bbox, bbox) ||
+        (isMultiPartGlyph && isBboxNearby(prev.bbox, bbox, Math.max(prev.bbox.width, prev.bbox.height) * 0.8)))
+    ) {
+      prev.d += part;
+      prev.pts.push(...pts);
+      prev.bbox = computeBBox(prev.pts) ?? prev.bbox;
+    } else {
+      clusters.push({ d: part, pts, bbox });
+    }
   }
-  return expanded.length > 0 ? expanded : [shape];
+
+  if (clusters.length <= 1) {
+    return [shape];
+  }
+
+  return clusters.map((c) => ({
+    tag: shape.tag,
+    classes: shape.classes,
+    matrix: shape.matrix,
+    attrs: { ...shape.attrs, d: c.d },
+    points: c.pts,
+    bbox: c.bbox,
+    subpathCount: (c.d.match(/[Mm]/g) ?? []).length || 1,
+  }));
 }
 
 function buildStavesAndSystems(
@@ -539,7 +606,22 @@ function buildStavesAndSystems(
     }
   }
 
-  // Group staves into systems (vertical gap < 12 * staffSpace)
+  // Group staves into systems: prefer left-edge spanning BarLine/Bracket (handles 3+ staff systems),
+  // falling back to vertical gap < 12 * staffSpace (max 2 staves) when no spanning barline is present.
+  const verticalBars = shapes.filter(
+    (s) => s.classes.has("BarLine") && s.bbox.width <= 12 && s.bbox.height > 10
+  );
+  const hasSpanningLeftBar = (prev: SvgStaff, next: SvgStaff): boolean => {
+    const tol = Math.max(4, prev.staffSpace * 1.5);
+    const maxLeftX = Math.min(prev.minX, next.minX) + prev.staffSpace * 3;
+    return verticalBars.some(
+      (b) =>
+        b.bbox.minX <= maxLeftX &&
+        b.bbox.minY <= prev.topY + tol &&
+        b.bbox.maxY >= next.bottomY - tol
+    );
+  };
+
   const systems: SvgSystem[] = [];
   let currentStaves: SvgStaff[] = [];
   for (const staff of rawStaves) {
@@ -548,7 +630,11 @@ function buildStavesAndSystems(
     } else {
       const prev = currentStaves[currentStaves.length - 1];
       const gap = staff.topY - prev.bottomY;
-      if (gap < prev.staffSpace * 12 && currentStaves.length < 2) {
+      const spannedByBar = hasSpanningLeftBar(prev, staff);
+      if (spannedByBar || (gap < prev.staffSpace * 12 && currentStaves.length < 2)) {
+        if (currentStaves.length >= 2) {
+          prev.staffNumber = 1;
+        }
         staff.staffNumber = 2;
         currentStaves.push(staff);
       } else {
