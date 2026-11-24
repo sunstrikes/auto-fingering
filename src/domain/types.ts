@@ -27,11 +27,15 @@ export interface NoteEvent {
   noteUid: string;
   measureIndex: number;
   onsetTick: number;
+  /** Part-local position, independent of the playback tick grid. */
+  scoreCoord?: ScoreCoord;
   durationTick: number;
   onsetSec: number;
   durationSec: number;
   midi: number;
   hand: Hand;
+  /** Source staff/part hand before any whole-score hand inference. */
+  writtenHand?: Hand;
   voice: string;
   staff: number;
   isGrace: boolean;
@@ -212,6 +216,56 @@ export interface MeasureTimeline {
   isPickup: boolean;
 }
 
+export type ExplicitBarlineKind =
+  | "regular"
+  | "double"
+  | "final"
+  | "repeat-forward"
+  | "repeat-backward"
+  | "repeat-both";
+
+export interface ScoreCoord {
+  measureIndex: number;
+  beatNum: number;
+  beatDen: number;
+  graceOrder?: number;
+}
+
+/** `measureIndex:beatNum/beatDen:graceOrder-or-m:hand:midi:occIdx` */
+export type NoteCoordKey = string;
+
+export interface MeasureEnding {
+  location: "left" | "middle" | "right";
+  numbers: number[];
+  type: "start" | "stop" | "discontinue";
+}
+
+export interface MeasureStructuralMeta {
+  measureIndex: number;
+  barlineLeft?: ExplicitBarlineKind;
+  barlineRight?: ExplicitBarlineKind;
+  endingNumbers?: number[];
+  endingType?: MeasureEnding["type"];
+  /** All explicit ending markers, including when both endpoints occur in one measure. */
+  endings?: MeasureEnding[];
+  rehearsalMark?: string;
+  keyFifths?: number;
+  keyMode?: string;
+  hasFermata?: boolean;
+  hasTempoChange?: boolean;
+  hasTimeSigChange?: boolean;
+  isFullMeasureRest?: boolean;
+  measureHash?: string;
+}
+
+export interface SlurSpan {
+  hand: Hand;
+  voice: string;
+  startCoord: ScoreCoord;
+  endCoord: ScoreCoord;
+  crossesBarline: boolean;
+}
+
 export interface ScoreDocument {
   title: string;
   xmlDoc: Document;
@@ -228,6 +282,10 @@ export interface ScoreDocument {
   timeSignaturePoints: TimeSignaturePoint[];
   measureTimelines: MeasureTimeline[];
   pedalIntervals?: PedalInterval[];
+  measureStructuralMeta?: MeasureStructuralMeta[];
+  slurSpans?: SlurSpan[];
+  /** Immutable baseline captured before the MusicXML writer updates the DOM. */
+  sourceFingeringHash?: string;
 }
 
 export type PracticeMode = "both" | "rh-only" | "lh-only";
