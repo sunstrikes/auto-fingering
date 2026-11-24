@@ -17,6 +17,7 @@ import type { MxlContainer } from "../musicxml/mxl";
 import type { XmlDomDeps } from "../musicxml/parser";
 import type { ExportFormat } from "../musicxml/scoreSession";
 import { serializeScoreDocument, writeFingeringsToScore } from "../musicxml/writer";
+import { remapAnchorState, type AnchorState } from "../persistence/anchorDrafts";
 import { midiToPitchLabel } from "../solver/keyboard";
 
 export interface NoteDiffEntry {
@@ -57,6 +58,7 @@ export interface SetSolvedScorePayload {
   exportFormat: ExportFormat;
   solveResult: SolveResult;
   resetHistory?: boolean;
+  restored?: AnchorState & { history?: StudioState["history"] };
   xmlDeps?: XmlDomDeps;
 }
 
@@ -304,12 +306,13 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
     exportFormat,
     solveResult,
     resetHistory = false,
+    restored,
     xmlDeps,
   }) => {
     const state = get();
-    const nextAnchors = resetHistory ? {} : state.anchors;
-    const nextRemoved = resetHistory ? [] : state.removedRawAnchorUids;
-    const nextHistory = resetHistory ? { past: [], future: [] } : state.history;
+    const nextAnchors = restored?.anchors ?? (resetHistory ? {} : state.anchors);
+    const nextRemoved = restored?.removedRawAnchorUids ?? (resetHistory ? [] : state.removedRawAnchorUids);
+    const nextHistory = restored?.history ?? (resetHistory ? { past: [], future: [] } : state.history);
     const nextDiff = resetHistory ? [] : state.lastDiff;
 
     const exportedXml = syncXmlOutput(
@@ -464,16 +467,9 @@ const createStudioStateCreator: StateCreator<StudioState> = (set, get) => ({
     if (!state.scoreDoc || !state.solveResult) return;
 
     const snapshot = createSnapshot(state, true);
-    const sourceAnchors = anchors ?? state.anchors;
-    const nextAnchors: Record<string, AnchorOverride> = {};
-    for (const [uid, ov] of Object.entries(sourceAnchors)) {
-      if (scoreDoc.noteElementsByUid.has(uid)) {
-        nextAnchors[uid] = ov;
-      }
-    }
-    const nextRemoved = (removedRawAnchorUids ?? state.removedRawAnchorUids).filter((uid) =>
-      scoreDoc.noteElementsByUid.has(uid)
-    );
+    const remapped = remapAnchorState(state.scoreDoc, scoreDoc, state);
+    const nextAnchors = anchors ?? remapped.anchors;
+    const nextRemoved = removedRawAnchorUids ?? remapped.removedRawAnchorUids;
 
     const exportedXml = syncXmlOutput(
       scoreDoc,
