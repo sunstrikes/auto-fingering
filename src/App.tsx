@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
   createDefaultAbLoopBounds,
   normalizeAbLoopBounds,
@@ -55,6 +55,7 @@ import { buildMeasureRiskSummaries, type MeasureGeometry } from "./components/Ma
 import { NoteAnchorPopover, type PopoverAnchorRect } from "./components/NoteAnchorPopover";
 import { ScoreRepairPanel } from "./components/ScoreRepairPanel";
 import { UnifiedPiano88 } from "./components/UnifiedPiano88";
+import { SimulatedMidiDebugBar } from "./components/SimulatedMidiDebugBar";
 import { sortWarningsForNavigation } from "./components/warningUtils";
 import {
   ScoreViewer,
@@ -69,6 +70,8 @@ import {
   formatMidiStatusLabel,
   getMidiStatusBadgeClass,
 } from "./components/PracticeSettingsModal";
+import { createMidiRingBuffer, type MidiRingBuffer } from "./midi/midiRingBuffer";
+import { createSimulatedMidiHarness, type SimulatedMidiStep } from "./midi/simulatedMidiHarness";
 import {
   createWebMidiController,
   getDefaultRequestMIDIAccess,
@@ -129,6 +132,7 @@ export interface AppAudioDeps extends PianoAudioDeps {
 
 export interface AppMidiDeps {
   requestMIDIAccess?: () => Promise<MIDIAccessLike>;
+  ringBuffer?: MidiRingBuffer;
 }
 
 export interface AppProps {
@@ -148,6 +152,17 @@ export default function App({
   const audioEngineRef = useRef<PianoAudioEngine | null>(null);
   const playbackEngineRef = useRef<PlaybackEngine | null>(null);
   const midiControllerRef = useRef<WebMidiController | null>(null);
+  const defaultMidiRingBufferRef = useRef<MidiRingBuffer | null>(null);
+  const midiRingBuffer = midiDeps?.ringBuffer ?? (defaultMidiRingBufferRef.current ??= createMidiRingBuffer());
+  const simulatedMidiEnabled = new URLSearchParams(globalThis.location?.search).get("simMidi") === "1";
+  const simulatedMidi = useMemo(
+    () => simulatedMidiEnabled ? createSimulatedMidiHarness() : null,
+    [simulatedMidiEnabled]
+  );
+  const resetMidiCapture = useCallback(() => {
+    simulatedMidi?.stop();
+    midiRingBuffer.clear();
+  }, [midiRingBuffer, simulatedMidi]);
   const [isResolving, setIsResolving] = useState<boolean>(false);
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
   const [playbackSpeed, setPlaybackSpeed] = useState<SpeedMultiplier>(1.0);
@@ -281,6 +296,12 @@ export default function App({
     };
   }, []);
 
+  // This volatile buffer belongs to the current score/session, not to the Studio store.
+  useEffect(() => {
+    resetMidiCapture();
+    return () => midiRingBuffer.clear();
+  }, [midiRingBuffer, resetMidiCapture, scoreDoc]);
+
   useEffect(() => {
     const audioEngine = createPianoAudioEngine({
       timbre: audioDeps?.timbre ?? pianoTimbreRef.current,
@@ -296,7 +317,10 @@ export default function App({
       audioEngine,
       requestAnimationFrame: audioDeps?.requestAnimationFrame,
       cancelAnimationFrame: audioDeps?.cancelAnimationFrame,
-      onStateChange: setPlaybackState,
+      onStateChange: (nextState) => {
+        if (nextState === "stopped") resetMidiCapture();
+        setPlaybackState(nextState);
+      },
       onSliceChange: (slice) => {
         useStudioStore.getState().selectSlice(slice.sliceId);
       },
@@ -310,9 +334,13 @@ export default function App({
       playbackEngineRef.current = null;
       audioEngineRef.current = null;
     };
-  }, [audioDeps]);
+  }, [audioDeps, resetMidiCapture]);
 
-  const handleMidiInputEvent = (event: MidiInputEvent) => {
+  const handleMidiInputEvent = (inputEvent: MidiInputEvent) => {
+    const event = inputEvent.source !== "midi" && inputEvent.timeStampMs === undefined
+      ? { ...inputEvent, timeStampMs: performance.now() }
+      : inputEvent;
+    midiRingBuffer.push(event);
     if (event.type === "noteon") {
       setPressedMidis((prev) => {
         if (prev.has(event.midi)) return prev;
@@ -365,9 +393,9 @@ export default function App({
   handleMidiInputEventRef.current = handleMidiInputEvent;
 
   useEffect(() => {
-    const requestMIDIAccess = midiDeps
-      ? midiDeps.requestMIDIAccess
-      : getDefaultRequestMIDIAccess();
+    const requestMIDIAccess = simulatedMidi?.requestMIDIAccess ?? (
+      midiDeps ? midiDeps.requestMIDIAccess : getDefaultRequestMIDIAccess()
+    );
 
     const controller = createWebMidiController({
       requestMIDIAccess,
@@ -379,9 +407,10 @@ export default function App({
 
     return () => {
       controller.dispose();
+      simulatedMidi?.stop();
       midiControllerRef.current = null;
     };
-  }, [midiDeps]);
+  }, [midiDeps, simulatedMidi]);
 
   const solveAndRender = async (
     nextDoc: ScoreDocument,
@@ -1311,6 +1340,7 @@ export default function App({
 
   const handleJumpToStart = () => {
     if (!scoreDoc) return;
+    resetMidiCapture();
     setPopoverOpen(false);
     const firstSliceId = onsetSlices[0]?.sliceId ?? null;
     useStudioStore.getState().selectMeasure(0, firstSliceId);
@@ -1425,6 +1455,7 @@ export default function App({
       triggerStepAdvanceMetronome(result.advancedToStep);
       syncToPracticeStep(result.advancedToStep, "playing");
     } else if (result.completedScore) {
+      resetMidiCapture();
       setPlaybackState("stopped");
       playbackEngineRef.current?.setMetronomePaused(false);
       setActiveMetronomeBeat(null);
@@ -1731,9 +1762,10 @@ export default function App({
 
   const handleStop = () => {
     waitingLoopGapActiveRef.current = false;
+    setWaitingStateSync(createWaitingModeState(0));
+    resetMidiCapture();
     playbackEngineRef.current?.stop();
     playbackEngineRef.current?.setMetronomePaused(false);
-    setWaitingState(createWaitingModeState(0));
     if (waitingModeEnabled) {
       setPlaybackState("stopped");
       syncToPracticeStep(null, "stopped");
@@ -1821,13 +1853,14 @@ export default function App({
         syncToPracticeStep(practiceSteps[currentIdx] ?? null, "playing");
       }
     } else {
+      setWaitingStateSync(createWaitingModeState(0));
+      resetMidiCapture();
       waitingLoopGapActiveRef.current = false;
       playbackEngineRef.current?.stop();
       playbackEngineRef.current?.setMetronomePaused(false);
       setPlaybackState("stopped");
       syncToPracticeStep(null, "stopped");
       setActiveMetronomeBeat(null);
-      setWaitingState(createWaitingModeState(0));
     }
   };
 
@@ -1863,8 +1896,35 @@ export default function App({
     });
   };
 
+  const handlePlaySimulatedMidi = () => {
+    if (!simulatedMidi) return;
+    if (practiceSteps.length === 0) {
+      simulatedMidi.play([60, 64, 67, 72].map((midi, stepIndex) => ({
+        stepIndex,
+        onsetMs: stepIndex * 300,
+        notes: [{ midi, hand: "RH" }, { midi: 48, hand: "LH" }],
+      })));
+      return;
+    }
+
+    const waitingIndex = waitingStateRef.current.currentStepIndex;
+    const startIndex = waitingModeEnabled && waitingIndex < practiceSteps.length ? waitingIndex : 0;
+    const startSec = practiceSteps[startIndex].onsetSec;
+    const steps: SimulatedMidiStep[] = practiceSteps.slice(startIndex).map((step) => ({
+      stepIndex: step.stepIndex,
+      onsetMs: (step.onsetSec - startSec) * 1000,
+      notes: step.expectedNotes.map((note) => ({
+        midi: note.midi,
+        hand: note.hand,
+        durationMs: Math.max(note.durationSec, step.expectedDurationSec) * 1000,
+      })),
+    }));
+    simulatedMidi.play(steps, { speedMultiplier: playbackSpeed });
+  };
+
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-slate-50 text-slate-900">
+      {simulatedMidi && <SimulatedMidiDebugBar harness={simulatedMidi} onPlay={handlePlaySimulatedMidi} />}
       <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-1.5 sm:px-4">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 lg:flex-nowrap">
           <div className="shrink-0">

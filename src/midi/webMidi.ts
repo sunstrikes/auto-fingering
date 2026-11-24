@@ -1,6 +1,9 @@
 export type MidiInputSource = "midi" | "virtual" | "qwerty";
 
-export type MidiInputEvent =
+export type MidiInputEvent = {
+  /** Monotonic milliseconds in the performance.now() time domain, when provided by the input. */
+  timeStampMs?: number;
+} & (
   | {
       type: "noteon";
       midi: number;
@@ -24,7 +27,7 @@ export type MidiInputEvent =
       channel: number;
       portId: string;
       source: MidiInputSource;
-    };
+    });
 
 export interface MIDIMessageEventLike {
   data: Uint8Array | number[] | null;
@@ -244,7 +247,12 @@ export function createWebMidiController(deps: WebMidiControllerDeps): WebMidiCon
         }
         const parsed = parseMidiMessage(msgEvent.data, input.id, "midi");
         if (parsed) {
-          deps.onMidiEvent(parsed);
+          const timeStampMs = msgEvent.timeStamp;
+          deps.onMidiEvent(
+            timeStampMs !== undefined && Number.isFinite(timeStampMs)
+              ? { ...parsed, timeStampMs }
+              : parsed
+          );
         }
       };
       boundInputs.add(input);
