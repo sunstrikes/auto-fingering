@@ -40,6 +40,19 @@ const REPAIR_XML = onePart(`
     <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><staff>1</staff></note>
   </measure>`);
 
+const MIXED_CHORD_XML = onePart(`
+  <measure number="1">
+    <attributes><divisions>4</divisions><staves>2</staves></attributes>
+    <note><rest/><duration>1</duration><voice>1</voice><staff>1</staff></note>
+    <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><staff>1</staff></note>
+    <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>
+    <note><pitch><step>D</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><staff>1</staff></note>
+    <backup><duration>9</duration></backup>
+    <note><rest/><duration>1</duration><voice>2</voice><staff>2</staff></note>
+    <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><voice>2</voice><staff>2</staff></note>
+    <note><pitch><step>D</step><octave>3</octave></pitch><duration>4</duration><voice>2</voice><staff>2</staff></note>
+  </measure>`);
+
 describe("Score Document structural metadata", () => {
   it("extracts explicit phrase and form markers without confusing a voice rest with a silent measure", () => {
     const doc = parse(onePart(`
@@ -258,6 +271,30 @@ describe("Score Fingerprint", () => {
     expect(clipped.noteEvents.find((n) => n.onsetTick === 0 && n.midi === 60)?.durationTick).toBe(1);
     const identity = getScoreIdentity(before);
     for (const revised of [rolled, moved, clipped]) expect(getScoreIdentity(revised)).toEqual(identity);
+  });
+
+  it.each([60, 64])("preserves mixed-duration chord onsets when reassigning MIDI %i", (midi) => {
+    const before = parse(MIXED_CHORD_XML);
+    const note = before.noteEvents.find((n) => n.midi === midi)!;
+    const after = repair(MIXED_CHORD_XML, before, {
+      kind: "reassign-hand",
+      noteUid: note.noteUid,
+      targetHand: "LH",
+    });
+    expect(after.noteEvents.find((n) => n.midi === midi)?.writtenHand).toBe("LH");
+    expect(getScoreIdentity(after)).toEqual(getScoreIdentity(before));
+  });
+
+  it.each([60, 64])("preserves mixed-duration chord onsets when clipping MIDI %i", (midi) => {
+    const before = parse(MIXED_CHORD_XML);
+    const note = before.noteEvents.find((n) => n.midi === midi)!;
+    const after = repair(MIXED_CHORD_XML, before, {
+      kind: "clip-duration",
+      noteUid: note.noteUid,
+      newDurationTick: 1,
+    });
+    expect(after.noteEvents.find((n) => n.midi === midi)?.durationTick).toBe(1);
+    expect(getScoreIdentity(after)).toEqual(getScoreIdentity(before));
   });
 
   it("preserves the cross-staff corpus identity across MXL, XML, and annotation changes", async () => {

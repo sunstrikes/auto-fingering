@@ -3,6 +3,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { createElement, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import App from "../src/App";
+import { createMidiRingBuffer } from "../src/midi/midiRingBuffer";
 import type { ScoreRendererHandle } from "../src/components/ScoreViewer";
 import { solveFingering } from "../src/solver/solveFingering";
 import { createSolverClient, type WorkerLike } from "../src/workers/solverClient";
@@ -24,7 +25,7 @@ function createInProcessWorker(): WorkerLike {
     onerror: null,
     postMessage(req: WorkerRequest) {
       queueMicrotask(() => {
-        if (req.type === "solve") {
+        if (req.type === undefined || req.type === "solve") {
           const result = solveFingering(req.onsetSlices, req.profile, {
             ignoreExistingFingerings: req.ignoreExistingFingerings,
           });
@@ -258,6 +259,35 @@ describe("Web MIDI packet parsing & hot-plug controller", () => {
     controller.dispose();
   });
 
+  it("preserves hardware timestamps (including zero), strike velocity and every CC64 value", async () => {
+    const input = makeMockInput("piano", "Digital piano");
+    const events: MidiInputEvent[] = [];
+    const controller = createWebMidiController({
+      requestMIDIAccess: async () => makeMockMidiAccess([input]),
+      onStateChange: () => {},
+      onMidiEvent: (event) => events.push(event),
+    });
+    await controller.connect();
+
+    input.onmidimessage?.({ data: [0x93, 60, 127], timeStamp: 0 });
+    input.onmidimessage?.({ data: [0xb3, 64, 37], timeStamp: 1.125 });
+    input.onmidimessage?.({ data: [0xb3, 64, 63], timeStamp: 1.25 });
+    input.onmidimessage?.({ data: [0xb3, 64, 64], timeStamp: 1.375 });
+    input.onmidimessage?.({ data: [0x83, 60, 0], timeStamp: 2.0625 });
+    input.onmidimessage?.({ data: [0x93, 62, 1] }); // Legacy MIDIInputLike has no clock.
+    controller.dispose();
+
+    expect(events).toMatchObject([
+      { type: "noteon", midi: 60, velocity: 127, timeStampMs: 0, source: "midi", channel: 3 },
+      { type: "sustain", value: 37, pressed: false, timeStampMs: 1.125 },
+      { type: "sustain", value: 63, pressed: false, timeStampMs: 1.25 },
+      { type: "sustain", value: 64, pressed: true, timeStampMs: 1.375 },
+      { type: "noteoff", midi: 60, timeStampMs: 2.0625 },
+      { type: "noteon", midi: 62, velocity: 1 },
+    ]);
+    expect(events[5]).not.toHaveProperty("timeStampMs");
+  });
+
   it("handles unsupported browser and denied permission cleanly", async () => {
     const unsupportedStates: MidiConnectionState[] = [];
     const c1 = createWebMidiController({
@@ -401,13 +431,14 @@ describe("<App /> Web MIDI integration, Practice Settings & local sound", () => 
     expect(guide!.textContent).toContain("不可用");
   });
 
-  it("filters single port via Practice Settings, and emits synthetic NoteOn/NoteOff from UnifiedPiano88 clicks and QWERTY keys", async () => {
-    vi.useFakeTimers();
+  it("filters single-port events and captures local keyboard events with their own source and performance timestamps", async () => {
+    vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
     try {
       const dev1 = makeMockInput("dev-1", "Roland FP-30X");
       const dev2 = makeMockInput("dev-2", "Yamaha P-125");
       const access = makeMockMidiAccess([dev1, dev2]);
       const { startedNotes, audioDeps } = createSpyAudioDeps();
+      const ringBuffer = createMidiRingBuffer(8);
 
       mountedContainer = document.createElement("div");
       document.body.appendChild(mountedContainer);
@@ -421,6 +452,7 @@ describe("<App /> Web MIDI integration, Practice Settings & local sound", () => 
             audioDeps,
             midiDeps: {
               requestMIDIAccess: async () => access,
+              ringBuffer,
             },
           })
         );
@@ -486,8 +518,110 @@ describe("<App /> Web MIDI integration, Practice Settings & local sound", () => 
         window.dispatchEvent(new KeyboardEvent("keyup", { key: "q", bubbles: true }));
       });
       expect(key72.getAttribute("data-key-pressed")).not.toBe("true");
+
+      expect(ringBuffer.sliceWindow(0, 200)).toMatchObject([
+        { type: "noteon", source: "midi", midi: 65, timeStampMs: 0 },
+        { type: "noteoff", source: "midi", midi: 65, timeStampMs: 0 },
+        { type: "noteon", source: "virtual", midi: 60, timeStampMs: 0 },
+        { type: "noteoff", source: "virtual", midi: 60, timeStampMs: 180 },
+        { type: "noteon", source: "qwerty", midi: 72, timeStampMs: 200 },
+        { type: "noteoff", source: "qwerty", midi: 72, timeStampMs: 200 },
+      ]);
+      act(() => mountedRoot!.unmount());
+      mountedRoot = null;
+      expect(ringBuffer.size()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
   });
+
+  it("only mounts the simulated MIDI toolbar for simMidi=1 and routes its pitch strikes as MIDI", async () => {
+    const originalUrl = window.location.href;
+    const { audioDeps, startedNotes } = createSpyAudioDeps();
+    const ringBuffer = createMidiRingBuffer(8);
+    const midiDeps = { ringBuffer, requestMIDIAccess: async () => makeMockMidiAccess() };
+    const props = {
+      solverClientFactory: () => createSolverClient(createInProcessWorker),
+      scoreRendererFactory: createNoopRenderer,
+      audioDeps,
+      midiDeps,
+    };
+    mountedContainer = document.createElement("div");
+    document.body.appendChild(mountedContainer);
+    mountedRoot = createRoot(mountedContainer);
+    const bar = () => mountedContainer?.querySelector('[data-testid="sim-midi-bar"]');
+
+    try {
+      window.history.replaceState(null, "", "/");
+      await act(async () => mountedRoot!.render(createElement(App, props)));
+      expect(bar()).toBeNull();
+
+      window.history.replaceState(null, "", "/?simMidi=0");
+      await act(async () => mountedRoot!.render(createElement(App, props)));
+      expect(bar()).toBeNull();
+
+      window.history.replaceState(null, "", "/?simMidi=1");
+      await act(async () => mountedRoot!.render(createElement(App, props)));
+      const strike = bar()?.querySelector<HTMLButtonElement>('[data-testid="sim-midi-strike"]');
+      expect(strike).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => strike?.click());
+      expect(mountedContainer.querySelector('[data-testid="piano-key-60"]')?.getAttribute("data-key-pressed")).toBe("true");
+      expect(ringBuffer.sliceWindow(0, performance.now())).toMatchObject([
+        { type: "noteon", portId: "simulated-midi", midi: 60, source: "midi" },
+      ]);
+      expect(startedNotes).toEqual([]); // Hardware Local Sound is off, unlike a virtual click.
+    } finally {
+      window.history.replaceState(null, "", originalUrl);
+    }
+  });
+
+
+  it("clears session capture and cancels outstanding simulated packets on transport Stop", async () => {
+    const originalUrl = window.location.href;
+    vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
+    const ringBuffer = createMidiRingBuffer(8);
+    const { audioDeps } = createSpyAudioDeps();
+    const xml = `<score-partwise version="3.1">
+      <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+      <part id="P1"><measure number="1">
+        <attributes><divisions>1</divisions><clef><sign>G</sign><line>2</line></clef></attributes>
+        <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+        <note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note>
+      </measure></part>
+    </score-partwise>`;
+    try {
+      window.history.replaceState(null, "", "/?simMidi=1");
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      mountedContainer = container;
+      mountedRoot = createRoot(container);
+      const button = (id: string) => container.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`)!;
+      await act(async () => mountedRoot!.render(createElement(App, {
+        solverClientFactory: () => createSolverClient(createInProcessWorker),
+        scoreRendererFactory: createNoopRenderer,
+        audioDeps,
+        midiDeps: { ringBuffer },
+      })));
+      const upload = container.querySelector('input[type="file"]')!;
+      Object.defineProperty(upload, "files", {
+        value: [{ name: "duet.musicxml", text: async () => xml }],
+      });
+      await act(async () => upload.dispatchEvent(new Event("change", { bubbles: true })));
+      expect(button("audio-play-btn").disabled, container.textContent ?? "").toBe(false);
+      await act(async () => button("waiting-mode-toggle-btn").click());
+      await act(async () => button("audio-play-btn").click());
+      await act(async () => button("sim-midi-play").click());
+      expect(ringBuffer.sliceWindow(0, 0)).toMatchObject([{ type: "noteon", midi: 60 }]);
+      expect(button("audio-stop-btn").disabled).toBe(false);
+
+      await act(async () => button("audio-stop-btn").click());
+      await act(async () => vi.advanceTimersByTime(3_000));
+      expect(ringBuffer.size()).toBe(0);
+      expect(container.querySelector('[data-testid="piano-key-60"]')?.getAttribute("data-key-pressed")).not.toBe("true");
+    } finally {
+      window.history.replaceState(null, "", originalUrl);
+      vi.useRealTimers();
+    }
+  });
+
 });
