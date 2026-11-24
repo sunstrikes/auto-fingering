@@ -101,6 +101,10 @@ import {
   type PlaybackState,
   type SpeedMultiplier,
 } from "./audio/playbackEngine";
+import { EhsCanvasOverlayHost } from "./components/ehsPrototype/EhsCanvasOverlayHost";
+import { EhsPrototypeControlsBar } from "./components/ehsPrototype/EhsPrototypeControlsBar";
+import { PrototypeSwitcher } from "./components/ehsPrototype/PrototypeSwitcher";
+import { useEhsPrototype } from "./components/ehsPrototype/useEhsPrototype";
 
 const PIANO_TIMBRE_STORAGE_KEY = "auto-fingering:piano-timbre";
 
@@ -212,6 +216,10 @@ export default function App({
   const [sustainPedalPressed, setSustainPedalPressed] = useState<boolean>(false);
   const midiLocalSoundRef = useRef<boolean>(midiLocalSound);
   midiLocalSoundRef.current = midiLocalSound;
+  // Throwaway prototype #20 hooks (dev-only)
+  const ehsMuteDemoPianoRef = useRef<boolean>(false);
+  const ehsMidiHandlerRef = useRef<(event: MidiInputEvent) => void>(() => {});
+  const ehsAutoLoadedRef = useRef<boolean>(false);
 
   const fileName = useStudioStore((s) => s.fileName);
   const scoreTitle = useStudioStore((s) => s.scoreTitle);
@@ -280,8 +288,21 @@ export default function App({
       },
     });
     audioEngineRef.current = audioEngine;
+    const playbackAudioProxy: PianoAudioEngine = {
+      prepare: () => audioEngine.prepare(),
+      getAudioContext: () => audioEngine.getAudioContext(),
+      getStatus: () => audioEngine.getStatus(),
+      getTimbre: () => audioEngine.getTimbre(),
+      setTimbre: (timbre) => audioEngine.setTimbre(timbre),
+      triggerNote: (params) => {
+        if (ehsMuteDemoPianoRef.current) return;
+        audioEngine.triggerNote(params);
+      },
+      stopAll: () => audioEngine.stopAll(),
+      dispose: () => audioEngine.dispose(),
+    };
     const engine = createPlaybackEngine({
-      audioEngine,
+      audioEngine: playbackAudioProxy,
       requestAnimationFrame: audioDeps?.requestAnimationFrame,
       cancelAnimationFrame: audioDeps?.cancelAnimationFrame,
       onStateChange: setPlaybackState,
@@ -301,6 +322,7 @@ export default function App({
   }, [audioDeps]);
 
   const handleMidiInputEvent = (event: MidiInputEvent) => {
+    ehsMidiHandlerRef.current(event);
     if (event.type === "noteon") {
       setPressedMidis((prev) => {
         if (prev.has(event.midi)) return prev;
@@ -783,6 +805,41 @@ export default function App({
         : [],
     [scoreDoc, effectivePracticeMode, skipGraceNotes]
   );
+
+  // Throwaway prototype #20: Eye-Hand Span (EHS) dynamic lookahead disappearing-score overlay
+  const ehs = useEhsPrototype({
+    scoreDoc,
+    playbackState,
+    playbackFrame,
+    playbackSpeed,
+    waitingModeEnabled,
+    activeMetronomeBeat,
+    practiceSteps,
+    selectedMeasureIndex,
+  });
+  ehsMuteDemoPianoRef.current = ehs.isActive && ehs.config.muteDemoPiano;
+  ehsMidiHandlerRef.current = ehs.handleMidiEvent;
+
+  useEffect(() => {
+    if (ehs.isActive && ehs.config.muteDemoPiano) {
+      audioEngineRef.current?.stopAll();
+    }
+  }, [ehs.isActive, ehs.config.muteDemoPiano]);
+
+  // When opening directly with `?variant=A|B|C`, auto-load the first score from the local library
+  useEffect(() => {
+    if (
+      !ehs.isActive ||
+      !ehs.explicitInUrl ||
+      ehsAutoLoadedRef.current ||
+      scoreDoc ||
+      library.length === 0
+    ) {
+      return;
+    }
+    ehsAutoLoadedRef.current = true;
+    void handleLibrarySelect(library[0]);
+  }, [ehs.isActive, ehs.explicitInUrl, scoreDoc, library]);
 
   const measureErrorsByIndex = useMemo(
     () => buildMeasureErrorSummaries(practiceAnalytics),
@@ -2440,6 +2497,30 @@ export default function App({
           data-testid="top-score-pane"
           className="relative flex min-h-0 flex-1 flex-col"
         >
+          {ehs.isActive && (
+            <EhsPrototypeControlsBar
+              variant={ehs.variant}
+              config={ehs.config}
+              snapshot={ehs.snapshot}
+              geometry={ehs.geometry}
+              perf={ehs.perf}
+              layoutMode={layoutMode}
+              isPlaying={playbackState === "playing"}
+              hasScore={Boolean(scoreDoc)}
+              totalScoreSec={ehs.totalScoreSec}
+              previewScoreSec={ehs.previewScoreSec}
+              midiConnectedCount={midiState.devices.length}
+              availableScores={library}
+              onChangeConfig={ehs.updateConfig}
+              onPreviewScoreSecChange={ehs.setPreviewScoreSec}
+              onPeekDown={ehs.triggerTouchPeekDown}
+              onPeekUp={ehs.triggerTouchPeekUp}
+              onSimulateStall={ehs.simulateStall}
+              onSimulateFluent={ehs.simulateFluent}
+              onQuickLoadScore={(name) => void handleLibrarySelect(name)}
+            />
+          )}
+
           <ScoreViewer
             xmlString={renderedXml}
             scoreDoc={scoreDoc}
@@ -2468,6 +2549,28 @@ export default function App({
             onPickAbMeasure={handlePickAbMeasure}
             onMeasureGeometryChange={setMeasureGeometry}
             rendererFactory={scoreRendererFactory}
+            renderCanvasOverlay={
+              ehs.isActive
+                ? (ctx) => (
+                    <EhsCanvasOverlayHost
+                      variant={ehs.variant}
+                      osmd={ctx.osmd}
+                      container={ctx.container}
+                      scrollContainer={ctx.scrollContainer}
+                      isRendered={ctx.isRendered}
+                      layoutMode={ctx.layoutMode}
+                      scoreZoom={ctx.scoreZoom}
+                      scoreDoc={scoreDoc}
+                      isPlaying={playbackState === "playing"}
+                      geometry={ehs.geometry}
+                      snapshot={ehs.snapshot}
+                      config={ehs.config}
+                      onGeometryExtracted={ehs.setGeometry}
+                      onPerfUpdate={ehs.setPerf}
+                    />
+                  )
+                : undefined
+            }
           />
 
           {popoverOpen && selectedNote && (
@@ -2641,6 +2744,8 @@ export default function App({
         onChangeCustomModelBaseUrl={handleCustomModelBaseUrlChange}
         onClose={() => setSettingsOpen(false)}
       />
+
+      {ehs.isActive && <PrototypeSwitcher current={ehs.variant} onChange={ehs.setVariant} />}
     </div>
   );
 }

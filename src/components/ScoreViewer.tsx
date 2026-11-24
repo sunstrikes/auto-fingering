@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 import { OpenSheetMusicDisplay, PointF2D, type Cursor } from "opensheetmusicdisplay";
 import type { CursorSyncTarget, PlaybackFrame } from "../audio/playbackEngine";
 import type { Finger, Hand, NoteEvent, ScoreDocument } from "../domain/types";
@@ -58,6 +64,7 @@ export interface ScoreRendererHandle {
   hitTestMeasureAtClientPoint?(clientX: number, clientY: number): number | null;
   getCursorOffsetX?(): number | null;
   getSelectedNoteRect?(): PopoverAnchorRect | null;
+  getOsmdInstance?(): OpenSheetMusicDisplay | null;
   scrollToMeasure(measureIndex: number, scrollContainer: HTMLElement | null): void;
   syncCursor?: (target: CursorSyncTarget | null) => void;
   dispose(): void;
@@ -790,6 +797,10 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       };
     },
 
+    getOsmdInstance() {
+      return osmd;
+    },
+
     dispose() {
       osmd.cursor?.hide();
       lastCursorKey = null;
@@ -824,6 +835,15 @@ export interface ScoreViewerProps {
   onPickAbMeasure?: (measureIndex: number) => void;
   onMeasureGeometryChange?: (geometry: MeasureGeometry[]) => void;
   rendererFactory?: ScoreRendererFactory;
+  /** Optional throwaway/overlay hook rendered in exact OSMD canvas coordinates (used by EHS prototype #20) */
+  renderCanvasOverlay?: (ctx: {
+    osmd: OpenSheetMusicDisplay | null;
+    container: HTMLElement | null;
+    scrollContainer: HTMLElement | null;
+    isRendered: boolean;
+    layoutMode: ScoreLayoutMode;
+    scoreZoom: number;
+  }) => ReactNode;
 }
 
 /**
@@ -851,6 +871,7 @@ export function ScoreViewer({
   onPickAbMeasure,
   onMeasureGeometryChange,
   rendererFactory = createOsmdScoreRenderer,
+  renderCanvasOverlay,
 }: ScoreViewerProps) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const osmdContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1287,11 +1308,24 @@ export function ScoreViewer({
           )}
 
           <div
-            ref={osmdContainerRef}
-            data-testid="osmd-canvas-surface"
-            onClick={handleSurfaceClick}
-            className={layoutMode === "horizontal" ? "min-w-full cursor-pointer" : "w-full cursor-pointer"}
-          />
+            className="relative"
+            style={layoutMode === "horizontal" ? { width: "max-content", minWidth: "100%" } : undefined}
+          >
+            <div
+              ref={osmdContainerRef}
+              data-testid="osmd-canvas-surface"
+              onClick={handleSurfaceClick}
+              className={layoutMode === "horizontal" ? "min-w-full cursor-pointer" : "w-full cursor-pointer"}
+            />
+            {renderCanvasOverlay?.({
+              osmd: rendererRef.current?.getOsmdInstance?.() ?? null,
+              container: osmdContainerRef.current,
+              scrollContainer: scrollContainerRef.current,
+              isRendered,
+              layoutMode,
+              scoreZoom,
+            })}
+          </div>
         </div>
       </div>
     </div>
