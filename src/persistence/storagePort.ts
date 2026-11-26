@@ -107,6 +107,8 @@ export interface WorkspacePrefs {
   audiationPreviewMode?: "auto-unfamiliar" | "manual";
   audiationImageryTimerEnabled?: boolean;
   overspeedProbeEnabled?: boolean;
+  scaffoldingPreference?: "auto-fade" | "always-full" | "hide-keyboard-early";
+  l3SilentBeatEnabled?: boolean;
   freePracticeMinutes?: number;
   repairEdge?: RepairEdge;
   updatedAtMs?: number;

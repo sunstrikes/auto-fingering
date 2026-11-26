@@ -9,17 +9,27 @@ import type {
   PerformanceCue,
 } from "../chunking/types";
 import type {
+  AnchorOverride,
   PracticeMode,
   PracticeStep,
   ScoreCoord,
   ScoreDocument,
   SolveResult,
 } from "../domain/types";
+import type { FadingScaffoldingVisual } from "../components/ScoreViewer";
 import {
   analyzeAcousticProfile,
   toPracticeEventAcoustic,
 } from "../guided/acousticProfile";
 import { attributeContinuousBout, type SwitchPointSpec } from "../guided/boundedAttribution";
+import {
+  SCAFFOLDING_PEEK_DURATION_MS,
+  collectL2PreservedFingeringTargets,
+  createPeekKeyExemptionPredicate,
+  deriveScaffoldingPolicy,
+  type ScaffoldingLevel,
+  type ScaffoldingPreference,
+} from "../guided/fadingScaffolding";
 import {
   computeAutoMidiGrade,
   reducePiecePracticeState,
@@ -38,6 +48,7 @@ import {
 } from "../guided/motorScheduler";
 import {
   createPianoCommandRouter,
+  hasB0Collision,
   hasDualPitchConflict,
   routeKeyboardCommand,
   type KeyboardCommandEventLike,
@@ -79,6 +90,8 @@ import type { PianoCommandBadge } from "../components/UnifiedPiano88";
 export interface UseGuidedSessionControllerOptions {
   scoreDoc: ScoreDocument | null;
   solveResult: SolveResult | null;
+  anchors?: Record<string, AnchorOverride>;
+  removedRawAnchorUids?: readonly string[];
   practiceSteps: PracticeStep[];
   motorChunks: MotorChunk[];
   macroSections: MacroSection[];
@@ -172,6 +185,8 @@ export function getMidisForChunk(
 export function useGuidedSessionController({
   scoreDoc,
   solveResult,
+  anchors = {},
+  removedRawAnchorUids = [],
   practiceSteps,
   motorChunks,
   macroSections,
@@ -203,8 +218,12 @@ export function useGuidedSessionController({
   const plannedQueue = useGuidedSessionStore((s) => s.plannedQueue);
   const currentQueueIndex = useGuidedSessionStore((s) => s.currentQueueIndex);
   const stage0State = useGuidedSessionStore((s) => s.stage0State);
+  const schedulerState = useGuidedSessionStore((s) => s.schedulerState);
   const piecePracticeState = useGuidedSessionStore((s) => s.piecePracticeState);
   const overspeedProbeEnabled = useGuidedSessionStore((s) => s.overspeedProbeEnabled);
+  const scaffoldingPreference = useGuidedSessionStore((s) => s.scaffoldingPreference);
+  const l3SilentBeatEnabled = useGuidedSessionStore((s) => s.l3SilentBeatEnabled);
+  const scaffoldingPeekUntilMs = useGuidedSessionStore((s) => s.scaffoldingPeekUntilMs);
   const bottomSlotView = useGuidedSessionStore((s) => s.bottomSlotView);
   const cc64CommandEnabled = useGuidedSessionStore((s) => s.cc64CommandEnabled);
   const microRestDurationSec = useGuidedSessionStore((s) => s.microRestDurationSec);
@@ -225,6 +244,8 @@ export function useGuidedSessionController({
 
   const routerRef = useRef(createPianoCommandRouter());
   const previewTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+  const peekTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+  const peekStrikeTimestampsRef = useRef<number[]>([]);
   const previewTokenRef = useRef(0);
   const autoPreviewFiredKeyRef = useRef<string | null>(null);
   const seenChunksInSessionRef = useRef<Set<string>>(new Set());
@@ -237,6 +258,8 @@ export function useGuidedSessionController({
     endScoreSec: number;
     speedMultiplier: number;
     practiceMode: PracticeMode;
+    scaffoldingLevel: ScaffoldingLevel;
+    l3RelaxedDrift: boolean;
     startedAtMs: number;
     anchor: PlaybackClockAnchor | null;
   } | null>(null);
@@ -327,14 +350,41 @@ export function useGuidedSessionController({
     }
   }, []);
 
+  const clearPeekTimer = useCallback(() => {
+    if (peekTimerRef.current !== null) {
+      globalThis.clearTimeout(peekTimerRef.current);
+      peekTimerRef.current = null;
+    }
+  }, []);
+
+  const triggerScaffoldingPeek = useCallback(
+    (midiTimeStampMs?: number) => {
+      const store = useGuidedSessionStore.getState();
+      if (store.studioMode !== "guided" || store.sessionPhase !== "playing") return;
+      if (typeof midiTimeStampMs === "number" && Number.isFinite(midiTimeStampMs)) {
+        peekStrikeTimestampsRef.current.push(midiTimeStampMs);
+      }
+      clearPeekTimer();
+      const untilMs = nowMs() + SCAFFOLDING_PEEK_DURATION_MS;
+      store.setScaffoldingPeekUntilMs(untilMs);
+      peekTimerRef.current = globalThis.setTimeout(() => {
+        peekTimerRef.current = null;
+        useGuidedSessionStore.getState().setScaffoldingPeekUntilMs(null);
+      }, SCAFFOLDING_PEEK_DURATION_MS);
+    },
+    [clearPeekTimer, nowMs],
+  );
+
   // Reset Guided Session store & audio preview timers on unmount to avoid leaking across test renders
   useEffect(() => {
     return () => {
       previewTokenRef.current += 1;
       clearPreviewTimer();
+      clearPeekTimer();
+      peekStrikeTimestampsRef.current = [];
       useGuidedSessionStore.getState().reset();
     };
-  }, [clearPreviewTimer]);
+  }, [clearPreviewTimer, clearPeekTimer]);
 
   const launchFilteredChunks = useMemo(() => {
     if (selectedMacroSectionId === null) return motorChunks;
@@ -593,6 +643,9 @@ export function useGuidedSessionController({
       }
     }
 
+    const peekTimestamps = peekStrikeTimestampsRef.current.splice(0);
+    clearPeekTimer();
+
     const attr = attributeContinuousBout({
       clockAnchor: anchor,
       expectedSteps: ctx.expectedSteps,
@@ -601,7 +654,9 @@ export function useGuidedSessionController({
       practiceMode: ctx.practiceMode,
       junctionBoundaryCoord: ctx.plannedItem?.junction?.boundaryCoord,
       junctionStepIndex: ctx.plannedItem?.junction?.bridgeWindowSteps.junctionStepIndex,
+      isExemptPeekKey: createPeekKeyExemptionPredicate(peekTimestamps),
       switchPoint,
+      l3RelaxedDrift: ctx.l3RelaxedDrift,
     });
 
     const autoGrade = computeAutoMidiGrade({
@@ -649,18 +704,7 @@ export function useGuidedSessionController({
         ? ctx.plannedItem.cue.coord
         : ctx.chunk.startCoord;
 
-    const scaffoldingLevel: 0 | 1 | 2 | 3 =
-      prevUnit &&
-      prevUnit.handStage === "both" &&
-      prevUnit.stableSpeed >= 0.9 &&
-      prevUnit.sleepConsolidatedNights >= 2
-        ? 3
-        : prevUnit &&
-            prevUnit.handStage === "both" &&
-            prevUnit.stableSpeed >= 0.75 &&
-            prevUnit.sleepConsolidatedNights >= 1
-          ? 2
-          : 1;
+    const scaffoldingLevel: 0 | 1 | 2 | 3 = ctx.scaffoldingLevel;
 
     const seq = ++eventSeqRef.current;
     const pieceId = activePieceProfile?.pieceId ?? "ephemeral";
@@ -823,15 +867,25 @@ export function useGuidedSessionController({
     practiceStorage,
     motorChunks,
     chunkJunctions,
+    clearPeekTimer,
   ]);
 
   const startContinuousChunkPlay = useCallback(
     (chunk: MotorChunk, plannedItem: PlannedQueueItem | null = null) => {
       if (!scoreDoc || !playbackEngineRef.current) return;
+      clearPeekTimer();
+      peekStrikeTimestampsRef.current = [];
       const store = useGuidedSessionStore.getState();
       const resolved = resolveBoutSpanAndSteps(chunk, plannedItem);
       const unitRuntime = store.schedulerState?.units[chunk.chunkId];
       const chunkPersistedState = store.piecePracticeState?.chunkStates[chunk.chunkId];
+      const boutScaffolding = deriveScaffoldingPolicy(chunkPersistedState, {
+        preference: store.scaffoldingPreference,
+        phase: unitRuntime?.phase,
+        useWaitingMode: unitRuntime?.activeRescue?.kind === "waiting-rescue" ? true : false,
+        circuitBreakerTriggered: Boolean(unitRuntime?.activeRescue),
+        l3SilentBeatEnabled: store.l3SilentBeatEnabled,
+      });
       const hasChunkHistory = Boolean(
         (chunkPersistedState && chunkPersistedState.reviewCount > 0) ||
           plannedItem?.isClusterWarmStart,
@@ -865,18 +919,26 @@ export function useGuidedSessionController({
         endScoreSec: resolved.endScoreSec,
         speedMultiplier: speedFromScheduler,
         practiceMode: boutPracticeMode,
+        scaffoldingLevel: boutScaffolding.level,
+        l3RelaxedDrift: boutScaffolding.useRelaxedDriftAttribution,
         startedAtMs: nowMs(),
         anchor: null,
       };
+
+      const metronomeMode = boutScaffolding.useCountInOnlyMetronome ? "count-in-only" : "full";
+      const countInBeats =
+        metronomeMode === "count-in-only" && plannedItem?.boutKind !== "bridge"
+          ? undefined
+          : resolved.countInBeats;
 
       setMidiCaptureMode("continuous");
       void playbackEngineRef.current.playSegment(scoreDoc, {
         startScoreSec: resolved.startScoreSec,
         endScoreSec: resolved.endScoreSec,
-        countInBeats: resolved.countInBeats,
+        countInBeats,
         muteTargetHand: false,
         practiceMode: boutPracticeMode,
-        metronomeMode: "full",
+        metronomeMode,
         onClockAnchor: (anchor) => {
           if (activeBoutCtxRef.current) {
             activeBoutCtxRef.current.anchor = anchor;
@@ -897,6 +959,7 @@ export function useGuidedSessionController({
       nowMs,
       setMidiCaptureMode,
       finalizeContinuousBout,
+      clearPeekTimer,
     ],
   );
 
@@ -1153,6 +1216,11 @@ export function useGuidedSessionController({
         return;
       }
 
+      if (action === "peek-fingerings") {
+        triggerScaffoldingPeek();
+        return;
+      }
+
       if (action === "emergency-pause") {
         if (store.sessionPhase === "playing") {
           playbackEngineRef.current?.pause();
@@ -1232,8 +1300,88 @@ export function useGuidedSessionController({
       setMidiCaptureMode,
       syncWaitingToStep,
       startContinuousChunkPlay,
+      triggerScaffoldingPeek,
     ],
   );
+
+  const activeUnitMemoryState = activeChunk
+    ? piecePracticeState?.chunkStates[activeChunk.chunkId]
+    : undefined;
+  const activeUnitRuntime = activeChunk
+    ? schedulerState?.units[activeChunk.chunkId]
+    : undefined;
+
+  const scaffoldingPolicy = useMemo(() => {
+    const isWaitingPhase =
+      sessionPhase === "stage0" ||
+      (sessionPhase === "paused" &&
+        useGuidedSessionStore.getState().pausedFromPhase === "stage0") ||
+      activeUnitRuntime?.activeRescue?.kind === "waiting-rescue";
+    const useWaitingMode =
+      sessionPhase === "playing"
+        ? activeUnitRuntime?.activeRescue?.kind === "waiting-rescue"
+        : isWaitingPhase
+          ? true
+          : undefined;
+    return deriveScaffoldingPolicy(activeUnitMemoryState, {
+      preference: scaffoldingPreference,
+      phase: activeUnitRuntime?.phase,
+      useWaitingMode,
+      circuitBreakerTriggered: Boolean(activeUnitRuntime?.activeRescue),
+      l3SilentBeatEnabled,
+    });
+  }, [
+    activeUnitMemoryState,
+    activeUnitRuntime,
+    scaffoldingPreference,
+    l3SilentBeatEnabled,
+    sessionPhase,
+  ]);
+
+  const peekActive =
+    studioMode === "guided" &&
+    sessionPhase === "playing" &&
+    scaffoldingPeekUntilMs !== null;
+
+  const b0PeekDisabled =
+    studioMode === "guided" &&
+    sessionPhase === "playing" &&
+    scaffoldingPolicy.cuesObscured &&
+    hasB0Collision(activeChunkMidis);
+
+  const hideKeyboardTargets =
+    studioMode === "guided" &&
+    sessionPhase === "playing" &&
+    scaffoldingPolicy.hideKeyboardTargets &&
+    !peekActive;
+
+  const l2PreservedTargets = useMemo(
+    () =>
+      collectL2PreservedFingeringTargets(
+        scoreDoc,
+        solveResult,
+        anchors,
+        removedRawAnchorUids,
+      ),
+    [scoreDoc, solveResult, anchors, removedRawAnchorUids],
+  );
+
+  const fadingScaffoldingVisual = useMemo<FadingScaffoldingVisual | null>(() => {
+    if (
+      studioMode !== "guided" ||
+      sessionPhase === "idle" ||
+      sessionPhase === "launch" ||
+      sessionPhase === "suspended"
+    ) {
+      return null;
+    }
+    return {
+      level: scaffoldingPolicy.level,
+      peekActive,
+      preservedNoteUids: l2PreservedTargets.preservedNoteUids,
+      preservedMeasureIndices: l2PreservedTargets.preservedMeasureIndices,
+    };
+  }, [studioMode, sessionPhase, scaffoldingPolicy.level, peekActive, l2PreservedTargets]);
 
   const routeGuidedMidiEvent = useCallback(
     (event: MidiInputEvent): { intercepted: boolean } => {
@@ -1251,7 +1399,13 @@ export function useGuidedSessionController({
         firstTargetMidis,
         chunkMidis: activeChunkMidis,
         cc64CommandEnabled: store.cc64CommandEnabled,
+        cuesObscured: scaffoldingPolicy.cuesObscured,
       });
+
+      if (res.action === "peek-fingerings") {
+        triggerScaffoldingPeek(event.timeStampMs);
+        return { intercepted: true };
+      }
 
       if (res.action !== "none") {
         executeCommandAction(res.action);
@@ -1260,7 +1414,14 @@ export function useGuidedSessionController({
 
       return { intercepted: false };
     },
-    [readyChunkSteps, activeChunkSteps, activeChunkMidis, executeCommandAction],
+    [
+      readyChunkSteps,
+      activeChunkSteps,
+      activeChunkMidis,
+      scaffoldingPolicy.cuesObscured,
+      triggerScaffoldingPeek,
+      executeCommandAction,
+    ],
   );
 
   const routeGuidedKeyboardEvent = useCallback(
@@ -1269,12 +1430,14 @@ export function useGuidedSessionController({
       if (store.studioMode !== "guided" || store.sessionPhase === "idle" || store.sessionPhase === "suspended") {
         return false;
       }
-      const action = routeKeyboardCommand(event, store.sessionPhase);
+      const action = routeKeyboardCommand(event, store.sessionPhase, {
+        cuesObscured: scaffoldingPolicy.cuesObscured,
+      });
       if (action === "none") return false;
       executeCommandAction(action);
       return true;
     },
-    [executeCommandAction],
+    [scaffoldingPolicy.cuesObscured, executeCommandAction],
   );
 
   // Stage 0 graduation helpers
@@ -1452,6 +1615,20 @@ export function useGuidedSessionController({
             ? "当前块包含 A0+A#0，已自动禁用双键紧急暂停"
             : "同时按下 A0+A#0 触发紧急暂停",
         },
+        ...(sessionPhase === "playing" && scaffoldingPolicy.cuesObscured
+          ? {
+              23: b0PeekDisabled
+                ? {
+                    label: "禁用",
+                    disabled: true,
+                    title: "当前块包含 B0，已自动禁用演奏态 B0 偷看，请使用 F 键或触控按钮",
+                  }
+                : {
+                    label: peekActive ? "显影" : "偷看",
+                    title: "B0 / F: 瞬时显示全指法与 88 键 1.5 s",
+                  },
+            }
+          : {}),
       };
     }
     return {
@@ -1466,7 +1643,7 @@ export function useGuidedSessionController({
         title: "C8: 继续 / 下一块",
       },
     };
-  }, [studioMode, sessionPhase, dualPitchDisabled, bottomSlotView]);
+  }, [studioMode, sessionPhase, dualPitchDisabled, bottomSlotView, scaffoldingPolicy.cuesObscured, b0PeekDisabled, peekActive]);
 
   const spotlightChunk = useMemo(() => {
     if (
@@ -1564,6 +1741,14 @@ export function useGuidedSessionController({
     audiationPreviewMode,
     audiationImageryTimerEnabled,
     overspeedProbeEnabled,
+    scaffoldingPreference,
+    l3SilentBeatEnabled,
+    scaffoldingPolicy,
+    scaffoldingLevel: scaffoldingPolicy.level,
+    peekActive,
+    b0PeekDisabled,
+    hideKeyboardTargets,
+    fadingScaffoldingVisual,
     microRestStartedAtMs,
     microRestDurationMs,
     microRestReminder,
@@ -1599,6 +1784,11 @@ export function useGuidedSessionController({
       useGuidedSessionStore.getState().setAudiationImageryTimerEnabled(enabled),
     setOverspeedProbeEnabled: (enabled: boolean) =>
       useGuidedSessionStore.getState().setOverspeedProbeEnabled(enabled),
+    setScaffoldingPreference: (pref: ScaffoldingPreference) =>
+      useGuidedSessionStore.getState().setScaffoldingPreference(pref),
+    setL3SilentBeatEnabled: (enabled: boolean) =>
+      useGuidedSessionStore.getState().setL3SilentBeatEnabled(enabled),
+    triggerScaffoldingPeek,
     setBottomSlotView: (v: "piano" | "feedback") =>
       useGuidedSessionStore.getState().setBottomSlotView(v),
 

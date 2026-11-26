@@ -7,6 +7,7 @@ import {
 } from "../audio/pianoAudio";
 import type { SpeedMultiplier } from "../audio/playbackEngine";
 import type { HandSpanProfile, PriorMode, SpanPreset } from "../domain/types";
+import type { ScaffoldingPreference } from "../guided/fadingScaffolding";
 import type { MidiConnectionState } from "../midi/webMidi";
 import type { PriorLoadProgress } from "../prior/loader";
 import {
@@ -39,6 +40,8 @@ export interface PracticeSettingsModalProps {
   audiationPreviewMode?: "auto-unfamiliar" | "manual";
   audiationImageryTimerEnabled?: boolean;
   overspeedProbeEnabled?: boolean;
+  scaffoldingPreference?: ScaffoldingPreference;
+  l3SilentBeatEnabled?: boolean;
   showStatusBar?: boolean;
   showPianoOverhead?: boolean;
   showFullPalm?: boolean;
@@ -64,6 +67,8 @@ export interface PracticeSettingsModalProps {
   onChangeAudiationPreviewMode?: (mode: "auto-unfamiliar" | "manual") => void;
   onToggleAudiationImageryTimer?: () => void;
   onToggleOverspeedProbe?: () => void;
+  onChangeScaffoldingPreference?: (preference: ScaffoldingPreference) => void;
+  onToggleL3SilentBeat?: () => void;
   onToggleShowStatusBar?: () => void;
   onToggleShowPianoOverhead?: () => void;
   onToggleShowFullPalm?: () => void;
@@ -128,6 +133,8 @@ export function PracticeSettingsModal({
   audiationPreviewMode = "auto-unfamiliar",
   audiationImageryTimerEnabled = false,
   overspeedProbeEnabled = false,
+  scaffoldingPreference = "auto-fade",
+  l3SilentBeatEnabled = true,
   showStatusBar = true,
   showPianoOverhead = true,
   showFullPalm = true,
@@ -153,6 +160,8 @@ export function PracticeSettingsModal({
   onChangeAudiationPreviewMode,
   onToggleAudiationImageryTimer,
   onToggleOverspeedProbe,
+  onChangeScaffoldingPreference,
+  onToggleL3SilentBeat,
   onToggleShowStatusBar,
   onToggleShowPianoOverhead,
   onToggleShowFullPalm,
@@ -523,6 +532,62 @@ export function PracticeSettingsModal({
                 aria-label="开启 1.05x 亚超速安全探针"
                 checked={overspeedProbeEnabled}
                 onChange={() => onToggleOverspeedProbe?.()}
+                className="h-4 w-4 shrink-0 accent-teal-600"
+              />
+            </label>
+
+            <div className="space-y-1.5 border-t border-teal-200/60 pt-2">
+              <div className="font-medium text-slate-900">渐进撤拐策略（Fading Scaffolding · L0–L3）</div>
+              <div
+                data-testid="scaffolding-preference-group"
+                role="group"
+                aria-label="渐进撤拐策略"
+                className="grid grid-cols-1 gap-1 sm:grid-cols-3"
+              >
+                {(
+                  [
+                    { id: "auto-fade" as const, label: "Auto-Fade (推荐)" },
+                    { id: "always-full" as const, label: "始终显示完整辅助" },
+                    { id: "hide-keyboard-early" as const, label: "提前隐去底部琴键" },
+                  ] as const
+                ).map((item) => {
+                  const active = scaffoldingPreference === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      data-testid={`scaffolding-pref-${item.id}`}
+                      aria-pressed={active}
+                      onClick={() => onChangeScaffoldingPreference?.(item.id)}
+                      className={`rounded-lg border px-2 py-1.5 text-[11px] font-medium transition ${
+                        active
+                          ? "border-teal-600 bg-teal-600 text-white shadow-xs"
+                          : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                L2 隐去键盘高亮与常规指法（仅留高危 Transition Cue 与 Finger Anchor），L3 仅留稀疏 Performance Cue。遭遇 Again 或连错熔断自动退降 1 级。
+              </div>
+            </div>
+
+            <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-teal-200/60 pt-2">
+              <div>
+                <div className="font-medium text-slate-900">L3 净谱级仅保留 Count-In 后静音跟拍</div>
+                <div className="text-[11px] text-slate-500">
+                  开启后在 L3 仅播放 1 小节预备拍，随后静音连续演奏并适度放宽局部拍漂移容差。
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                data-testid="settings-l3-silent-beat-toggle"
+                aria-label="L3 净谱级仅保留 Count-In 后静音跟拍"
+                checked={l3SilentBeatEnabled}
+                onChange={() => onToggleL3SilentBeat?.()}
                 className="h-4 w-4 shrink-0 accent-teal-600"
               />
             </label>

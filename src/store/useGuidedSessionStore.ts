@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { MotorChunk } from "../chunking/types";
 import type { PracticeMode, PracticeStep } from "../domain/types";
 import type { AcousticProfileResult } from "../guided/acousticProfile";
+import type { ScaffoldingPreference } from "../guided/fadingScaffolding";
 import type { MotorGrade, PiecePracticeState } from "../guided/motorFsrs";
 import {
   EARLY_MACRO_REST_DURATION_MS,
@@ -112,6 +113,9 @@ export interface GuidedSessionState {
   audiationPreviewMode: AudiationPreviewMode;
   audiationImageryTimerEnabled: boolean;
   overspeedProbeEnabled: boolean;
+  scaffoldingPreference: ScaffoldingPreference;
+  l3SilentBeatEnabled: boolean;
+  scaffoldingPeekUntilMs: number | null;
   sessionStartedAtMs: number | null;
   pausedFromPhase: "stage0" | "playing" | null;
   microRestStartedAtMs: number | null;
@@ -136,6 +140,9 @@ export interface GuidedSessionState {
   setAudiationPreviewMode: (mode: AudiationPreviewMode) => void;
   setAudiationImageryTimerEnabled: (enabled: boolean) => void;
   setOverspeedProbeEnabled: (enabled: boolean) => void;
+  setScaffoldingPreference: (preference: ScaffoldingPreference) => void;
+  setL3SilentBeatEnabled: (enabled: boolean) => void;
+  setScaffoldingPeekUntilMs: (untilMs: number | null) => void;
   setPiecePracticeState: (next: PiecePracticeState | null) => void;
   setSchedulerState: (next: MotorSchedulerState | null) => void;
   setLastPersistedEvent: (ev: PracticeEvent | null) => void;
@@ -192,6 +199,9 @@ const initialGuidedState = {
   audiationPreviewMode: "auto-unfamiliar" as AudiationPreviewMode,
   audiationImageryTimerEnabled: false,
   overspeedProbeEnabled: false,
+  scaffoldingPreference: "auto-fade" as ScaffoldingPreference,
+  l3SilentBeatEnabled: true,
+  scaffoldingPeekUntilMs: null as number | null,
   sessionStartedAtMs: null as number | null,
   pausedFromPhase: null as "stage0" | "playing" | null,
   microRestStartedAtMs: null as number | null,
@@ -263,6 +273,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       macroRestStartedAtMs: null,
       audiationState: null,
       commandNotice: null,
+      scaffoldingPeekUntilMs: null,
       bottomSlotView: "piano",
     }),
 
@@ -289,6 +300,12 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
     set({ audiationImageryTimerEnabled }),
 
   setOverspeedProbeEnabled: (overspeedProbeEnabled) => set({ overspeedProbeEnabled }),
+
+  setScaffoldingPreference: (scaffoldingPreference) => set({ scaffoldingPreference }),
+
+  setL3SilentBeatEnabled: (l3SilentBeatEnabled) => set({ l3SilentBeatEnabled }),
+
+  setScaffoldingPeekUntilMs: (scaffoldingPeekUntilMs) => set({ scaffoldingPeekUntilMs }),
 
   setPiecePracticeState: (piecePracticeState) => set({ piecePracticeState }),
 
@@ -371,6 +388,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       macroRestStartedAtMs: null,
       audiationState: null,
       commandNotice: null,
+      scaffoldingPeekUntilMs: null,
       lastBoutSummary: null,
       lastPersistedEvent: null,
       suspendedSnapshot: null,
@@ -496,6 +514,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
         : {}),
       ...(options?.schedulerState !== undefined ? { schedulerState: options.schedulerState } : {}),
       commandNotice: null,
+      scaffoldingPeekUntilMs: null,
       lastBoutSummary: nextSummary,
     });
   },
@@ -617,6 +636,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
         sessionPhase: "paused",
         pausedFromPhase: state.sessionPhase,
         stage0State: state.stage0State ? pauseStage0(state.stage0State, nowMs) : null,
+        scaffoldingPeekUntilMs: null,
         commandNotice: "已暂停练习（按 C8 / 空格继续，或 A0 重练本块）",
       };
     }),
@@ -670,6 +690,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       audiationState: null,
       bottomSlotView: "piano",
       commandNotice: null,
+      scaffoldingPeekUntilMs: null,
       stage0State: shouldStage0
         ? createStage0State({
             chunkId: nextChunk.chunkId,
@@ -695,6 +716,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       audiationState: null,
       bottomSlotView: "piano",
       commandNotice: null,
+      scaffoldingPeekUntilMs: null,
       stage0State: shouldStage0
         ? createStage0State({
             chunkId: chunk.chunkId,
@@ -725,6 +747,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       sessionPhase: "suspended",
       bottomSlotView: "piano",
       commandNotice: null,
+      scaffoldingPeekUntilMs: null,
       microRestReminder: null,
       stage0State: pausedStage0,
       suspendedSnapshot: {
@@ -785,6 +808,9 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       audiationPreviewMode: state.audiationPreviewMode,
       audiationImageryTimerEnabled: state.audiationImageryTimerEnabled,
       overspeedProbeEnabled: state.overspeedProbeEnabled,
+      scaffoldingPreference: state.scaffoldingPreference,
+      l3SilentBeatEnabled: state.l3SilentBeatEnabled,
+      scaffoldingPeekUntilMs: null,
       piecePracticeState: state.piecePracticeState,
       chunkPassCountsById: state.chunkPassCountsById,
       studioMode: "free",

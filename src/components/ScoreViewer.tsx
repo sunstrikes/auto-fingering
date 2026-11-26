@@ -54,6 +54,13 @@ export interface ChunkSpotlightRange {
   endMeasureIndex: number;
 }
 
+export interface FadingScaffoldingVisual {
+  level: 0 | 1 | 2 | 3;
+  peekActive: boolean;
+  preservedNoteUids: readonly string[];
+  preservedMeasureIndices: readonly number[];
+}
+
 export type AbPickStep = "idle" | "start" | "end";
 
 export interface ScoreRendererHandle {
@@ -65,6 +72,7 @@ export interface ScoreRendererHandle {
     measureGeometry: MeasureGeometry[];
   }>;
   setNoteEvents?(noteEvents: NoteEvent[]): void;
+  setFadingScaffoldingVisual?(visual: FadingScaffoldingVisual | null): void;
   highlightMeasure(measureIndex: number | null): void;
   highlightAbLoop?(range: AbLoopHighlightRange | null): void;
   highlightSpotlightRange?(range: ChunkSpotlightRange | null): void;
@@ -158,12 +166,19 @@ export interface MatchableScoreItem {
   isTieStop?: boolean;
 }
 
+interface IndexedFingeringNode {
+  element: HTMLElement | SVGElement;
+  noteUid: string | null;
+  measureIndex: number | null;
+}
+
 interface GraphicalNoteEntry {
   midi: number;
   staff: number | undefined;
   timestamp: number;
   isTieContinuation: boolean;
   noteSvg: SVGGElement;
+  sourceNote: unknown;
   order: number;
 }
 
@@ -236,6 +251,7 @@ function collectMeasureGraphicalNotes(row: unknown[]): GraphicalNoteEntry[] {
             timestamp,
             isTieContinuation: isSourceNoteTieContinuation(src),
             noteSvg,
+            sourceNote: src,
             order: order++,
           });
         }
@@ -385,7 +401,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     new OpenSheetMusicDisplay(container, {
       autoResize: mode === "page",
       backend: "svg",
-      drawFingerings: false,
+      drawFingerings: true,
       fingeringPosition: "aboveorbelow",
       followCursor: false, // OSMD scrollIntoView jitters on iPad; scrolling handled by ScoreViewer
       renderSingleHorizontalStaffline: mode === "horizontal",
@@ -395,6 +411,115 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
   let osmd = buildOsmd(activeLayoutMode);
   let lastCursorKey: { measureIndex: number; onsetTick: number; isGrace: boolean } | null = null;
   let currentNoteEvents: NoteEvent[] = [];
+  let cachedFingeringNodes: IndexedFingeringNode[] | null = null;
+
+  const buildFingeringNodeIndex = (): IndexedFingeringNode[] => {
+    const nodes: IndexedFingeringNode[] = [];
+    const seen = new Set<Element>();
+    const measureList = osmd.GraphicSheet?.MeasureList as unknown[][] | undefined;
+
+    const eventsByMeasure = new Map<number, NoteEvent[]>();
+    for (const ev of currentNoteEvents) {
+      const list = eventsByMeasure.get(ev.measureIndex) ?? [];
+      list.push(ev);
+      eventsByMeasure.set(ev.measureIndex, list);
+    }
+
+    if (measureList) {
+      for (let m = 0; m < measureList.length; m++) {
+        const row = measureList[m];
+        if (!row) continue;
+
+        const gEntries = collectMeasureGraphicalNotes(row);
+        const measureEvents = eventsByMeasure.get(m) ?? [];
+        const sourceNoteToUid = new Map<unknown, string>();
+        const used = new Set<number>();
+
+        for (const ev of measureEvents) {
+          const idx = pickBestGraphicalEntryIndex(
+            gEntries,
+            used,
+            ev.midi,
+            ev.staff,
+            ev.isTieStop,
+            true,
+          );
+          if (idx === -1) continue;
+          used.add(idx);
+          sourceNoteToUid.set(gEntries[idx].sourceNote, ev.noteUid);
+        }
+
+        for (const gm of row) {
+          const gmObj = gm as { staffEntries?: unknown[] } | undefined;
+          for (const staffEntry of gmObj?.staffEntries ?? []) {
+            const seObj = staffEntry as {
+              FingeringEntries?: Array<{ SVGNode?: Node; sourceNote?: unknown }>;
+              graphicalVoiceEntries?: Array<{
+                notes?: Array<{
+                  sourceNote?: unknown;
+                  getModifierSVGs?: () => HTMLElement[];
+                }>;
+              }>;
+            };
+            for (const fEntry of seObj?.FingeringEntries ?? []) {
+              const svgEl = fEntry?.SVGNode as unknown as HTMLElement | SVGElement | undefined;
+              if (!svgEl || seen.has(svgEl)) continue;
+              seen.add(svgEl);
+              const uid =
+                fEntry.sourceNote !== undefined
+                  ? (sourceNoteToUid.get(fEntry.sourceNote) ?? null)
+                  : null;
+              nodes.push({ element: svgEl, noteUid: uid, measureIndex: m });
+            }
+
+            for (const gve of seObj?.graphicalVoiceEntries ?? []) {
+              for (const gNote of gve?.notes ?? []) {
+                let mods: HTMLElement[] = [];
+                try {
+                  mods = gNote.getModifierSVGs?.() ?? [];
+                } catch {
+                  mods = [];
+                }
+                for (const mod of mods) {
+                  if (!mod || seen.has(mod)) continue;
+                  const isFingeringMod =
+                    mod.classList?.contains("osmd-fingering") ||
+                    mod.classList?.contains("vf-fingering") ||
+                    mod.getAttribute?.("data-osmd-fingering") === "true";
+                  if (!isFingeringMod) continue;
+                  seen.add(mod);
+                  const uid =
+                    gNote.sourceNote !== undefined
+                      ? (sourceNoteToUid.get(gNote.sourceNote) ?? null)
+                      : null;
+                  nodes.push({ element: mod, noteUid: uid, measureIndex: m });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    container
+      .querySelectorAll<SVGElement | HTMLElement>(".osmd-fingering, [data-osmd-fingering='true']")
+      .forEach((el) => {
+        if (seen.has(el)) return;
+        seen.add(el);
+        const measureAttr = el.closest?.("[data-measure-index]")?.getAttribute("data-measure-index");
+        const parsedMeasure =
+          measureAttr !== null && measureAttr !== undefined && measureAttr !== ""
+            ? Number(measureAttr)
+            : NaN;
+        nodes.push({
+          element: el,
+          noteUid: null,
+          measureIndex: Number.isInteger(parsedMeasure) ? parsedMeasure : null,
+        });
+      });
+
+    return nodes;
+  };
 
   const getMeasureSvgElements = (measureIndex: number): SVGGElement[] => {
     const row = osmd.GraphicSheet?.MeasureList?.[measureIndex];
@@ -492,6 +617,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       await osmd.load(xmlString);
       osmd.Zoom = options?.zoom ?? 0.85;
       osmd.render();
+      cachedFingeringNodes = null;
       lastCursorKey = null;
       osmd.cursor?.hide();
       const measureList = osmd.GraphicSheet?.MeasureList ?? [];
@@ -502,7 +628,48 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     },
 
     setNoteEvents(events: NoteEvent[]) {
-      currentNoteEvents = events;
+      if (events !== currentNoteEvents) {
+        currentNoteEvents = events;
+        cachedFingeringNodes = null;
+      }
+    },
+
+    setFadingScaffoldingVisual(visual: FadingScaffoldingVisual | null) {
+      if (!cachedFingeringNodes) {
+        cachedFingeringNodes = buildFingeringNodeIndex();
+      }
+      if (cachedFingeringNodes.length === 0) return;
+
+      if (!visual || visual.peekActive || visual.level <= 1) {
+        const nextOpacity = visual ? "1" : "";
+        for (let i = 0; i < cachedFingeringNodes.length; i++) {
+          const node = cachedFingeringNodes[i];
+          node.element.style.opacity = nextOpacity;
+          node.element.setAttribute("data-scaffolding-opacity", "1");
+        }
+        return;
+      }
+
+      if (visual.level === 3) {
+        for (let i = 0; i < cachedFingeringNodes.length; i++) {
+          const node = cachedFingeringNodes[i];
+          node.element.style.opacity = "0";
+          node.element.setAttribute("data-scaffolding-opacity", "0");
+        }
+        return;
+      }
+
+      const preservedUids = new Set(visual.preservedNoteUids);
+      const preservedMeasures = new Set(visual.preservedMeasureIndices);
+      for (let i = 0; i < cachedFingeringNodes.length; i++) {
+        const node = cachedFingeringNodes[i];
+        const visible =
+          node.noteUid !== null
+            ? preservedUids.has(node.noteUid)
+            : node.measureIndex !== null && preservedMeasures.has(node.measureIndex);
+        node.element.style.opacity = visible ? "1" : "0";
+        node.element.setAttribute("data-scaffolding-opacity", visible ? "1" : "0");
+      }
     },
 
     highlightMeasure(measureIndex: number | null) {
@@ -866,6 +1033,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     dispose() {
       osmd.cursor?.hide();
       lastCursorKey = null;
+      cachedFingeringNodes = null;
       clearElementsByAttr("data-studio-highlight", "data-active-measure");
       clearElementsByAttr("data-studio-ab-loop", "data-ab-loop-measure");
       clearElementsByAttr("data-studio-anchor-marker", "data-anchor-note");
@@ -893,6 +1061,7 @@ export interface ScoreViewerProps {
   abLoopRange?: AbLoopHighlightRange | null;
   abPickStep?: AbPickStep;
   spotlightChunk?: ChunkSpotlightRange | null;
+  fadingScaffolding?: FadingScaffoldingVisual | null;
   motorChunks?: MotorChunk[];
   chunkJunctions?: ChunkJunction[];
   performanceCues?: PerformanceCue[];
@@ -938,6 +1107,7 @@ export function ScoreViewer({
   abLoopRange = null,
   abPickStep = "idle",
   spotlightChunk = null,
+  fadingScaffolding = null,
   motorChunks = [],
   chunkJunctions = [],
   performanceCues = [],
@@ -1118,6 +1288,12 @@ export function ScoreViewer({
     rendererRef.current.highlightVariantDiffs?.(diffs);
   }, [isRendered, inspectedClusterInstance]);
 
+  useEffect(() => {
+    if (!isRendered || !rendererRef.current) return;
+    rendererRef.current.setNoteEvents?.(noteEvents);
+    rendererRef.current.setFadingScaffoldingVisual?.(fadingScaffolding ?? null);
+  }, [isRendered, fadingScaffolding, noteEvents]);
+
   const handleSurfaceClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (abPickStep !== "idle" && onPickAbMeasure) {
       const pickedMeasure =
@@ -1232,6 +1408,8 @@ export function ScoreViewer({
           ? `${spotlightChunk.startMeasureIndex}-${spotlightChunk.endMeasureIndex}`
           : undefined
       }
+      data-scaffolding-level={fadingScaffolding ? `L${fadingScaffolding.level}` : undefined}
+      data-scaffolding-peek={fadingScaffolding?.peekActive ? "true" : undefined}
       className="flex min-h-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white p-2 shadow-sm sm:p-2.5"
     >
       <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1 text-xs">

@@ -194,8 +194,9 @@ function hasValidPrefs(row: ObjectRecord) {
     validOptional("updatedAtMs", isNumber) && validOptional("lastOpenedPieceId", isString) &&
     validOptional("scoreFingerprint", isString) && validOptional("singleStaffHand", (hand) => hand === "RH" || hand === "LH") &&
     validOptional("practiceMode", isPracticeMode) &&
-    ["ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled", "cc64CommandEnabled", "audiationImageryTimerEnabled", "overspeedProbeEnabled"].every((key) =>
+    ["ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled", "cc64CommandEnabled", "audiationImageryTimerEnabled", "overspeedProbeEnabled", "l3SilentBeatEnabled"].every((key) =>
       validOptional(key, (value) => typeof value === "boolean")) &&
+    validOptional("scaffoldingPreference", (value) => value === "auto-fade" || value === "always-full" || value === "hide-keyboard-early") &&
     validOptional("microRestDurationSec", (value) => isNumber(value) && value >= 10 && value <= 15) &&
     validOptional("audiationPreviewMode", (value) => value === "auto-unfamiliar" || value === "manual") &&
     validOptional("handSpanProfile", (value) => {
