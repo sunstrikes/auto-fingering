@@ -48,5 +48,11 @@ export function createInMemoryStorage(options: ScoreCacheOptions = {}): Practice
       for (const blob of blobs) records.scoreBlobs.set(blob.fingerprint, blob);
       for (const key of scoreCache.evictionKeys([...records.scoreBlobs.values()])) records.scoreBlobs.delete(key);
     },
+    async applyPracticeEventGradeOverride(eventId, userGradeOverride) {
+      if (userGradeOverride !== 2) return;
+      const existing = records.practiceEvents.get(eventId);
+      if (!existing || existing.userGradeOverride === 2) return;
+      records.practiceEvents.set(eventId, copyStorageRecord("practiceEvents", { ...existing, userGradeOverride: 2 }));
+    },
   };
 }

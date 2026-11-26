@@ -34,6 +34,7 @@ export interface PracticeSettingsModalProps {
   microRestDurationSec?: number;
   audiationPreviewMode?: "auto-unfamiliar" | "manual";
   audiationImageryTimerEnabled?: boolean;
+  overspeedProbeEnabled?: boolean;
   showStatusBar?: boolean;
   showPianoOverhead?: boolean;
   showFullPalm?: boolean;
@@ -58,6 +59,7 @@ export interface PracticeSettingsModalProps {
   onChangeMicroRestDurationSec?: (sec: number) => void;
   onChangeAudiationPreviewMode?: (mode: "auto-unfamiliar" | "manual") => void;
   onToggleAudiationImageryTimer?: () => void;
+  onToggleOverspeedProbe?: () => void;
   onToggleShowStatusBar?: () => void;
   onToggleShowPianoOverhead?: () => void;
   onToggleShowFullPalm?: () => void;
@@ -120,6 +122,7 @@ export function PracticeSettingsModal({
   microRestDurationSec = 12,
   audiationPreviewMode = "auto-unfamiliar",
   audiationImageryTimerEnabled = false,
+  overspeedProbeEnabled = false,
   showStatusBar = true,
   showPianoOverhead = true,
   showFullPalm = true,
@@ -144,6 +147,7 @@ export function PracticeSettingsModal({
   onChangeMicroRestDurationSec,
   onChangeAudiationPreviewMode,
   onToggleAudiationImageryTimer,
+  onToggleOverspeedProbe,
   onToggleShowStatusBar,
   onToggleShowPianoOverhead,
   onToggleShowFullPalm,
@@ -496,6 +500,23 @@ export function PracticeSettingsModal({
                 aria-label="开启 10 s 进阶意象引导计时"
                 checked={audiationImageryTimerEnabled}
                 onChange={() => onToggleAudiationImageryTimer?.()}
+                className="h-4 w-4 shrink-0 accent-teal-600"
+              />
+            </label>
+
+            <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-teal-200/60 pt-2">
+              <div>
+                <div className="font-medium text-slate-900">开启 1.05x 亚超速安全探针</div>
+                <div className="text-[11px] text-slate-500">
+                  默认关闭。仅对已连续跨夜巩固 2 晚且达到 1.00x 的短技术组块偶发开放 1.05x 裕度验证。
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                data-testid="overspeed-probe-toggle"
+                aria-label="开启 1.05x 亚超速安全探针"
+                checked={overspeedProbeEnabled}
+                onChange={() => onToggleOverspeedProbe?.()}
                 className="h-4 w-4 shrink-0 accent-teal-600"
               />
             </label>

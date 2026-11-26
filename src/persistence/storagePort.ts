@@ -106,6 +106,7 @@ export interface WorkspacePrefs {
   microRestDurationSec?: number;
   audiationPreviewMode?: "auto-unfamiliar" | "manual";
   audiationImageryTimerEnabled?: boolean;
+  overspeedProbeEnabled?: boolean;
   freePracticeMinutes?: number;
   repairEdge?: RepairEdge;
   updatedAtMs?: number;
@@ -153,6 +154,8 @@ export interface PracticeStoragePort {
   listPracticeEvents(pieceId: string): Promise<PracticeEvent[]>;
   accessScoreBlob(fingerprint: string): Promise<ScoreBlob | undefined>;
   commit(write: PracticeStorageWrite): Promise<void>;
+  /** One-way conservative Hard override on an existing persisted PracticeEvent. */
+  applyPracticeEventGradeOverride?(eventId: string, userGradeOverride: 2): Promise<void>;
 }
 
 export interface ScoreCacheOptions {

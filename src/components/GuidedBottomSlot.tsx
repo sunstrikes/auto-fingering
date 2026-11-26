@@ -14,6 +14,7 @@ export interface GuidedBottomSlotProps {
   onShowFingerings: () => void;
   onContinueNext: () => void;
   onReplayCurrent: () => void;
+  onMarkHard?: () => void;
 }
 
 /**
@@ -32,6 +33,7 @@ export function GuidedBottomSlot({
   onShowFingerings,
   onContinueNext,
   onReplayCurrent,
+  onMarkHard,
 }: GuidedBottomSlotProps) {
   return (
     <section
@@ -41,8 +43,30 @@ export function GuidedBottomSlot({
     >
       {lastBoutSummary && (
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1.5 text-[11px]">
-          <span className="font-semibold text-slate-800">{lastBoutSummary.headline}</span>
-          <span className="text-slate-500">{lastBoutSummary.detail}</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-slate-800">{lastBoutSummary.headline}</span>
+            <span className="text-slate-500">{lastBoutSummary.detail}</span>
+          </div>
+          {lastBoutSummary.markedHard ? (
+            <span
+              data-testid="guided-marked-hard-badge"
+              className="rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-900"
+            >
+              已标 Hard · 锁速巩固
+            </span>
+          ) : (
+            lastBoutSummary.canMarkHard &&
+            onMarkHard && (
+              <button
+                type="button"
+                data-testid="guided-mark-hard-btn"
+                onClick={onMarkHard}
+                className="min-h-[36px] rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
+              >
+                感觉发紧 → 标 Hard
+              </button>
+            )
+          )}
         </div>
       )}
 

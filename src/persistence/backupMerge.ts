@@ -194,7 +194,7 @@ function hasValidPrefs(row: ObjectRecord) {
     validOptional("updatedAtMs", isNumber) && validOptional("lastOpenedPieceId", isString) &&
     validOptional("scoreFingerprint", isString) && validOptional("singleStaffHand", (hand) => hand === "RH" || hand === "LH") &&
     validOptional("practiceMode", isPracticeMode) &&
-    ["ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled", "cc64CommandEnabled", "audiationImageryTimerEnabled"].every((key) =>
+    ["ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled", "cc64CommandEnabled", "audiationImageryTimerEnabled", "overspeedProbeEnabled"].every((key) =>
       validOptional(key, (value) => typeof value === "boolean")) &&
     validOptional("microRestDurationSec", (value) => isNumber(value) && value >= 10 && value <= 15) &&
     validOptional("audiationPreviewMode", (value) => value === "auto-unfamiliar" || value === "manual") &&
@@ -482,6 +482,7 @@ function prefsPayloadKey(prefs: WorkspacePrefs): string {
     microRestDurationSec: prefs.microRestDurationSec ?? null,
     audiationPreviewMode: prefs.audiationPreviewMode ?? null,
     audiationImageryTimerEnabled: prefs.audiationImageryTimerEnabled ?? null,
+    overspeedProbeEnabled: prefs.overspeedProbeEnabled ?? null,
   });
 }
 
@@ -704,9 +705,14 @@ export async function importPracticeBackup(
   for (const ev of localEvents) {
     unionEventsById.set(ev.eventId, { ...ev, pieceId: mapLoc(ev.pieceId) });
   }
+  const overrideEventIds: string[] = [];
   for (const ev of events) {
-    if (!unionEventsById.has(ev.eventId)) {
+    const existing = unionEventsById.get(ev.eventId);
+    if (!existing) {
       unionEventsById.set(ev.eventId, { ...ev, pieceId: mapImp(ev.pieceId) });
+    } else if (ev.userGradeOverride === 2 && existing.userGradeOverride !== 2) {
+      unionEventsById.set(ev.eventId, { ...existing, userGradeOverride: 2 });
+      overrideEventIds.push(ev.eventId);
     }
   }
   const eventsByPiece = new Map<string, PracticeEvent[]>();
@@ -910,4 +916,7 @@ export async function importPracticeBackup(
       (row) => row.lastAccessedAtMs > (localBlobById.get(row.fingerprint)?.lastAccessedAtMs ?? -1),
     ),
   });
+  for (const evId of overrideEventIds) {
+    await storage.applyPracticeEventGradeOverride?.(evId, 2);
+  }
 }
