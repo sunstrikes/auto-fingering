@@ -9,6 +9,10 @@ import type { SpeedMultiplier } from "../audio/playbackEngine";
 import type { HandSpanProfile, PriorMode, SpanPreset } from "../domain/types";
 import type { MidiConnectionState } from "../midi/webMidi";
 import type { PriorLoadProgress } from "../prior/loader";
+import {
+  CoachSettingsSection,
+  type CoachSettingsSectionProps,
+} from "./CoachSettingsSection";
 
 const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
   { preset: "S", title: "小手型（偏保守跨度，0.82×）" },
@@ -67,6 +71,7 @@ export interface PracticeSettingsModalProps {
   onChangePriorMode?: (mode: PriorMode) => void;
   onChangePriorLambda?: (lambda: number) => void;
   onChangeCustomModelBaseUrl?: (url: string) => void;
+  coachSettingsProps?: CoachSettingsSectionProps;
   onClose: () => void;
 }
 
@@ -155,6 +160,7 @@ export function PracticeSettingsModal({
   onChangePriorMode,
   onChangePriorLambda,
   onChangeCustomModelBaseUrl,
+  coachSettingsProps,
   onClose,
 }: PracticeSettingsModalProps) {
   useEffect(() => {
@@ -799,6 +805,8 @@ export function PracticeSettingsModal({
               />
             </label>
           </div>
+
+          {coachSettingsProps && <CoachSettingsSection {...coachSettingsProps} />}
 
           <p className="text-[11px] text-slate-400">
             当前基准速度: ♩={Math.round(baseBpm)} · 倍速:{" "}

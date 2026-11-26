@@ -912,6 +912,8 @@ export interface ScoreViewerProps {
   onUpsertCueOverride?: (entry: PerformanceCueOverrideEntry) => void;
   onRemoveCueOverride?: (coord: ScoreCoord, kind?: PerformanceCueKind) => void;
   onResetCueOverrides?: () => void;
+  onPolishCueLabel?: (cue: PerformanceCue) => void;
+  polishingCueId?: string | null;
   onCloseInspectCluster?: () => void;
   rendererFactory?: ScoreRendererFactory;
 }
@@ -955,6 +957,8 @@ export function ScoreViewer({
   onUpsertCueOverride,
   onRemoveCueOverride,
   onResetCueOverrides,
+  onPolishCueLabel,
+  polishingCueId = null,
   onCloseInspectCluster,
   rendererFactory = createOsmdScoreRenderer,
 }: ScoreViewerProps) {
@@ -1396,6 +1400,8 @@ export function ScoreViewer({
         onUpsertCueOverride={onUpsertCueOverride}
         onRemoveCueOverride={onRemoveCueOverride}
         onResetCueOverrides={onResetCueOverrides}
+        onPolishCueLabel={onPolishCueLabel}
+        polishingCueId={polishingCueId}
         onCloseInspectCluster={onCloseInspectCluster}
       />
 
