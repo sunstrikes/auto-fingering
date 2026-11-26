@@ -11,6 +11,7 @@ const fields: { [K in PracticeStore]: readonly (keyof PracticeStorageRecords[K])
     "measureHashesByFingerprint",
     "lastPracticedAtMs",
     "archivedAtMs",
+    "bestStableSpeed",
     "chunkOverrides",
     "performanceCueOverrides",
   ],
