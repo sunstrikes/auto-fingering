@@ -16,10 +16,13 @@ export interface GuidedSessionLaunchCardProps {
   sessionPlan?: SessionPlan | null;
   timeBoxMinutes: GuidedTimeBoxMinutes;
   selectedMacroSectionId: string | null;
+  blindColdProbeEnabled?: boolean;
   onSelectTimeBox: (minutes: GuidedTimeBoxMinutes) => void;
   onSelectMacroSection: (sectionId: string | null) => void;
+  onToggleBlindColdProbe?: () => void;
   onStartSession: () => void;
   onStartQuickTriage?: () => void;
+  onStartColdProbeDrill?: () => void;
   onBackToFreeStudio: () => void;
   onFocusChunkEditor?: () => void;
 }
@@ -40,10 +43,13 @@ export function GuidedSessionLaunchCard({
   sessionPlan = null,
   timeBoxMinutes,
   selectedMacroSectionId,
+  blindColdProbeEnabled = false,
   onSelectTimeBox,
   onSelectMacroSection,
+  onToggleBlindColdProbe,
   onStartSession,
   onStartQuickTriage,
+  onStartColdProbeDrill,
   onBackToFreeStudio,
   onFocusChunkEditor,
 }: GuidedSessionLaunchCardProps) {
@@ -224,6 +230,32 @@ export function GuidedSessionLaunchCard({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {onToggleBlindColdProbe && (
+            <label
+              data-testid="guided-cold-probe-blind-label"
+              className="inline-flex min-h-[44px] cursor-pointer items-center gap-1.5 rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+            >
+              <input
+                type="checkbox"
+                data-testid="guided-cold-probe-blind-toggle"
+                checked={blindColdProbeEnabled}
+                onChange={onToggleBlindColdProbe}
+                className="h-3.5 w-3.5 rounded border-slate-300 text-teal-600"
+              />
+              <span>盲考（隐藏乐谱）</span>
+            </label>
+          )}
+          {onStartColdProbeDrill && (
+            <button
+              type="button"
+              data-testid="guided-cold-probe-btn"
+              disabled={motorChunks.length === 0}
+              onClick={onStartColdProbeDrill}
+              className="min-h-[44px] min-w-[44px] rounded-lg border border-indigo-400 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-900 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              冷启动专项测验
+            </button>
+          )}
           {onStartQuickTriage && (
             <button
               type="button"

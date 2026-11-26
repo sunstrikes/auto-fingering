@@ -28,18 +28,22 @@ export type PianoCommandAction =
   | "continue-next"
   | "start-first-note"
   | "emergency-pause"
-  | "micro-rest-reminder";
+  | "micro-rest-reminder"
+  | "peek-reveal";
 
 export interface PianoCommandRouteContext {
   phase: GuidedSessionPhase;
   firstTargetMidis: readonly number[];
   chunkMidis: Iterable<number>;
   cc64CommandEnabled: boolean;
+  allowActivePeek?: boolean;
+  allowActiveBridgeSkip?: boolean;
 }
 
 export interface PianoCommandRouteResult {
   action: PianoCommandAction;
   emergencyPauseDisabled?: boolean;
+  peekDisabled?: boolean;
 }
 
 export interface KeyboardCommandEventLike {
@@ -113,8 +117,32 @@ export function createPianoCommandRouter(options?: { chordWindowMs?: number }) {
       return { action: "none" };
     }
 
-    // Active play: single-key A0/B0/C8 ignored; A0+A#0 within chordWindowMs triggers pause
+    // Active play: single-key A0/B0/C8 ignored except blind-curtain/L2+ B0 peek (with collision guard) and optional bridge C8 skip
     if (ACTIVE_PLAY_PHASES.has(context.phase)) {
+      if (context.phase === "playing" && context.allowActivePeek && event.midi === PIANO_COMMAND_MIDI.B0) {
+        let hasB0 = false;
+        for (const m of context.chunkMidis) {
+          if (m === PIANO_COMMAND_MIDI.B0) {
+            hasB0 = true;
+            break;
+          }
+        }
+        return hasB0
+          ? { action: "none", peekDisabled: true }
+          : { action: "peek-reveal" };
+      }
+      if (context.phase === "playing" && context.allowActiveBridgeSkip && event.midi === PIANO_COMMAND_MIDI.C8) {
+        let hasC8 = false;
+        for (const m of context.chunkMidis) {
+          if (m === PIANO_COMMAND_MIDI.C8) {
+            hasC8 = true;
+            break;
+          }
+        }
+        if (!hasC8) {
+          return { action: "continue-next" };
+        }
+      }
       if (event.midi === PIANO_COMMAND_MIDI.A0) {
         a0DownAtMs = event.timeStampMs;
         if (
@@ -181,6 +209,7 @@ export function createPianoCommandRouter(options?: { chordWindowMs?: number }) {
 export function routeKeyboardCommand(
   event: KeyboardCommandEventLike,
   phase: GuidedSessionPhase,
+  options?: { allowActivePeek?: boolean },
 ): PianoCommandAction {
   if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
     return "none";
@@ -188,6 +217,9 @@ export function routeKeyboardCommand(
 
   const isSpace = event.code === "Space" || event.key === " ";
   if (ACTIVE_PLAY_PHASES.has(phase)) {
+    if (phase === "playing" && options?.allowActivePeek && event.key.toLowerCase() === "f") {
+      return "peek-reveal";
+    }
     return isSpace ? "emergency-pause" : "none";
   }
 
