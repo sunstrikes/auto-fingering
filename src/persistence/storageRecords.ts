@@ -23,7 +23,8 @@ const fields: { [K in PracticeStore]: readonly (keyof PracticeStorageRecords[K])
   fingerAnchorDrafts: ["pieceId", "anchorsByCoord", "removedRawCoords", "sourceFingeringHash", "updatedAtMs"],
   workspacePrefs: ["scopeKey", "lastOpenedPieceId", "scoreFingerprint", "handSpanProfile", "speedMultiplier", "abLoop",
     "practiceMode", "singleStaffHand", "ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled",
-    "cc64CommandEnabled", "freePracticeMinutes", "repairEdge", "updatedAtMs"],
+    "cc64CommandEnabled", "microRestDurationSec", "audiationPreviewMode", "audiationImageryTimerEnabled",
+    "freePracticeMinutes", "repairEdge", "updatedAtMs"],
   scoreBlobs: ["fingerprint", "bytes", "fileName", "byteLength", "lastAccessedAtMs", "sourceFormat", "repairAlternate"],
 };
 

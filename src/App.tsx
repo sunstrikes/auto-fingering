@@ -59,6 +59,8 @@ import { useWorkspaceScoreLifecycle } from "./hooks/useWorkspaceScoreLifecycle";
 import { useGuidedSessionController } from "./hooks/useGuidedSessionController";
 import { GuidedSessionLaunchCard } from "./components/GuidedSessionLaunchCard";
 import { GuidedResumePill, GuidedSessionHeader } from "./components/GuidedSessionHeader";
+import { GuidedBottomSlot } from "./components/GuidedBottomSlot";
+import { MicroRestVeil } from "./components/MicroRestVeil";
 import { PracticeBackupPanel, ScoreOpenChoice } from "./components/PracticeBackupPanel";
 import { buildMeasureRiskSummaries, type MeasureGeometry } from "./components/MarginRiskGutter";
 import { NoteAnchorPopover, type PopoverAnchorRect } from "./components/NoteAnchorPopover";
@@ -298,11 +300,18 @@ export default function App({
   const errorMsg = useStudioStore((s) => s.errorMsg);
 
   const cc64CommandEnabled = useGuidedSessionStore((s) => s.cc64CommandEnabled);
+  const microRestDurationSec = useGuidedSessionStore((s) => s.microRestDurationSec);
+  const audiationPreviewMode = useGuidedSessionStore((s) => s.audiationPreviewMode);
+  const audiationImageryTimerEnabled = useGuidedSessionStore(
+    (s) => s.audiationImageryTimerEnabled,
+  );
   const durablePrefs = useMemo(() => ({
     handSpanProfile, speedMultiplier: playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
     absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
+    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled,
   }), [handSpanProfile, playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
-    absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled]);
+    absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
+    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled]);
   const persistence = usePracticePersistence(practiceStorage, durablePrefs, playbackState === "playing");
   const effectivePracticeMode: PracticeMode = isSingleStaff
     ? singleStaffHand === "LH"
@@ -573,6 +582,17 @@ export default function App({
       if (saved?.strictHoldDurationEnabled !== undefined) setStrictHoldDurationEnabled(saved.strictHoldDurationEnabled);
       if (saved?.cc64CommandEnabled !== undefined) {
         useGuidedSessionStore.getState().setCc64CommandEnabled(saved.cc64CommandEnabled);
+      }
+      if (saved?.microRestDurationSec !== undefined) {
+        useGuidedSessionStore.getState().setMicroRestDurationSec(saved.microRestDurationSec);
+      }
+      if (saved?.audiationPreviewMode !== undefined) {
+        useGuidedSessionStore.getState().setAudiationPreviewMode(saved.audiationPreviewMode);
+      }
+      if (saved?.audiationImageryTimerEnabled !== undefined) {
+        useGuidedSessionStore
+          .getState()
+          .setAudiationImageryTimerEnabled(saved.audiationImageryTimerEnabled);
       }
       setAbLoop(loop);
       setAbPickStep("idle");
@@ -1173,12 +1193,14 @@ export default function App({
 
   const guided = useGuidedSessionController({
     scoreDoc,
+    solveResult,
     practiceSteps,
     motorChunks: chunking.motorChunks,
     macroSections: chunking.macroSections,
     effectivePracticeMode,
     playbackSpeed,
     playbackEngineRef,
+    audioEngineRef,
     countInEnabled,
     setMidiCaptureMode: (mode) => midiCapture.setMode(mode),
     resetMidiCapture,
@@ -2858,42 +2880,13 @@ export default function App({
           )}
 
           {guided.studioMode === "guided" && guided.sessionPhase === "micro-rest" && (
-            <div
-              data-testid="guided-micro-rest-veil"
-              className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-xl bg-slate-900/55 p-6 text-center text-white backdrop-blur-xs"
-            >
-              <div className="text-sm font-semibold tracking-wide">
-                清醒微休息（Micro-Rest）
-              </div>
-              <p className="max-w-md text-xs text-slate-200">
-                双手离开琴键静放{" "}
-                {Math.max(
-                  1,
-                  Math.ceil(
-                    (guided.microRestDurationMs -
-                      Math.max(0, nowMs() - (guided.microRestStartedAtMs ?? nowMs()))) /
-                      1000,
-                  ),
-                )}{" "}
-                秒，让动作记忆自然巩固。
-              </p>
-              {guided.microRestReminder && (
-                <p
-                  data-testid="guided-micro-rest-reminder"
-                  className="rounded-md bg-white/15 px-3 py-1 text-xs text-amber-100"
-                >
-                  {guided.microRestReminder}
-                </p>
-              )}
-              <button
-                type="button"
-                data-testid="guided-skip-micro-rest-btn"
-                onClick={() => guided.executeCommandAction("continue-next")}
-                className="min-h-[44px] min-w-[44px] rounded-lg border border-white/40 bg-white/15 px-4 py-2 text-xs font-semibold text-white hover:bg-white/25"
-              >
-                跳过微休息 (C8 / →)
-              </button>
-            </div>
+            <MicroRestVeil
+              remainingSec={guided.microRestTick.remainingSec}
+              progress={guided.microRestTick.progress}
+              reminderMessage={guided.microRestState?.reminderMessage ?? guided.microRestReminder}
+              reminderPulseToken={guided.microRestState?.reminderPulseToken ?? 0}
+              onSkip={() => guided.executeCommandAction("continue-next")}
+            />
           )}
         </div>
       </main>
@@ -2946,37 +2939,22 @@ export default function App({
       {/* Bottom Pane: Full-Width 88-Key Physical Piano & Dual-Hand Posture Simulation */}
       <div data-testid="bottom-piano-pane" className="shrink-0">
         {guided.studioMode === "guided" && guided.bottomSlotView === "feedback" ? (
-          <section
-            data-testid="guided-delayed-feedback-panel"
-            className="flex flex-wrap items-center justify-between gap-3 border-t border-teal-200 bg-white px-4 py-4 text-xs"
-          >
-            <div className="space-y-1">
-              <div className="font-semibold text-slate-900">
-                {guided.lastBoutSummary?.headline ?? "当前组块反馈"}
-              </div>
-              <div className="text-slate-600">
-                {guided.lastBoutSummary?.detail ??
-                  "Stage 0 落键停顿遥测已严格隔离，不写入连续声学画像；可按 B0 或 F 切回 88 键手型与指法。"}
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                data-testid="guided-back-to-piano-btn"
-                onClick={() => guided.setBottomSlotView("piano")}
-                className="min-h-[44px] min-w-[44px] rounded-lg border border-teal-500 bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-900 hover:bg-teal-100"
-              >
-                切回指法与 88 键手型 (B0 / F)
-              </button>
-              <button
-                type="button"
-                onClick={() => guided.executeCommandAction("continue-next")}
-                className="min-h-[44px] min-w-[44px] rounded-lg bg-teal-600 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-700"
-              >
-                继续 / 下一块 (C8)
-              </button>
-            </div>
-          </section>
+          <GuidedBottomSlot
+            sessionPhase={guided.sessionPhase}
+            lastBoutSummary={guided.lastBoutSummary}
+            audiationCue={guided.audiationCue}
+            audiationState={guided.audiationState}
+            imageryRemainingSec={
+              guided.audiationImageryTick.active
+                ? guided.audiationImageryTick.remainingSec
+                : null
+            }
+            onTriggerPreview={guided.triggerAudiationPreview}
+            onStopPreview={() => guided.stopAudiationPreview("manual-stop")}
+            onShowFingerings={() => guided.setBottomSlotView("piano")}
+            onContinueNext={() => guided.executeCommandAction("continue-next")}
+            onReplayCurrent={() => guided.executeCommandAction("replay-chunk")}
+          />
         ) : (
         <UnifiedPiano88
           scoreDoc={scoreDoc}
@@ -3029,6 +3007,9 @@ export default function App({
         absoluteStrictnessEnabled={absoluteStrictnessEnabled}
         strictHoldDurationEnabled={strictHoldDurationEnabled}
         cc64CommandEnabled={guided.cc64CommandEnabled}
+        microRestDurationSec={guided.microRestDurationSec}
+        audiationPreviewMode={guided.audiationPreviewMode}
+        audiationImageryTimerEnabled={guided.audiationImageryTimerEnabled}
         showStatusBar={showStatusBar}
         showPianoOverhead={showPianoOverhead}
         showFullPalm={showFullPalm}
@@ -3081,6 +3062,11 @@ export default function App({
           setWaitingStateSync(createWaitingModeState(waitingStateRef.current.currentStepIndex));
         }}
         onToggleCc64Command={() => guided.setCc64CommandEnabled(!guided.cc64CommandEnabled)}
+        onChangeMicroRestDurationSec={guided.setMicroRestDurationSec}
+        onChangeAudiationPreviewMode={guided.setAudiationPreviewMode}
+        onToggleAudiationImageryTimer={() =>
+          guided.setAudiationImageryTimerEnabled(!guided.audiationImageryTimerEnabled)
+        }
         onToggleShowStatusBar={() => setShowStatusBar((v) => !v)}
         onToggleShowPianoOverhead={() => setShowPianoOverhead((v) => !v)}
         onToggleShowFullPalm={() => setShowFullPalm((v) => !v)}

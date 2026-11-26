@@ -103,6 +103,9 @@ export interface WorkspacePrefs {
   absoluteStrictnessEnabled?: boolean;
   strictHoldDurationEnabled?: boolean;
   cc64CommandEnabled?: boolean;
+  microRestDurationSec?: number;
+  audiationPreviewMode?: "auto-unfamiliar" | "manual";
+  audiationImageryTimerEnabled?: boolean;
   freePracticeMinutes?: number;
   repairEdge?: RepairEdge;
   updatedAtMs?: number;
