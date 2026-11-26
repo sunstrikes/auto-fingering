@@ -224,17 +224,23 @@ function getBpmAtTick(scoreDoc: ScoreDocument, tick: number): number {
 }
 
 /**
- * Generates a one-measure Count-In schedule at the starting measure's time signature
- * and active tempo, scaled by the active `SpeedMultiplier`.
+ * Generates a Count-In schedule at the starting measure's time signature and active
+ * tempo, scaled by `SpeedMultiplier`. Defaults to one full measure (`measure.timeBeats`)
+ * unless `countInBeats` is provided (e.g. compact 2-beat Bridge Window or pickup alignment).
  */
 export function buildCountInBeats(
   scoreDoc: ScoreDocument,
   startMeasureIndex: number,
-  speed: number
+  speed: number,
+  countInBeats?: number
 ): CountInSchedule {
   const measure =
     scoreDoc.measureTimelines[startMeasureIndex] ?? scoreDoc.measureTimelines[0];
   const timeBeats = Math.max(1, measure?.timeBeats ?? 4);
+  const resolvedCountInBeats =
+    typeof countInBeats === "number" && Number.isFinite(countInBeats)
+      ? Math.max(0, Math.floor(countInBeats))
+      : timeBeats;
   const timeBeatType = Math.max(1, measure?.timeBeatType ?? 4);
   const startTick = measure?.startTick ?? 0;
   const measureIndex = measure?.measureIndex ?? 0;
@@ -244,20 +250,20 @@ export function buildCountInBeats(
   const beatRealSec = ((60 / bpm) * (4 / timeBeatType)) / safeSpeed;
 
   const beats: CountInBeat[] = [];
-  for (let beatIndex = 0; beatIndex < timeBeats; beatIndex++) {
+  for (let beatIndex = 0; beatIndex < resolvedCountInBeats; beatIndex++) {
     beats.push({
       measureIndex,
       beatIndex,
       beatNumber: beatIndex + 1,
-      totalBeats: timeBeats,
+      totalBeats: resolvedCountInBeats,
       offsetRealSec: beatIndex * beatRealSec,
       isAccent: beatIndex === 0,
-      countdownRemaining: timeBeats - beatIndex,
+      countdownRemaining: resolvedCountInBeats - beatIndex,
     });
   }
 
   return {
     beats,
-    totalDurationRealSec: timeBeats * beatRealSec,
+    totalDurationRealSec: resolvedCountInBeats * beatRealSec,
   };
 }
