@@ -4,6 +4,7 @@ import type {
   MotorChunk,
   PassageCluster,
 } from "../chunking/types";
+import type { SessionPlan } from "../guided/sessionPlanner";
 import type { GuidedTimeBoxMinutes } from "../store/useGuidedSessionStore";
 
 export interface GuidedSessionLaunchCardProps {
@@ -12,11 +13,13 @@ export interface GuidedSessionLaunchCardProps {
   motorChunks: MotorChunk[];
   passageClusters: PassageCluster[];
   chunkJunctions: ChunkJunction[];
+  sessionPlan?: SessionPlan | null;
   timeBoxMinutes: GuidedTimeBoxMinutes;
   selectedMacroSectionId: string | null;
   onSelectTimeBox: (minutes: GuidedTimeBoxMinutes) => void;
   onSelectMacroSection: (sectionId: string | null) => void;
   onStartSession: () => void;
+  onStartQuickTriage?: () => void;
   onBackToFreeStudio: () => void;
   onFocusChunkEditor?: () => void;
 }
@@ -34,11 +37,13 @@ export function GuidedSessionLaunchCard({
   motorChunks,
   passageClusters,
   chunkJunctions,
+  sessionPlan = null,
   timeBoxMinutes,
   selectedMacroSectionId,
   onSelectTimeBox,
   onSelectMacroSection,
   onStartSession,
+  onStartQuickTriage,
   onBackToFreeStudio,
   onFocusChunkEditor,
 }: GuidedSessionLaunchCardProps) {
@@ -46,7 +51,10 @@ export function GuidedSessionLaunchCard({
     selectedMacroSectionId !== null
       ? motorChunks.filter((c) => c.sectionId === selectedMacroSectionId)
       : motorChunks;
-  const previewChunks = (filteredChunks.length > 0 ? filteredChunks : motorChunks).slice(0, 6);
+  const previewChunks =
+    sessionPlan && sessionPlan.items.length > 0
+      ? sessionPlan.items.slice(0, 6).map((item) => item.chunk)
+      : (filteredChunks.length > 0 ? filteredChunks : motorChunks).slice(0, 6);
 
   const highRiskCount = chunkJunctions.filter((j) => j.isHighRisk).length;
   const totalSavedMeasures = passageClusters.reduce((sum, cluster) => {
@@ -193,7 +201,7 @@ export function GuidedSessionLaunchCard({
           ) : (
             previewChunks.map((chunk, idx) => (
               <span
-                key={chunk.chunkId}
+                key={`${chunk.chunkId}-${idx}`}
                 data-testid={`guided-preview-chunk-${chunk.chunkId}`}
                 className={`rounded-md border px-2 py-0.5 text-[11px] font-medium ${
                   idx === 0
@@ -215,16 +223,38 @@ export function GuidedSessionLaunchCard({
           )}
         </div>
 
-        <button
-          type="button"
-          data-testid="guided-start-session-btn"
-          disabled={previewChunks.length === 0}
-          onClick={onStartSession}
-          className="min-h-[44px] min-w-[44px] rounded-lg bg-teal-600 px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          开始 {timeBoxMinutes} 分钟科学练琴（或按 C8 / 弹奏首音）
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {onStartQuickTriage && (
+            <button
+              type="button"
+              data-testid="guided-quick-triage-btn"
+              disabled={motorChunks.length === 0}
+              onClick={onStartQuickTriage}
+              className="min-h-[44px] min-w-[44px] rounded-lg border border-teal-500 bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-900 hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              全曲快速分诊（1 遍体检）
+            </button>
+          )}
+          <button
+            type="button"
+            data-testid="guided-start-session-btn"
+            disabled={previewChunks.length === 0}
+            onClick={onStartSession}
+            className="min-h-[44px] min-w-[44px] rounded-lg bg-teal-600 px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            开始 {timeBoxMinutes} 分钟科学练琴（或按 C8 / 弹奏首音）
+          </button>
+        </div>
       </div>
+
+      {sessionPlan && (
+        <div
+          data-testid="guided-session-plan-summary"
+          className="mt-2 rounded-lg border border-teal-100 bg-teal-50/50 px-2.5 py-1.5 text-[11px] text-teal-900"
+        >
+          {sessionPlan.summaryText}
+        </div>
+      )}
     </section>
   );
 }

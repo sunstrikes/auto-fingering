@@ -61,6 +61,7 @@ import { GuidedSessionLaunchCard } from "./components/GuidedSessionLaunchCard";
 import { GuidedResumePill, GuidedSessionHeader } from "./components/GuidedSessionHeader";
 import { GuidedBottomSlot } from "./components/GuidedBottomSlot";
 import { AcousticProfileSlot } from "./components/AcousticProfileSlot";
+import { EarlyMacroRestVeil } from "./components/EarlyMacroRestVeil";
 import { MicroRestVeil } from "./components/MicroRestVeil";
 import {
   analyzeContinuousPerformanceWindow,
@@ -196,8 +197,17 @@ export default function App({
   const [isResolving, setIsResolving] = useState<boolean>(false);
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
   const updatePlaybackState = useCallback((state: PlaybackState) => {
-    if (state === "stopped") resetMidiCapture();
-    else midiCapture.setTransport(state, useStudioStore.getState().scoreDoc !== null);
+    if (state === "stopped") {
+      const g = useGuidedSessionStore.getState();
+      if (g.studioMode === "guided" && g.sessionPhase === "playing") {
+        // Keep recorded continuous MIDI intact until onSegmentComplete slices the window.
+        midiCapture.setTransport("paused", useStudioStore.getState().scoreDoc !== null);
+      } else {
+        resetMidiCapture();
+      }
+    } else {
+      midiCapture.setTransport(state, useStudioStore.getState().scoreDoc !== null);
+    }
     setPlaybackState(state);
   }, [midiCapture, resetMidiCapture]);
   const [playbackSpeed, setPlaybackSpeed] = useState<SpeedMultiplier>(1.0);
@@ -317,13 +327,14 @@ export default function App({
   const audiationImageryTimerEnabled = useGuidedSessionStore(
     (s) => s.audiationImageryTimerEnabled,
   );
+  const overspeedProbeEnabled = useGuidedSessionStore((s) => s.overspeedProbeEnabled);
   const durablePrefs = useMemo(() => ({
     handSpanProfile, speedMultiplier: playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
     absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
-    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled,
+    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled,
   }), [handSpanProfile, playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
     absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
-    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled]);
+    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled]);
   const persistence = usePracticePersistence(practiceStorage, durablePrefs, playbackState === "playing");
   const effectivePracticeMode: PracticeMode = isSingleStaff
     ? singleStaffHand === "LH"
@@ -649,6 +660,9 @@ export default function App({
         useGuidedSessionStore
           .getState()
           .setAudiationImageryTimerEnabled(saved.audiationImageryTimerEnabled);
+      }
+      if (saved?.overspeedProbeEnabled !== undefined) {
+        useGuidedSessionStore.getState().setOverspeedProbeEnabled(saved.overspeedProbeEnabled);
       }
       setAbLoop(loop);
       setAbPickStep("idle");
@@ -1271,11 +1285,18 @@ export default function App({
     practiceSteps,
     motorChunks: chunking.motorChunks,
     macroSections: chunking.macroSections,
+    chunkJunctions: chunking.chunkJunctions,
+    passageClusters: chunking.passageClusters,
+    performanceCues: chunking.performanceCues,
     effectivePracticeMode,
     playbackSpeed,
     playbackEngineRef,
     audioEngineRef,
     countInEnabled,
+    practiceStorage: persistence.storage,
+    activePieceProfile: persistence.getActive()?.profile ?? null,
+    getTimezoneOffsetMin: clockDeps?.getTimezoneOffsetMin,
+    onChangePlaybackSpeed: (speed) => setPlaybackSpeed(speed),
     setMidiCaptureMode: (mode) => midiCapture.setMode(mode),
     resetMidiCapture,
     sliceContinuousMidiWindow,
@@ -2346,11 +2367,13 @@ export default function App({
             motorChunks={chunking.motorChunks}
             passageClusters={chunking.passageClusters}
             chunkJunctions={chunking.chunkJunctions}
+            sessionPlan={guided.sessionPlan}
             timeBoxMinutes={guided.timeBoxMinutes}
             selectedMacroSectionId={guided.selectedMacroSectionId}
             onSelectTimeBox={guided.setTimeBoxMinutes}
             onSelectMacroSection={guided.setSelectedMacroSectionId}
             onStartSession={guided.handleStartSession}
+            onStartQuickTriage={guided.handleStartQuickTriage}
             onBackToFreeStudio={guided.returnToFreeStudio}
           />
         )}
@@ -3028,6 +3051,13 @@ export default function App({
               onSkip={() => guided.executeCommandAction("continue-next")}
             />
           )}
+
+          {guided.studioMode === "guided" && guided.sessionPhase === "macro-rest" && (
+            <EarlyMacroRestVeil
+              remainingSec={guided.macroRestRemainingSec}
+              onSkip={() => guided.executeCommandAction("continue-next")}
+            />
+          )}
         </div>
       </main>
 
@@ -3080,6 +3110,7 @@ export default function App({
       <div data-testid="bottom-piano-pane" className="shrink-0">
         {guided.studioMode === "guided" &&
         guided.sessionPhase !== "micro-rest" &&
+        guided.sessionPhase !== "macro-rest" &&
         guided.bottomSlotView === "feedback" ? (
           <GuidedBottomSlot
             sessionPhase={guided.sessionPhase}
@@ -3100,6 +3131,7 @@ export default function App({
               handleSelectMeasure(measureIndex);
               guided.setBottomSlotView("piano");
             }}
+            onMarkHard={() => void guided.handleMarkLastBoutHard()}
           />
         ) : (
         <UnifiedPiano88
@@ -3156,6 +3188,7 @@ export default function App({
         microRestDurationSec={guided.microRestDurationSec}
         audiationPreviewMode={guided.audiationPreviewMode}
         audiationImageryTimerEnabled={guided.audiationImageryTimerEnabled}
+        overspeedProbeEnabled={guided.overspeedProbeEnabled}
         showStatusBar={showStatusBar}
         showPianoOverhead={showPianoOverhead}
         showFullPalm={showFullPalm}
@@ -3212,6 +3245,9 @@ export default function App({
         onChangeAudiationPreviewMode={guided.setAudiationPreviewMode}
         onToggleAudiationImageryTimer={() =>
           guided.setAudiationImageryTimerEnabled(!guided.audiationImageryTimerEnabled)
+        }
+        onToggleOverspeedProbe={() =>
+          guided.setOverspeedProbeEnabled(!guided.overspeedProbeEnabled)
         }
         onToggleShowStatusBar={() => setShowStatusBar((v) => !v)}
         onToggleShowPianoOverhead={() => setShowPianoOverhead((v) => !v)}

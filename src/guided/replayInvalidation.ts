@@ -214,6 +214,8 @@ export async function loadOrReducePiecePracticeState(
   }
 
   const reduced = reducePiecePracticeState(sorted, { ...context, pieceId });
-  await writeDerivedSnapshot(storage, pieceId, reduced);
+  if (sorted.length > 0) {
+    await writeDerivedSnapshot(storage, pieceId, reduced);
+  }
   return { state: reduced, fromCache: false };
 }
