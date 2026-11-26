@@ -1,0 +1,779 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`chunking static analyzer (pure TS, zero XML DOM) > produces deterministic golden snapshots across test-corpus/01..05 1`] = `
+{
+  "01-single-staff-melody.musicxml": {
+    "chunks": [
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 2,
+        },
+        "id": "chunk-0",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 0,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 4,
+        },
+        "id": "chunk-1",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 2,
+        },
+      },
+    ],
+    "clusterCount": 0,
+    "clusters": [],
+    "measureCount": 4,
+    "sections": [
+      {
+        "id": "sec-0",
+        "range": [
+          0,
+          3,
+        ],
+        "reason": "start",
+      },
+    ],
+  },
+  "02-grand-staff-arpeggio-chord.musicxml": {
+    "chunks": [
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 2,
+        },
+        "id": "chunk-0",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 0,
+        },
+      },
+    ],
+    "clusterCount": 0,
+    "clusters": [],
+    "measureCount": 2,
+    "sections": [
+      {
+        "id": "sec-0",
+        "range": [
+          0,
+          1,
+        ],
+        "reason": "start",
+      },
+    ],
+  },
+  "03-partial-fingering-hanon.musicxml": {
+    "chunks": [
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 2,
+        },
+        "id": "chunk-0",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 0,
+        },
+      },
+    ],
+    "clusterCount": 0,
+    "clusters": [],
+    "measureCount": 2,
+    "sections": [
+      {
+        "id": "sec-0",
+        "range": [
+          0,
+          1,
+        ],
+        "reason": "start",
+      },
+    ],
+  },
+  "04-tie-cross-staff-compressed.mxl": {
+    "chunks": [
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 2,
+        },
+        "id": "chunk-0",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 0,
+        },
+      },
+    ],
+    "clusterCount": 0,
+    "clusters": [],
+    "measureCount": 2,
+    "sections": [
+      {
+        "id": "sec-0",
+        "range": [
+          0,
+          1,
+        ],
+        "reason": "start",
+      },
+    ],
+  },
+  "05-realworld-wuchang.musicxml": {
+    "chunks": [
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 3,
+        },
+        "id": "chunk-0",
+        "measures": 3,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 0,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 5,
+        },
+        "id": "chunk-1",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 3,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 7,
+        },
+        "id": "chunk-2",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 5,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 9,
+        },
+        "id": "chunk-3",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 7,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 11,
+        },
+        "id": "chunk-4",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 9,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 13,
+        },
+        "id": "chunk-5",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 11,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 15,
+        },
+        "id": "chunk-6",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 13,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 17,
+        },
+        "id": "chunk-7",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 15,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 19,
+        },
+        "id": "chunk-8",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 17,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 21,
+        },
+        "id": "chunk-9",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 19,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 23,
+        },
+        "id": "chunk-10",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 21,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 25,
+        },
+        "id": "chunk-11",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 23,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 27,
+        },
+        "id": "chunk-12",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 25,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 29,
+        },
+        "id": "chunk-13",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 27,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 32,
+        },
+        "id": "chunk-14",
+        "measures": 3,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 29,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 34,
+        },
+        "id": "chunk-15",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 32,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 36,
+        },
+        "id": "chunk-16",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 34,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 38,
+        },
+        "id": "chunk-17",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 36,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 40,
+        },
+        "id": "chunk-18",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 38,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 42,
+        },
+        "id": "chunk-19",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 40,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 44,
+        },
+        "id": "chunk-20",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 42,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 46,
+        },
+        "id": "chunk-21",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 44,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 48,
+        },
+        "id": "chunk-22",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 46,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 50,
+        },
+        "id": "chunk-23",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 48,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 52,
+        },
+        "id": "chunk-24",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 50,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 54,
+        },
+        "id": "chunk-25",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 52,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 56,
+        },
+        "id": "chunk-26",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 54,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 58,
+        },
+        "id": "chunk-27",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 56,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 60,
+        },
+        "id": "chunk-28",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 58,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 62,
+        },
+        "id": "chunk-29",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 60,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 65,
+        },
+        "id": "chunk-30",
+        "measures": 3,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 62,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 67,
+        },
+        "id": "chunk-31",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 65,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 69,
+        },
+        "id": "chunk-32",
+        "measures": 2,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 67,
+        },
+      },
+      {
+        "end": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 73,
+        },
+        "id": "chunk-33",
+        "measures": 4,
+        "pickup": false,
+        "start": {
+          "beatDen": 1,
+          "beatNum": 0,
+          "measureIndex": 69,
+        },
+      },
+    ],
+    "clusterCount": 1,
+    "clusters": [
+      {
+        "instances": [
+          {
+            "kind": "exact",
+            "range": [
+              5,
+              10,
+            ],
+            "transpose": 0,
+          },
+          {
+            "kind": "exact",
+            "range": [
+              34,
+              39,
+            ],
+            "transpose": 0,
+          },
+        ],
+        "label": "A",
+        "switchMeasures": [],
+      },
+    ],
+    "measureCount": 73,
+    "sections": [
+      {
+        "id": "sec-0",
+        "range": [
+          0,
+          4,
+        ],
+        "reason": "start",
+      },
+      {
+        "id": "sec-1",
+        "range": [
+          5,
+          8,
+        ],
+        "reason": "cadence",
+      },
+      {
+        "id": "sec-2",
+        "range": [
+          9,
+          16,
+        ],
+        "reason": "cadence",
+      },
+      {
+        "id": "sec-3",
+        "range": [
+          17,
+          22,
+        ],
+        "reason": "cadence",
+      },
+      {
+        "id": "sec-4",
+        "range": [
+          23,
+          28,
+        ],
+        "reason": "cadence",
+      },
+      {
+        "id": "sec-5",
+        "range": [
+          29,
+          33,
+        ],
+        "reason": "novelty",
+      },
+      {
+        "id": "sec-6",
+        "range": [
+          34,
+          41,
+        ],
+        "reason": "novelty",
+      },
+      {
+        "id": "sec-7",
+        "range": [
+          42,
+          49,
+        ],
+        "reason": "cadence",
+      },
+      {
+        "id": "sec-8",
+        "range": [
+          50,
+          57,
+        ],
+        "reason": "cadence",
+      },
+      {
+        "id": "sec-9",
+        "range": [
+          58,
+          64,
+        ],
+        "reason": "cadence",
+      },
+      {
+        "id": "sec-10",
+        "range": [
+          65,
+          72,
+        ],
+        "reason": "cadence",
+      },
+    ],
+  },
+}
+`;

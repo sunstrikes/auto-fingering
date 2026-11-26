@@ -13,6 +13,8 @@ export default defineConfig({
         "src/midi/**/*.ts",
         "src/persistence/**/*.ts",
         "src/practice/**/*.ts",
+        "src/chunking/**/*.ts",
+        "src/workers/chunkingClient.ts",
       ],
       exclude: ["src/practice/useScreenWakeLock.ts"],
       reporter: ["text", "json-summary"],
