@@ -234,6 +234,7 @@ export function useChunkingAnalysis({
   }, []);
 
   return {
+    macroSections: effectiveStaticResult?.macroSections ?? [],
     motorChunks: effectiveStaticResult?.motorChunks ?? [],
     chunkJunctions: motorOverlay?.chunkJunctions ?? [],
     passageClusters: motorOverlay?.passageClusters ?? [],

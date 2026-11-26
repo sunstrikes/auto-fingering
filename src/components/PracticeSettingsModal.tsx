@@ -30,6 +30,7 @@ export interface PracticeSettingsModalProps {
   skipGraceNotes?: boolean;
   absoluteStrictnessEnabled?: boolean;
   strictHoldDurationEnabled?: boolean;
+  cc64CommandEnabled?: boolean;
   showStatusBar?: boolean;
   showPianoOverhead?: boolean;
   showFullPalm?: boolean;
@@ -50,6 +51,7 @@ export interface PracticeSettingsModalProps {
   onToggleSkipGraceNotes?: () => void;
   onToggleAbsoluteStrictness?: () => void;
   onToggleStrictHoldDuration?: () => void;
+  onToggleCc64Command?: () => void;
   onToggleShowStatusBar?: () => void;
   onToggleShowPianoOverhead?: () => void;
   onToggleShowFullPalm?: () => void;
@@ -108,6 +110,7 @@ export function PracticeSettingsModal({
   skipGraceNotes = false,
   absoluteStrictnessEnabled = false,
   strictHoldDurationEnabled = false,
+  cc64CommandEnabled = false,
   showStatusBar = true,
   showPianoOverhead = true,
   showFullPalm = true,
@@ -128,6 +131,7 @@ export function PracticeSettingsModal({
   onToggleSkipGraceNotes,
   onToggleAbsoluteStrictness,
   onToggleStrictHoldDuration,
+  onToggleCc64Command,
   onToggleShowStatusBar,
   onToggleShowPianoOverhead,
   onToggleShowFullPalm,
@@ -398,6 +402,23 @@ export function PracticeSettingsModal({
               className="h-4 w-4 accent-blue-600"
             />
           </div>
+
+          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div>
+              <div className="font-medium text-slate-900">Guided Session 允许 CC64 延音踏板触发继续</div>
+              <div className="text-[11px] text-slate-500">
+                默认关闭（防乐句延音误触）。开启后在非演奏空窗踩下 CC64 踏板可等价 C8 继续/下一块。
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              data-testid="cc64-command-toggle"
+              aria-label="Guided Session 允许 CC64 延音踏板触发继续"
+              checked={cc64CommandEnabled}
+              onChange={() => onToggleCc64Command?.()}
+              className="h-4 w-4 accent-teal-600"
+            />
+          </label>
 
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
             <div className="mb-1.5 flex items-center justify-between">

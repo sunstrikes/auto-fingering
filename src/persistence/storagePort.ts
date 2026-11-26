@@ -102,6 +102,7 @@ export interface WorkspacePrefs {
   ignoreExistingFingerings?: boolean;
   absoluteStrictnessEnabled?: boolean;
   strictHoldDurationEnabled?: boolean;
+  cc64CommandEnabled?: boolean;
   freePracticeMinutes?: number;
   repairEdge?: RepairEdge;
   updatedAtMs?: number;

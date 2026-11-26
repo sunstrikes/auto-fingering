@@ -39,6 +39,12 @@ import {
 } from "../solver/handKinematics";
 import { computeHandSkeleton } from "./handSkeleton";
 
+export interface PianoCommandBadge {
+  label: string;
+  disabled?: boolean;
+  title?: string;
+}
+
 export interface UnifiedPiano88Props {
   scoreDoc: ScoreDocument | null;
   solveResult: SolveResult | null;
@@ -56,6 +62,7 @@ export interface UnifiedPiano88Props {
   waitingResetReason?: WaitingResetReason;
   waitingIsHolding?: boolean;
   waitingHoldProgress?: number;
+  commandKeyBadges?: Partial<Record<21 | 22 | 23 | 108, PianoCommandBadge>>;
   onSelectSlice?: (sliceId: string) => void;
   onAuditionMidi?: (midi: number) => void;
   onVirtualNoteOn?: (midi: number, velocity?: number) => void;
@@ -601,6 +608,7 @@ export function UnifiedPiano88({
   waitingResetReason = null,
   waitingIsHolding = false,
   waitingHoldProgress = 0,
+  commandKeyBadges,
   onSelectSlice,
   onAuditionMidi,
   onVirtualNoteOn,
@@ -1069,6 +1077,41 @@ export function UnifiedPiano88({
                       {label}
                     </text>
                   )}
+                  {(() => {
+                    const badge =
+                      midi === 21 || midi === 23 || midi === 108
+                        ? commandKeyBadges?.[midi]
+                        : undefined;
+                    if (!badge) return null;
+                    const badgeY = KEYS_Y + BLACK_KEY_H + 8;
+                    return (
+                      <g
+                        data-testid={`piano-command-badge-${midi}`}
+                        data-command-disabled={badge.disabled ? "true" : "false"}
+                        opacity={badge.disabled ? 0.55 : 1}
+                      >
+                        {badge.title && <title>{badge.title}</title>}
+                        <rect
+                          x={x + 1.5}
+                          y={badgeY}
+                          width={WHITE_KEY_W - 3}
+                          height={15}
+                          rx={3}
+                          fill={badge.disabled ? "#e2e8f0" : "#0f766e"}
+                        />
+                        <text
+                          x={x + WHITE_KEY_W / 2}
+                          y={badgeY + 10.5}
+                          textAnchor="middle"
+                          fontSize={6.5}
+                          fontWeight={700}
+                          fill={badge.disabled ? "#475569" : "#ffffff"}
+                        >
+                          {badge.label}
+                        </text>
+                      </g>
+                    );
+                  })()}
                 </g>
               );
             })}
@@ -1149,6 +1192,33 @@ export function UnifiedPiano88({
                       isPedalOnly && !isWrong && !info?.isRepairedAnchor ? "2,1.5" : undefined
                     }
                   />
+                  {midi === 22 && commandKeyBadges?.[22] && (
+                    <g
+                      data-testid="piano-command-badge-22"
+                      data-command-disabled={commandKeyBadges[22].disabled ? "true" : "false"}
+                      opacity={commandKeyBadges[22].disabled ? 0.55 : 1}
+                    >
+                      {commandKeyBadges[22].title && <title>{commandKeyBadges[22].title}</title>}
+                      <rect
+                        x={x + 0.5}
+                        y={KEYS_Y + 6}
+                        width={BLACK_KEY_W - 1}
+                        height={14}
+                        rx={2}
+                        fill={commandKeyBadges[22].disabled ? "#64748b" : "#0f766e"}
+                      />
+                      <text
+                        x={x + BLACK_KEY_W / 2}
+                        y={KEYS_Y + 15.5}
+                        textAnchor="middle"
+                        fontSize={5.5}
+                        fontWeight={700}
+                        fill="#ffffff"
+                      >
+                        {commandKeyBadges[22].label}
+                      </text>
+                    </g>
+                  )}
                 </g>
               );
             })}

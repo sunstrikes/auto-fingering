@@ -194,7 +194,7 @@ function hasValidPrefs(row: ObjectRecord) {
     validOptional("updatedAtMs", isNumber) && validOptional("lastOpenedPieceId", isString) &&
     validOptional("scoreFingerprint", isString) && validOptional("singleStaffHand", (hand) => hand === "RH" || hand === "LH") &&
     validOptional("practiceMode", isPracticeMode) &&
-    ["ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled"].every((key) =>
+    ["ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled", "cc64CommandEnabled"].every((key) =>
       validOptional(key, (value) => typeof value === "boolean")) &&
     validOptional("handSpanProfile", (value) => {
       const { preset, avoidThumbOnBlack, preferStablePosition } = asObject(value);
