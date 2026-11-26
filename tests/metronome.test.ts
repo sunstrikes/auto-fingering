@@ -77,6 +77,29 @@ describe("Slice 1: Metronome beat & Count-In generation from MeasureTimeline", (
     expect(countIn.beats.map((b) => b.isAccent)).toEqual([true, false, false]);
     expect(countIn.beats.map((b) => b.countdownRemaining)).toEqual([3, 2, 1]);
   });
+
+  it("supports optional countInBeats override for compact 2-beat Bridge Window count-in, pickup alignment, and 0-beat skip", () => {
+    const doc = parseMusicXml(METER_TEMPO_PICKUP_XML, { DOMParser: window.DOMParser });
+    // Measure 1 is 4/4 at 120 BPM (0.5s/beat at 1.0x); overriding to 2 beats yields 1.0s total
+    const compact = buildCountInBeats(doc, 1, 1.0, 2);
+    expect(compact.totalDurationRealSec).toBeCloseTo(1.0, 5);
+    expect(compact.beats).toHaveLength(2);
+    expect(compact.beats.map((b) => b.beatNumber)).toEqual([1, 2]);
+    expect(compact.beats.map((b) => b.totalBeats)).toEqual([2, 2]);
+    expect(compact.beats.map((b) => b.offsetRealSec)).toEqual([0, 0.5]);
+    expect(compact.beats.map((b) => b.isAccent)).toEqual([true, false]);
+    expect(compact.beats.map((b) => b.countdownRemaining)).toEqual([2, 1]);
+
+    // 3-beat pickup alignment in 4/4 at 1.0x
+    const pickupAligned = buildCountInBeats(doc, 1, 1.0, 3);
+    expect(pickupAligned.totalDurationRealSec).toBeCloseTo(1.5, 5);
+    expect(pickupAligned.beats.map((b) => b.countdownRemaining)).toEqual([3, 2, 1]);
+
+    // 0-beat skip
+    const zero = buildCountInBeats(doc, 1, 1.0, 0);
+    expect(zero.totalDurationRealSec).toBe(0);
+    expect(zero.beats).toEqual([]);
+  });
 });
 
 interface TrackedOsc {
