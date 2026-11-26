@@ -328,13 +328,17 @@ export default function App({
     (s) => s.audiationImageryTimerEnabled,
   );
   const overspeedProbeEnabled = useGuidedSessionStore((s) => s.overspeedProbeEnabled);
+  const scaffoldingPreference = useGuidedSessionStore((s) => s.scaffoldingPreference);
+  const l3SilentBeatEnabled = useGuidedSessionStore((s) => s.l3SilentBeatEnabled);
   const durablePrefs = useMemo(() => ({
     handSpanProfile, speedMultiplier: playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
     absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
     microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled,
+    scaffoldingPreference, l3SilentBeatEnabled,
   }), [handSpanProfile, playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
     absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
-    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled]);
+    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled,
+    scaffoldingPreference, l3SilentBeatEnabled]);
   const persistence = usePracticePersistence(practiceStorage, durablePrefs, playbackState === "playing");
   const effectivePracticeMode: PracticeMode = isSingleStaff
     ? singleStaffHand === "LH"
@@ -478,7 +482,8 @@ export default function App({
     const guidedState = guidedControllerRef.current;
     const isGuidedStage0 =
       guidedState?.studioMode === "guided" && guidedState.sessionPhase === "stage0";
-    const waitingActive = isGuidedStage0 || waitingModeEnabled;
+    const waitingActive =
+      guidedState?.studioMode === "guided" ? isGuidedStage0 : waitingModeEnabled;
 
     if (event.type === "noteon") {
       setPressedMidis((prev) => {
@@ -663,6 +668,12 @@ export default function App({
       }
       if (saved?.overspeedProbeEnabled !== undefined) {
         useGuidedSessionStore.getState().setOverspeedProbeEnabled(saved.overspeedProbeEnabled);
+      }
+      if (saved?.scaffoldingPreference !== undefined) {
+        useGuidedSessionStore.getState().setScaffoldingPreference(saved.scaffoldingPreference);
+      }
+      if (saved?.l3SilentBeatEnabled !== undefined) {
+        useGuidedSessionStore.getState().setL3SilentBeatEnabled(saved.l3SilentBeatEnabled);
       }
       setAbLoop(loop);
       setAbPickStep("idle");
@@ -1282,6 +1293,8 @@ export default function App({
   const guided = useGuidedSessionController({
     scoreDoc,
     solveResult,
+    anchors,
+    removedRawAnchorUids,
     practiceSteps,
     motorChunks: chunking.motorChunks,
     macroSections: chunking.macroSections,
@@ -2387,12 +2400,39 @@ export default function App({
               className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-white px-3 py-1 text-xs"
             >
               <div className="flex flex-wrap items-center gap-2">
+                <span
+                  data-testid="guided-scaffolding-badge"
+                  className="rounded-full border border-teal-300 bg-teal-50 px-2 py-0.5 text-[11px] font-semibold text-teal-900"
+                >
+                  L{guided.scaffoldingLevel}
+                  {guided.scaffoldingPolicy.steppedDown ? " · 已自动退降1级" : ""}
+                </span>
+                {guided.scaffoldingLevel === 3 && (
+                  <label className="inline-flex cursor-pointer items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
+                    <input
+                      type="checkbox"
+                      data-testid="guided-l3-silent-beat-toggle"
+                      checked={guided.l3SilentBeatEnabled}
+                      onChange={(e) => guided.setL3SilentBeatEnabled(e.target.checked)}
+                      className="h-3 w-3 accent-teal-600"
+                    />
+                    <span>L3 静音跟拍 (仅Count-In)</span>
+                  </label>
+                )}
                 {guided.dualPitchDisabled && (
                   <span
                     data-testid="guided-dual-pitch-notice"
                     className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900"
                   >
                     当前块包含 A0+A#0，已自动禁用双键紧急暂停，请使用触控暂停或空格键
+                  </span>
+                )}
+                {guided.b0PeekDisabled && (
+                  <span
+                    data-testid="guided-b0-conflict-notice"
+                    className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900"
+                  >
+                    当前块包含 B0，已自动禁用演奏态 B0 偷看，请按 F 键或触控「偷看指法」
                   </span>
                 )}
                 {guided.commandNotice && (
@@ -2416,6 +2456,16 @@ export default function App({
               </div>
 
               <div className="flex flex-wrap items-center gap-1.5">
+                {guided.sessionPhase === "playing" && guided.scaffoldingPolicy.cuesObscured && (
+                  <button
+                    type="button"
+                    data-testid="guided-peek-fingerings-btn"
+                    onClick={() => guided.triggerScaffoldingPeek()}
+                    className="min-h-[44px] min-w-[44px] rounded-lg border border-teal-400 bg-teal-50 px-3 py-1.5 text-xs font-semibold text-teal-900 hover:bg-teal-100"
+                  >
+                    {guided.peekActive ? "指法闪现中…" : "偷看指法 1.5s (B0 / F)"}
+                  </button>
+                )}
                 {guided.sessionPhase === "stage0" || guided.sessionPhase === "playing" ? (
                   <button
                     type="button"
@@ -2997,6 +3047,7 @@ export default function App({
             }
             abPickStep={abPickStep}
             spotlightChunk={guided.spotlightChunk}
+            fadingScaffolding={guided.fadingScaffoldingVisual}
             motorChunks={chunking.motorChunks}
             chunkJunctions={chunking.chunkJunctions}
             performanceCues={chunking.performanceCues}
@@ -3143,21 +3194,44 @@ export default function App({
           practiceMode={effectivePracticeMode}
           showOverhead={showPianoOverhead}
           showFullPalm={showFullPalm}
+          scaffoldingHideTargets={guided.hideKeyboardTargets}
           wrongMidis={
-            (guided.studioMode === "guided" && guided.sessionPhase === "stage0") ||
-            (waitingModeEnabled && !absoluteStrictnessEnabled)
-              ? flashedWrongMidis.size > 0
-                ? new Set([...waitingState.wrongMidis, ...flashedWrongMidis])
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? undefined
+              : (guided.studioMode === "guided" && guided.sessionPhase === "stage0") ||
+                  (waitingModeEnabled && !absoluteStrictnessEnabled)
+                ? flashedWrongMidis.size > 0
+                  ? new Set([...waitingState.wrongMidis, ...flashedWrongMidis])
+                  : waitingState.wrongMidis
                 : waitingState.wrongMidis
-              : waitingState.wrongMidis
           }
-          hitMidis={waitingState.hitMidis}
+          hitMidis={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? undefined
+              : waitingState.hitMidis
+          }
           pressedMidis={pressedMidis}
           sustainPedalPressed={sustainPedalPressed}
-          waitingTainted={waitingState.tainted}
-          waitingResetReason={waitingState.lastResetReason}
-          waitingIsHolding={waitingState.isHolding}
-          waitingHoldProgress={waitingState.holdProgress}
+          waitingTainted={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? false
+              : waitingState.tainted
+          }
+          waitingResetReason={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? null
+              : waitingState.lastResetReason
+          }
+          waitingIsHolding={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? false
+              : waitingState.isHolding
+          }
+          waitingHoldProgress={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? 0
+              : waitingState.holdProgress
+          }
           commandKeyBadges={guided.commandKeyBadges}
           onSelectSlice={handleSelectSlice}
           onVirtualNoteOn={(midi, velocity = 96) =>
@@ -3189,6 +3263,8 @@ export default function App({
         audiationPreviewMode={guided.audiationPreviewMode}
         audiationImageryTimerEnabled={guided.audiationImageryTimerEnabled}
         overspeedProbeEnabled={guided.overspeedProbeEnabled}
+        scaffoldingPreference={guided.scaffoldingPreference}
+        l3SilentBeatEnabled={guided.l3SilentBeatEnabled}
         showStatusBar={showStatusBar}
         showPianoOverhead={showPianoOverhead}
         showFullPalm={showFullPalm}
@@ -3248,6 +3324,10 @@ export default function App({
         }
         onToggleOverspeedProbe={() =>
           guided.setOverspeedProbeEnabled(!guided.overspeedProbeEnabled)
+        }
+        onChangeScaffoldingPreference={guided.setScaffoldingPreference}
+        onToggleL3SilentBeat={() =>
+          guided.setL3SilentBeatEnabled(!guided.l3SilentBeatEnabled)
         }
         onToggleShowStatusBar={() => setShowStatusBar((v) => !v)}
         onToggleShowPianoOverhead={() => setShowPianoOverhead((v) => !v)}
