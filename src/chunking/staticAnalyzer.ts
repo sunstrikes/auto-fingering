@@ -1305,6 +1305,7 @@ function segmentMotorChunks(
     const m = steps[i].measureIndex;
     if (m >= 0 && m < M) stepsPerMeasure[m]++;
   }
+  const overlapAtMeasureEnd = new Uint8Array(M);
   for (let i = 0; i < input.noteEvents.length; i++) {
     const ev = input.noteEvents[i];
     if (ev.isTieStop) continue;
@@ -1312,6 +1313,10 @@ function segmentMotorChunks(
     if (m >= 0 && m < M) {
       notesPerMeasure[m]++;
       avgMidiByMeasure[m] += ev.midi;
+      const endBarTick = input.measureTimelines[m]?.endTick ?? Infinity;
+      if (ev.onsetTick < endBarTick && ev.onsetTick + ev.durationTick > endBarTick) {
+        overlapAtMeasureEnd[m] = 1;
+      }
     }
   }
   for (let m = 0; m < M; m++) {
@@ -1471,20 +1476,7 @@ function segmentMotorChunks(
           )
         : 0;
 
-      // Check polyphonic overlap at end boundary (notes sustaining across barline)
-      const endBarTick = input.measureTimelines[span.endM]?.endTick ?? Infinity;
-      let overlapFlag = false;
-      for (let i = 0; i < input.noteEvents.length; i++) {
-        const ev = input.noteEvents[i];
-        if (
-          ev.measureIndex === span.endM &&
-          ev.onsetTick < endBarTick &&
-          ev.onsetTick + ev.durationTick > endBarTick
-        ) {
-          overlapFlag = true;
-          break;
-        }
-      }
+      const overlapFlag = overlapAtMeasureEnd[span.endM] === 1;
 
       const chunkId = `chunk-${chunkCounter++}`;
       sec.chunkIds.push(chunkId);

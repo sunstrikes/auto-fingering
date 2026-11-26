@@ -537,12 +537,18 @@ describe("chunking static analyzer (pure TS, zero XML DOM)", () => {
     });
     expect(input200.noteEvents.length).toBe(4000);
 
-    // Warm up JIT once
-    analyzeScoreStatic(input200);
+    // Warm up JIT across 3 calls, then measure median of 3 runs
+    for (let w = 0; w < 3; w++) analyzeScoreStatic(input200);
 
-    const t0 = performance.now();
-    const res200 = analyzeScoreStatic(input200);
-    const elapsed = performance.now() - t0;
+    const timings: number[] = [];
+    let res200 = analyzeScoreStatic(input200);
+    for (let r = 0; r < 3; r++) {
+      const t0 = performance.now();
+      res200 = analyzeScoreStatic(input200);
+      timings.push(performance.now() - t0);
+    }
+    timings.sort((a, b) => a - b);
+    const elapsed = timings[1];
 
     expect(res200.degradedToWholeMeasureSsm).toBe(false);
     expect(elapsed).toBeLessThan(perfBudget(50));

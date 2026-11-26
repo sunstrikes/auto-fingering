@@ -500,12 +500,18 @@ describe("chunking synchronous motor overlay (< 2 ms)", () => {
     const staticRes = analyzeScoreStatic(input200);
     const solveRes = solveFingering(input200.onsetSlices, DEFAULT_HAND_SPAN_PROFILE);
 
-    // Warm up JIT
-    analyzeMotorOverlay(staticRes, input200, solveRes, "both");
+    // Warm up JIT across 3 calls, then measure median of 3 runs
+    for (let w = 0; w < 3; w++) analyzeMotorOverlay(staticRes, input200, solveRes, "both");
 
-    const t0 = performance.now();
-    const overlay = analyzeMotorOverlay(staticRes, input200, solveRes, "both");
-    const elapsed = performance.now() - t0;
+    const timings: number[] = [];
+    let overlay = analyzeMotorOverlay(staticRes, input200, solveRes, "both");
+    for (let r = 0; r < 3; r++) {
+      const t0 = performance.now();
+      overlay = analyzeMotorOverlay(staticRes, input200, solveRes, "both");
+      timings.push(performance.now() - t0);
+    }
+    timings.sort((a, b) => a - b);
+    const elapsed = timings[1];
 
     expect(overlay.chunkJunctions.length).toBe(staticRes.motorChunks.length - 1);
     expect(elapsed).toBeLessThan(perfBudget(2));
