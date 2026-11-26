@@ -27,6 +27,7 @@ import {
   type RiskSeverity,
 } from "./MarginRiskGutter";
 import type { MeasureErrorSummary } from "../practice/practiceAnalytics";
+import type { PassageCluster, PassageInstance } from "../chunking/types";
 import type { AbPickStep, ScoreLayoutMode } from "./ScoreViewer";
 
 export interface TransportPracticeBarProps {
@@ -53,6 +54,9 @@ export interface TransportPracticeBarProps {
   abLoop?: AbLoopBounds;
   abPickStep?: AbPickStep;
   abPickStartMeasure?: number | null;
+  passageClusters?: PassageCluster[];
+  inspectedClusterInstanceId?: string | null;
+  onToggleInspectClusterInstance?: (instanceId: string) => void;
   onPlay: () => void;
   onPlayFromSlice: () => void;
   onPause: () => void;
@@ -66,6 +70,53 @@ export interface TransportPracticeBarProps {
   onPickAbMeasure?: (measureIndex: number) => void;
   onChangeAbLoopBounds?: (bounds: AbLoopBounds) => void;
   onClearAbLoop?: () => void;
+}
+
+interface ClusterPaletteStyle {
+  barClass: string;
+  dotClass: string;
+  chipClass: string;
+  activeChipClass: string;
+}
+
+// Distinct from amber/red (risk), rose (errors), emerald (mastered), blue (active), indigo (A-B loop), violet (fingering diff)
+const CLUSTER_PALETTE: readonly ClusterPaletteStyle[] = [
+  {
+    barClass: "bg-teal-500 hover:bg-teal-600",
+    dotClass: "bg-teal-600",
+    chipClass: "border-teal-200 bg-teal-50/70 text-teal-800 hover:bg-teal-100",
+    activeChipClass: "border-teal-600 bg-teal-600 text-white",
+  },
+  {
+    barClass: "bg-cyan-500 hover:bg-cyan-600",
+    dotClass: "bg-cyan-600",
+    chipClass: "border-cyan-200 bg-cyan-50/70 text-cyan-800 hover:bg-cyan-100",
+    activeChipClass: "border-cyan-600 bg-cyan-600 text-white",
+  },
+  {
+    barClass: "bg-sky-500 hover:bg-sky-600",
+    dotClass: "bg-sky-600",
+    chipClass: "border-sky-200 bg-sky-50/70 text-sky-800 hover:bg-sky-100",
+    activeChipClass: "border-sky-600 bg-sky-600 text-white",
+  },
+  {
+    barClass: "bg-pink-500 hover:bg-pink-600",
+    dotClass: "bg-pink-600",
+    chipClass: "border-pink-200 bg-pink-50/70 text-pink-800 hover:bg-pink-100",
+    activeChipClass: "border-pink-600 bg-pink-600 text-white",
+  },
+  {
+    barClass: "bg-lime-600 hover:bg-lime-700",
+    dotClass: "bg-lime-600",
+    chipClass: "border-lime-200 bg-lime-50/70 text-lime-800 hover:bg-lime-100",
+    activeChipClass: "border-lime-700 bg-lime-700 text-white",
+  },
+];
+
+export function formatClusterInstanceLabel(clusterIndex: number, instanceIndex: number, instance: PassageInstance): string {
+  const letter = String.fromCharCode(65 + (clusterIndex % 26));
+  const prime = instance.variantKind !== "exact" ? "'" : "";
+  return `${letter}${instanceIndex + 1}${prime}`;
 }
 
 const SPEED_STEP = 0.05;
@@ -122,6 +173,9 @@ export function TransportPracticeBar({
   abLoop,
   abPickStep = "idle",
   abPickStartMeasure = null,
+  passageClusters = [],
+  inspectedClusterInstanceId = null,
+  onToggleInspectClusterInstance,
   onPlay,
   onPlayFromSlice,
   onPause,
@@ -176,6 +230,32 @@ export function TransportPracticeBar({
     layoutMode,
     fallbackPerRow: 4,
   });
+
+  const clusterByMeasure = new Map<
+    number,
+    { cluster: PassageCluster; instance: PassageInstance; label: string; palette: ClusterPaletteStyle }
+  >();
+  const clusterInstancesFlat: Array<{
+    cluster: PassageCluster;
+    instance: PassageInstance;
+    label: string;
+    palette: ClusterPaletteStyle;
+  }> = [];
+  for (let cIdx = 0; cIdx < passageClusters.length; cIdx++) {
+    const cluster = passageClusters[cIdx];
+    const palette = CLUSTER_PALETTE[cIdx % CLUSTER_PALETTE.length];
+    for (let iIdx = 0; iIdx < cluster.instances.length; iIdx++) {
+      const instance = cluster.instances[iIdx];
+      const label = formatClusterInstanceLabel(cIdx, iIdx, instance);
+      const entry = { cluster, instance, label, palette };
+      clusterInstancesFlat.push(entry);
+      for (let m = instance.startMeasureIndex; m <= instance.endMeasureIndex; m++) {
+        if (!clusterByMeasure.has(m)) {
+          clusterByMeasure.set(m, entry);
+        }
+      }
+    }
+  }
 
   const RISK_CELL_STYLE: Record<RiskSeverity, string> = {
     none: "bg-slate-100/80 hover:bg-slate-200/80 text-slate-600",
@@ -372,6 +452,86 @@ export function TransportPracticeBar({
             })
           )}
         </div>
+
+        {/* Independent 4px Passage Cluster Ribbon Track beside the Measure Ruler */}
+        {clusterInstancesFlat.length > 0 && systemGroups.length > 0 && (
+          <div
+            data-testid="passage-cluster-ribbon"
+            aria-label="Passage Cluster 重复乐段轨"
+            className="flex flex-col gap-1"
+          >
+            <div
+              data-testid="passage-cluster-track"
+              className="flex h-[4px] w-full items-stretch gap-1.5 overflow-x-auto"
+            >
+              {systemGroups.map((group) => (
+                <div
+                  key={`cluster-sys-${group.systemIndex}`}
+                  style={{
+                    flexGrow: group.measureIndices.length,
+                    flexBasis: 0,
+                    minWidth: `${Math.max(28, group.measureIndices.length * 12)}px`,
+                  }}
+                  className="flex h-[4px] items-stretch overflow-hidden rounded-full bg-slate-100"
+                >
+                  {group.measureIndices.map((mIdx) => {
+                    const hit = clusterByMeasure.get(mIdx);
+                    const isSelected = Boolean(
+                      hit && inspectedClusterInstanceId === hit.instance.instanceId,
+                    );
+                    return (
+                      <button
+                        key={mIdx}
+                        type="button"
+                        data-testid={`passage-ribbon-cell-${mIdx}`}
+                        data-cluster-id={hit?.cluster.clusterId}
+                        data-cluster-instance-id={hit?.instance.instanceId}
+                        data-cluster-label={hit?.label}
+                        disabled={!hit}
+                        onClick={() =>
+                          hit && onToggleInspectClusterInstance?.(hit.instance.instanceId)
+                        }
+                        title={
+                          hit
+                            ? `${hit.label} (第${hit.instance.startMeasureIndex + 1}-${hit.instance.endMeasureIndex + 1}小节, MotorReuse ${Math.round(hit.instance.motorReuse * 100)}%)`
+                            : undefined
+                        }
+                        className={`h-[4px] min-w-[4px] flex-1 transition ${
+                          hit ? hit.palette.barClass : "bg-transparent"
+                        } ${isSelected ? "ring-1 ring-slate-900" : ""}`}
+                      />
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-1 text-[10px] leading-tight">
+              <span className="font-medium text-slate-500">重复簇:</span>
+              {clusterInstancesFlat.map(({ instance, label, palette }) => {
+                const isSelected = inspectedClusterInstanceId === instance.instanceId;
+                return (
+                  <button
+                    key={instance.instanceId}
+                    type="button"
+                    data-testid={`passage-cluster-instance-${instance.instanceId}`}
+                    aria-pressed={isSelected}
+                    onClick={() => onToggleInspectClusterInstance?.(instance.instanceId)}
+                    className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-medium transition ${
+                      isSelected ? palette.activeChipClass : palette.chipClass
+                    }`}
+                  >
+                    <span className={`h-1.5 w-1.5 rounded-full ${palette.dotClass}`} />
+                    <span>{label}</span>
+                    <span className="opacity-75">
+                      m.{instance.startMeasureIndex + 1}-{instance.endMeasureIndex + 1}
+                    </span>
+                    <span className="opacity-70">{Math.round(instance.motorReuse * 100)}%</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Bottom Row: Transport, Speed, Metronome, Waiting Mode, Two-Step A-B Loop & Settings */}
         <div className="flex flex-wrap items-center justify-between gap-2">

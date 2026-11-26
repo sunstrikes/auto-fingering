@@ -97,9 +97,30 @@ export async function saveWorkspace(storage: PracticeStoragePort, profile: Piece
   const now = Date.now();
   const { scoreDoc, rawXmlText, fileName, exportFormat, prefs, repair } = workspace;
   const identity = getScoreIdentity(scoreDoc);
-  // An import may have added aliases while this score was already open.
-  const known = profile.fingerprints.includes(identity.fingerprint) && !changes.profile && !changes.practiced
-    ? profile : await storage.get("pieceProfiles", profile.pieceId) ?? profile;
+  // An import may have added aliases while this score was already open, and profile may carry newer chunk/cue overrides.
+  const stored = !profile.fingerprints.includes(identity.fingerprint) || changes.profile || changes.practiced
+    ? await storage.get("pieceProfiles", profile.pieceId)
+    : undefined;
+  const known: PieceProfile = stored
+    ? {
+        ...stored,
+        ...profile,
+        fingerprints: [...new Set([...stored.fingerprints, ...profile.fingerprints])],
+        measureHashesByFingerprint: { ...stored.measureHashesByFingerprint, ...profile.measureHashesByFingerprint },
+        ...(stored.lastPracticedAtMs !== undefined || profile.lastPracticedAtMs !== undefined
+          ? { lastPracticedAtMs: Math.max(stored.lastPracticedAtMs ?? 0, profile.lastPracticedAtMs ?? 0) }
+          : {}),
+        ...(stored.chunkOverrides &&
+        (!profile.chunkOverrides || stored.chunkOverrides.updatedAtMs > profile.chunkOverrides.updatedAtMs)
+          ? { chunkOverrides: stored.chunkOverrides }
+          : {}),
+        ...(stored.performanceCueOverrides &&
+        (!profile.performanceCueOverrides ||
+          stored.performanceCueOverrides.updatedAtMs > profile.performanceCueOverrides.updatedAtMs)
+          ? { performanceCueOverrides: stored.performanceCueOverrides }
+          : {}),
+      }
+    : profile;
   const withAlias = addScoreAlias(known, identity);
   const nextProfile = changes.practiced ? { ...withAlias, lastPracticedAtMs: now } : withAlias;
   let repairEdge: WorkspacePrefs["repairEdge"];

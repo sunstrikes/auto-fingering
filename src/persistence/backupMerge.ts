@@ -162,6 +162,24 @@ function hasValidPrefs(row: ObjectRecord) {
         optional(alternateCacheKey, (key) => isString(key) && otherFingerprint === row.scoreFingerprint) && isDraft(asObject(otherDraft));
     });
 }
+function isChunkOverrides(value: unknown) {
+  const row = asObject(value);
+  return Array.isArray(row.addedBoundaries) && row.addedBoundaries.every(isScoreCoord) &&
+    Array.isArray(row.removedBoundaries) && row.removedBoundaries.every(isScoreCoord) &&
+    isNonnegative(row.updatedAtMs);
+}
+function isCueOverrideEntry(value: unknown) {
+  const entry = asObject(value);
+  return isScoreCoord(entry.coord) &&
+    optional(entry.kind, (k) => k === "switch" || k === "structural" || k === "technical" || k === "expressive") &&
+    optional(entry.pinned, isBoolean) &&
+    optional(entry.hidden, isBoolean) &&
+    optional(entry.customLabel, (label) => typeof label === "string");
+}
+function isPerformanceCueOverrides(value: unknown) {
+  const row = asObject(value);
+  return Array.isArray(row.entries) && row.entries.every(isCueOverrideEntry) && isNonnegative(row.updatedAtMs);
+}
 function parseRecords<K extends BackupStore>(data: ObjectRecord, store: K): PracticeStorageRecords[K][] {
   const records = data[store];
   if (!Array.isArray(records)) throw new Error("备份格式无效");
@@ -170,7 +188,9 @@ function parseRecords<K extends BackupStore>(data: ObjectRecord, store: K): Prac
     const valid = isString(row[storeKeyPaths[store]]) && (
       store === "pieceProfiles" ? isString(row.title) && isStringList(row.fingerprints) && row.fingerprints.length > 0 &&
         row.fingerprints.every((fingerprint) => isStringList(asObject(row.measureHashesByFingerprint)[fingerprint])) &&
-        (row.archivedAtMs === undefined || isNumber(row.archivedAtMs)) :
+        optional(row.lastPracticedAtMs, isNumber) && optional(row.archivedAtMs, isNumber) &&
+        optional(row.chunkOverrides, isChunkOverrides) &&
+        optional(row.performanceCueOverrides, isPerformanceCueOverrides) :
       store === "practiceEvents" ? isPracticeEvent(row) :
       store === "fingerAnchorDrafts" ? isDraft(row) : hasValidPrefs(row)
     );
@@ -242,6 +262,8 @@ export async function importPracticeBackup(storage: PracticeStoragePort, json: s
       ...(profile.lastPracticedAtMs !== undefined ? { lastPracticedAtMs: Math.max(profile.lastPracticedAtMs, existing.lastPracticedAtMs ?? 0) } : {}),
       ...(profile.chunkOverrides && profile.chunkOverrides.updatedAtMs > (existing.chunkOverrides?.updatedAtMs ?? -1)
         ? { chunkOverrides: profile.chunkOverrides } : {}),
+      ...(profile.performanceCueOverrides && profile.performanceCueOverrides.updatedAtMs > (existing.performanceCueOverrides?.updatedAtMs ?? -1)
+        ? { performanceCueOverrides: profile.performanceCueOverrides } : {}),
     } : { ...profile, pieceId });
   }
   const mapped = (id: string) => importedId.get(id) ?? id;
