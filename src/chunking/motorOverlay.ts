@@ -238,23 +238,70 @@ function cueHazardScore(cue: TransitionCue, dt: number): number {
   }
 }
 
-function getSliceFingers(slice: OnsetSlice, fingerByNoteUid: Record<string, Finger>): Finger[] {
-  const out: Finger[] = [];
-  for (let i = 0; i < slice.notes.length; i++) {
-    out.push(fingerByNoteUid[slice.notes[i].noteUid] ?? 1);
+function fillSliceFingers(
+  slice: OnsetSlice,
+  fingerByNoteUid: Record<string, Finger>,
+  out: Finger[],
+): Finger[] {
+  const len = slice.notes.length;
+  out.length = len;
+  for (let i = 0; i < len; i++) {
+    out[i] = fingerByNoteUid[slice.notes[i].noteUid] ?? 1;
   }
   return out;
 }
 
-function computeSliceBounds(slice: OnsetSlice): { minMidi: number; maxMidi: number } {
-  let minMidi = Infinity;
-  let maxMidi = -Infinity;
+function getMinMidi(slice: OnsetSlice): number {
+  let min = Infinity;
   for (let i = 0; i < slice.notes.length; i++) {
-    const midi = slice.notes[i].midi;
-    if (midi < minMidi) minMidi = midi;
-    if (midi > maxMidi) maxMidi = midi;
+    const m = slice.notes[i].midi;
+    if (m < min) min = m;
   }
-  return { minMidi, maxMidi };
+  return min;
+}
+
+function getMaxMidi(slice: OnsetSlice): number {
+  let max = -Infinity;
+  for (let i = 0; i < slice.notes.length; i++) {
+    const m = slice.notes[i].midi;
+    if (m > max) max = m;
+  }
+  return max;
+}
+
+function fillWindowSlices(
+  byMeasure: OnsetSlice[][],
+  M: number,
+  boundaryTick: number,
+  boundaryMeasure: number,
+  out: OnsetSlice[],
+): void {
+  out.length = 0;
+  let before1: OnsetSlice | null = null;
+  let before2: OnsetSlice | null = null;
+  let after1: OnsetSlice | null = null;
+  let after2: OnsetSlice | null = null;
+
+  const loM = boundaryMeasure > 0 ? boundaryMeasure - 1 : 0;
+  const hiM = boundaryMeasure + 1 < M ? boundaryMeasure + 1 : M - 1;
+  for (let m = loM; m <= hiM; m++) {
+    const arr = byMeasure[m];
+    for (let i = 0; i < arr.length; i++) {
+      const s = arr[i];
+      if (s.onsetTick < boundaryTick) {
+        before1 = before2;
+        before2 = s;
+      } else if (!after1) {
+        after1 = s;
+      } else if (!after2) {
+        after2 = s;
+      }
+    }
+  }
+  if (before1) out.push(before1);
+  if (before2) out.push(before2);
+  if (after1) out.push(after1);
+  if (after2) out.push(after2);
 }
 
 function computeChunkJunctions(
@@ -276,8 +323,12 @@ function computeChunkJunctions(
   );
 
   // Fast O(N + S) pre-indexing by measureIndex
-  const rhSlicesByMeasure: OnsetSlice[][] = Array.from({ length: M }, () => []);
-  const lhSlicesByMeasure: OnsetSlice[][] = Array.from({ length: M }, () => []);
+  const rhSlicesByMeasure: OnsetSlice[][] = new Array(M);
+  const lhSlicesByMeasure: OnsetSlice[][] = new Array(M);
+  for (let m = 0; m < M; m++) {
+    rhSlicesByMeasure[m] = [];
+    lhSlicesByMeasure[m] = [];
+  }
   for (let i = 0; i < scoreDoc.onsetSlices.length; i++) {
     const s = scoreDoc.onsetSlices[i];
     if (s.measureIndex < 0 || s.measureIndex >= M) continue;
@@ -298,12 +349,18 @@ function computeChunkJunctions(
   }
 
   const hpStartSliceIds = new Set<string>();
-  const seenHandHp = new Set<Hand>();
+  let seenRhHp = false;
+  let seenLhHp = false;
   for (let i = 0; i < solveResult.handPositions.length; i++) {
     const hp = solveResult.handPositions[i];
-    if (!seenHandHp.has(hp.hand)) {
-      seenHandHp.add(hp.hand);
-      continue; // initial position at start of hand track is not a shift
+    if (hp.hand === "RH") {
+      if (!seenRhHp) {
+        seenRhHp = true;
+        continue;
+      }
+    } else if (!seenLhHp) {
+      seenLhHp = true;
+      continue;
     }
     hpStartSliceIds.add(hp.startSliceId);
   }
@@ -322,31 +379,15 @@ function computeChunkJunctions(
     }
   }
 
-  const collectWindowSlices = (
-    byMeasure: OnsetSlice[][],
-    boundaryTick: number,
-    boundaryMeasure: number,
-  ): OnsetSlice[] => {
-    const before: OnsetSlice[] = [];
-    const after: OnsetSlice[] = [];
-    const loM = Math.max(0, boundaryMeasure - 1);
-    const hiM = Math.min(M - 1, boundaryMeasure + 1);
-    for (let m = loM; m <= hiM; m++) {
-      const arr = byMeasure[m];
-      for (let i = 0; i < arr.length; i++) {
-        const s = arr[i];
-        if (s.onsetTick < boundaryTick) {
-          before.push(s);
-        } else {
-          if (after.length < 2) after.push(s);
-        }
-      }
-    }
-    const tailBefore = before.length > 2 ? before.slice(before.length - 2) : before;
-    return [...tailBefore, ...after];
-  };
-
   const junctions: ChunkJunction[] = [];
+  const rhWin: OnsetSlice[] = [];
+  const lhWin: OnsetSlice[] = [];
+  const scratchPrevF: Finger[] = [];
+  const scratchCurrF: Finger[] = [];
+  const rhShiftTimes: number[] = [];
+  const lhShiftTimes: number[] = [];
+  const rhShiftDeltas: number[] = [];
+  const lhShiftDeltas: number[] = [];
 
   for (let i = 0; i < chunks.length - 1; i++) {
     const leftChunk = chunks[i];
@@ -366,35 +407,40 @@ function computeChunkJunctions(
         ? Math.min(compactStepTicks.length - 1, junctionStepIndex + 1)
         : 0;
 
-    const rhWindow =
-      practiceMode === "lh-only"
-        ? []
-        : collectWindowSlices(rhSlicesByMeasure, boundaryTick, boundaryMeasure);
-    const lhWindow =
-      practiceMode === "rh-only"
-        ? []
-        : collectWindowSlices(lhSlicesByMeasure, boundaryTick, boundaryMeasure);
-
-    const handWindows: OnsetSlice[][] = [];
-    if (rhWindow.length > 0) handWindows.push(rhWindow);
-    if (lhWindow.length > 0) handWindows.push(lhWindow);
+    if (practiceMode === "lh-only") {
+      rhWin.length = 0;
+    } else {
+      fillWindowSlices(rhSlicesByMeasure, M, boundaryTick, boundaryMeasure, rhWin);
+    }
+    if (practiceMode === "rh-only") {
+      lhWin.length = 0;
+    } else {
+      fillWindowSlices(lhSlicesByMeasure, M, boundaryTick, boundaryMeasure, lhWin);
+    }
 
     let d1 = 0;
     let d2 = 0;
     let d4 = 0;
     const reasonTags: string[] = [];
 
-    const shiftTimesByHand: { RH: number[]; LH: number[] } = { RH: [], LH: [] };
-    const shiftDeltasByHand: { RH: number[]; LH: number[] } = { RH: [], LH: [] };
+    rhShiftTimes.length = 0;
+    lhShiftTimes.length = 0;
+    rhShiftDeltas.length = 0;
+    lhShiftDeltas.length = 0;
 
-    for (const win of handWindows) {
+    for (let handPass = 0; handPass < 2; handPass++) {
+      const win = handPass === 0 ? rhWin : lhWin;
+      if (win.length === 0) continue;
+      const shiftTimes = handPass === 0 ? rhShiftTimes : lhShiftTimes;
+      const shiftDeltas = handPass === 0 ? rhShiftDeltas : lhShiftDeltas;
       let maxHeld = 0;
+
       for (let k = 0; k < win.length; k++) {
         const curr = win[k];
         const prev = k > 0 ? win[k - 1] : null;
         const dt = prev ? Math.max(0.05, curr.onsetSec - prev.onsetSec) : 0.5;
 
-        const cues = cuesBySliceId.get(curr.sliceId);
+        const cues = cuesBySliceId.size > 0 ? cuesBySliceId.get(curr.sliceId) : undefined;
         if (cues) {
           for (let c = 0; c < cues.length; c++) {
             const h = cueHazardScore(cues[c], dt);
@@ -403,30 +449,31 @@ function computeChunkJunctions(
               reasonTags.push("unreachable-span");
             }
             if (cues[c].type === "position-shift") {
-              shiftTimesByHand[curr.hand].push(curr.onsetSec);
+              shiftTimes.push(curr.onsetSec);
             }
           }
         }
 
         if (prev && curr.notes.length > 0 && prev.notes.length > 0) {
-          const prevF = getSliceFingers(prev, solveResult.fingerByNoteUid);
-          const currF = getSliceFingers(curr, solveResult.fingerByNoteUid);
+          const prevF = fillSliceFingers(prev, solveResult.fingerByNoteUid, scratchPrevF);
+          const currF = fillSliceFingers(curr, solveResult.fingerByNoteUid, scratchCurrF);
           const prevRoot = computeHandRoot(prev.notes, prevF, curr.hand);
           const currRoot = computeHandRoot(curr.notes, currF, curr.hand);
           const signedShift = currRoot - prevRoot;
           const absShift = Math.abs(signedShift);
           const vel = absShift / dt;
 
-          const prevB = computeSliceBounds(prev);
-          const currB = computeSliceBounds(curr);
-          const noOverlap = currB.minMidi > prevB.maxMidi || currB.maxMidi < prevB.minMidi;
+          const noOverlap =
+            getMinMidi(curr) > getMaxMidi(prev) || getMaxMidi(curr) < getMinMidi(prev);
           const isHpBoundary = hpStartSliceIds.has(curr.sliceId);
-          const leapScore = clamp01(vel / 35 + ((noOverlap || isHpBoundary) && absShift >= 2 ? 0.25 : 0));
+          const leapScore = clamp01(
+            vel / 35 + ((noOverlap || isHpBoundary) && absShift >= 2 ? 0.25 : 0),
+          );
           if (leapScore > d2) d2 = leapScore;
 
           if (absShift >= 2.5) {
-            shiftTimesByHand[curr.hand].push(curr.onsetSec);
-            shiftDeltasByHand[curr.hand].push(signedShift);
+            shiftTimes.push(curr.onsetSec);
+            shiftDeltas.push(signedShift);
           }
         }
 
@@ -444,14 +491,14 @@ function computeChunkJunctions(
     let d3 = 0;
     if (practiceMode === "both") {
       let dualShift = false;
-      for (const tR of shiftTimesByHand.RH) {
-        for (const tL of shiftTimesByHand.LH) {
-          if (Math.abs(tR - tL) <= 0.25) {
+      for (let r = 0; r < rhShiftTimes.length && !dualShift; r++) {
+        const tR = rhShiftTimes[r];
+        for (let l = 0; l < lhShiftTimes.length; l++) {
+          if (Math.abs(tR - lhShiftTimes[l]) <= 0.25) {
             dualShift = true;
             break;
           }
         }
-        if (dualShift) break;
       }
       if (dualShift) {
         d3 += 0.7;
@@ -459,17 +506,17 @@ function computeChunkJunctions(
       }
 
       // Check polyrhythm / non-integer beat onset ratio at boundary measure
-      const rCount = rhSlicesByMeasure[boundaryMeasure]?.length ?? 0;
-      const lCount = lhSlicesByMeasure[boundaryMeasure]?.length ?? 0;
+      const rCount = rhSlicesByMeasure[boundaryMeasure].length;
+      const lCount = lhSlicesByMeasure[boundaryMeasure].length;
       if (rCount >= 2 && lCount >= 2 && Math.max(rCount, lCount) % Math.min(rCount, lCount) !== 0) {
         d3 += 0.3;
         reasonTags.push("polyrhythm-coupling");
       }
 
       // Asymmetric parallel leap
-      if (shiftDeltasByHand.RH.length > 0 && shiftDeltasByHand.LH.length > 0) {
-        const dR = shiftDeltasByHand.RH[0];
-        const dL = shiftDeltasByHand.LH[0];
+      if (rhShiftDeltas.length > 0 && lhShiftDeltas.length > 0) {
+        const dR = rhShiftDeltas[0];
+        const dL = lhShiftDeltas[0];
         if (dR * dL > 0 && Math.abs(Math.abs(dR) - Math.abs(dL)) >= 2) {
           d3 += 0.2;
         }
@@ -479,18 +526,19 @@ function computeChunkJunctions(
 
     // D5: SwitchPoint interference
     let d5 = 0;
-    const spMatches = [
-      ...(switchByMeasure.get(boundaryMeasure) ?? []),
-      ...(rightChunk.hasAnacrusisLeadIn && boundaryMeasure + 1 < M
-        ? (switchByMeasure.get(boundaryMeasure + 1) ?? [])
-        : []),
-    ];
-    if (spMatches.length > 0) {
-      const sp = spMatches[0];
-      d5 = clamp01(
-        0.65 + 0.08 * sp.priorSharedMeasures + 0.05 * sp.alternateBranchLabels.length,
-      );
-      reasonTags.push("switch-point");
+    if (switchByMeasure.size > 0) {
+      const spListA = switchByMeasure.get(boundaryMeasure);
+      const spListB =
+        rightChunk.hasAnacrusisLeadIn && boundaryMeasure + 1 < M
+          ? switchByMeasure.get(boundaryMeasure + 1)
+          : undefined;
+      const sp = spListA?.[0] ?? spListB?.[0];
+      if (sp) {
+        d5 = clamp01(
+          0.65 + 0.08 * sp.priorSharedMeasures + 0.05 * sp.alternateBranchLabels.length,
+        );
+        reasonTags.push("switch-point");
+      }
     }
 
     const rawPrior = clamp01(0.28 * d1 + 0.2 * d2 + 0.22 * d3 + 0.1 * d4 + 0.2 * d5);
