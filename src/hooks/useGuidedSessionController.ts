@@ -23,6 +23,26 @@ import {
 } from "../guided/acousticProfile";
 import { attributeContinuousBout, type SwitchPointSpec } from "../guided/boundedAttribution";
 import {
+  buildLinkedVerificationSpan,
+  completeBridgeLinkedVerification,
+  createBridgeWindowState,
+  createEmpiricalJunctionTracker,
+  deriveBridgeHandPositionPreview,
+  isEmpiricalJunctionFault,
+  recordBridgeWindowPass,
+  recordEmpiricalJunctionOutcome,
+  resolveBridgeWindowSpan,
+  skipBridgeWindow,
+  type BridgeHandPositionPreview,
+} from "../guided/bridgeWindow";
+import {
+  buildColdStartProbeItems,
+  computeColdProbeIsCrossDay,
+  computeColdProbeSpan,
+  evaluateColdStartProbeOutcome,
+  isColdProbeLocallyUnlocked,
+} from "../guided/coldStartProbe";
+import {
   SCAFFOLDING_PEEK_DURATION_MS,
   collectL2PreservedFingeringTargets,
   createPeekKeyExemptionPredicate,
@@ -221,6 +241,10 @@ export function useGuidedSessionController({
   const schedulerState = useGuidedSessionStore((s) => s.schedulerState);
   const piecePracticeState = useGuidedSessionStore((s) => s.piecePracticeState);
   const overspeedProbeEnabled = useGuidedSessionStore((s) => s.overspeedProbeEnabled);
+  const blindColdProbeEnabled = useGuidedSessionStore((s) => s.blindColdProbeEnabled);
+  const blindPeekUntilMs = useGuidedSessionStore((s) => s.blindPeekUntilMs);
+  const bridgeWindowState = useGuidedSessionStore((s) => s.bridgeWindowState);
+  const lastProbeResult = useGuidedSessionStore((s) => s.lastProbeResult);
   const scaffoldingPreference = useGuidedSessionStore((s) => s.scaffoldingPreference);
   const l3SilentBeatEnabled = useGuidedSessionStore((s) => s.l3SilentBeatEnabled);
   const scaffoldingPeekUntilMs = useGuidedSessionStore((s) => s.scaffoldingPeekUntilMs);
@@ -245,11 +269,16 @@ export function useGuidedSessionController({
   const routerRef = useRef(createPianoCommandRouter());
   const previewTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
   const peekTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+  const peekExemptTimestampsRef = useRef<Set<number>>(new Set());
+  const empiricalTrackerRef = useRef(createEmpiricalJunctionTracker());
   const peekStrikeTimestampsRef = useRef<number[]>([]);
   const previewTokenRef = useRef(0);
   const autoPreviewFiredKeyRef = useRef<string | null>(null);
   const seenChunksInSessionRef = useRef<Set<string>>(new Set());
   const eventSeqRef = useRef(0);
+  const startContinuousChunkPlayRef = useRef<
+    (chunk: MotorChunk, plannedItem?: PlannedQueueItem | null) => void
+  >(() => {});
   const activeBoutCtxRef = useRef<{
     chunk: MotorChunk;
     plannedItem: PlannedQueueItem | null;
@@ -262,6 +291,8 @@ export function useGuidedSessionController({
     l3RelaxedDrift: boolean;
     startedAtMs: number;
     anchor: PlaybackClockAnchor | null;
+    isLinkedVerify?: boolean;
+    switchPointSpec?: SwitchPointSpec;
   } | null>(null);
   const [, setTransitionTickMs] = useState<number>(() => nowMs());
 
@@ -531,57 +562,75 @@ export function useGuidedSessionController({
           startScoreSec: 0,
           endScoreSec: 1,
           countInBeats: countInEnabled ? undefined : 0,
+          switchPointSpec: undefined as SwitchPointSpec | undefined,
+          isLinkedVerify: false,
+        };
+      }
+
+      const curBridge = useGuidedSessionStore.getState().bridgeWindowState;
+      if (
+        plannedItem?.boutKind === "bridge" &&
+        curBridge &&
+        curBridge.phase === "linked-verify"
+      ) {
+        const linked = buildLinkedVerificationSpan(
+          scoreDoc,
+          practiceSteps,
+          curBridge.leftChunk,
+          curBridge.rightChunk,
+        );
+        return {
+          expectedSteps: linked.steps,
+          startScoreSec: linked.startScoreSec,
+          endScoreSec: linked.endScoreSec,
+          countInBeats: countInEnabled ? undefined : 0,
+          switchPointSpec: undefined as SwitchPointSpec | undefined,
+          isLinkedVerify: true,
         };
       }
 
       if (plannedItem?.boutKind === "bridge" && plannedItem.junction) {
-        const bw = plannedItem.junction.bridgeWindowSteps;
-        const bridgeSteps = practiceSteps.filter(
-          (s) => s.stepIndex >= bw.startStepIndex && s.stepIndex <= bw.endStepIndex,
-        );
-        const steps =
-          bridgeSteps.length > 0 ? bridgeSteps : getStepsForChunk(scoreDoc, practiceSteps, chunk);
-        const firstStep = steps[0];
-        const lastStep = steps[steps.length - 1];
-        const bounds = resolveChunkBounds(scoreDoc, chunk);
-        const startScoreSec = firstStep ? firstStep.onsetSec : bounds.startScoreSec;
-        const endScoreSec = lastStep
-          ? Math.max(startScoreSec + 0.1, lastStep.onsetSec + Math.max(0.25, lastStep.expectedDurationSec))
-          : bounds.endScoreSec;
+        const leftChunk =
+          motorChunks.find((c) => c.chunkId === plannedItem.junction!.leftChunkId) ?? chunk;
+        const rightChunk =
+          motorChunks.find((c) => c.chunkId === plannedItem.junction!.rightChunkId) ?? chunk;
+        const span = resolveBridgeWindowSpan({
+          scoreDoc,
+          practiceSteps,
+          junction: plannedItem.junction,
+          leftChunk,
+          rightChunk,
+        });
         return {
-          expectedSteps: steps,
-          startScoreSec,
-          endScoreSec,
-          countInBeats: 2,
+          expectedSteps: span.steps.length > 0 ? span.steps : getStepsForChunk(scoreDoc, practiceSteps, chunk),
+          startScoreSec: span.startScoreSec,
+          endScoreSec: span.endScoreSec,
+          countInBeats: span.countInBeats,
+          switchPointSpec: undefined as SwitchPointSpec | undefined,
+          isLinkedVerify: false,
         };
       }
 
-      if (plannedItem?.boutKind === "cold-probe" && plannedItem.cue && plannedItem.probeEndCoord) {
-        const startTick = coordToTick(scoreDoc, plannedItem.cue.coord);
-        const endTick = coordToTick(scoreDoc, plannedItem.probeEndCoord);
-        const probeSteps = practiceSteps.filter(
-          (s) => s.onsetTick >= startTick - 1e-6 && s.onsetTick < endTick - 1e-6,
-        );
+      if (plannedItem?.boutKind === "cold-probe" && plannedItem.cue) {
+        const probeSpan = computeColdProbeSpan({
+          cue: plannedItem.cue,
+          allCues: performanceCues,
+          motorChunks,
+          passageClusters,
+          scoreDoc,
+          practiceSteps,
+        });
         const steps =
-          probeSteps.length > 0 ? probeSteps : getStepsForChunk(scoreDoc, practiceSteps, chunk);
-        const startTl = scoreDoc.measureTimelines[plannedItem.cue.measureIndex];
-        const endMeasureIdx = Math.max(
-          plannedItem.cue.measureIndex,
-          plannedItem.probeEndCoord.beatNum === 0 && plannedItem.probeEndCoord.measureIndex > 0
-            ? plannedItem.probeEndCoord.measureIndex - 1
-            : plannedItem.probeEndCoord.measureIndex,
-        );
-        const endTl = scoreDoc.measureTimelines[endMeasureIdx];
-        const startScoreSec = steps[0]?.onsetSec ?? startTl?.startSec ?? 0;
-        const endScoreSec = Math.max(
-          startScoreSec + 0.1,
-          endTl?.endSec ?? startScoreSec + 2,
-        );
+          probeSpan.expectedSteps.length > 0
+            ? probeSpan.expectedSteps
+            : getStepsForChunk(scoreDoc, practiceSteps, chunk);
         return {
           expectedSteps: steps,
-          startScoreSec,
-          endScoreSec,
-          countInBeats: undefined, // 1-measure Count-In for cold-start probe
+          startScoreSec: probeSpan.startScoreSec,
+          endScoreSec: probeSpan.endScoreSec,
+          countInBeats: probeSpan.countInBeats,
+          switchPointSpec: probeSpan.switchPointSpec,
+          isLinkedVerify: false,
         };
       }
 
@@ -595,9 +644,11 @@ export function useGuidedSessionController({
         startScoreSec: playStartSec,
         endScoreSec: safeEndSec,
         countInBeats: countInEnabled ? undefined : 0,
+        switchPointSpec: undefined as SwitchPointSpec | undefined,
+        isLinkedVerify: false,
       };
     },
-    [scoreDoc, practiceSteps, countInEnabled],
+    [scoreDoc, practiceSteps, countInEnabled, motorChunks, performanceCues, passageClusters],
   );
 
   const finalizeContinuousBout = useCallback(() => {
@@ -623,28 +674,39 @@ export function useGuidedSessionController({
       : [];
     resetMidiCapture();
 
-    let switchPoint: SwitchPointSpec | undefined;
-    for (const cluster of passageClusters) {
-      for (const inst of cluster.instances) {
-        if (
-          inst.switchPoint &&
-          spanContains(inst.startCoord, inst.endCoord, ctx.chunk.startCoord, ctx.chunk.endCoord)
-        ) {
-          switchPoint = {
-            startScoreSec:
-              scoreDoc.measureTimelines[inst.switchPoint.measureIndex]?.startSec ?? ctx.startScoreSec,
-            alternateBranches: inst.switchPoint.alternateBranchMidis.map((midis, idx) => ({
-              branchId: inst.switchPoint!.alternateBranchLabels[idx] ?? `branch-${idx}`,
-              stepMidis: [midis],
-            })),
-          };
-          break;
+    let switchPoint: SwitchPointSpec | undefined = ctx.switchPointSpec;
+    if (!switchPoint) {
+      for (const cluster of passageClusters) {
+        for (const inst of cluster.instances) {
+          if (
+            inst.switchPoint &&
+            inst.switchPoint.alternateBranchMidis.length > 0 &&
+            spanContains(inst.startCoord, inst.endCoord, ctx.chunk.startCoord, ctx.chunk.endCoord)
+          ) {
+            switchPoint = {
+              startScoreSec:
+                scoreDoc.measureTimelines[inst.switchPoint.measureIndex]?.startSec ?? ctx.startScoreSec,
+              alternateBranches: [
+                {
+                  branchId: inst.switchPoint.alternateBranchLabels[0] ?? inst.switchPoint.switchId,
+                  stepMidis: inst.switchPoint.alternateBranchMidis,
+                },
+              ],
+            };
+            break;
+          }
         }
       }
     }
 
     const peekTimestamps = peekStrikeTimestampsRef.current.splice(0);
     clearPeekTimer();
+    const scaffoldingExempt = createPeekKeyExemptionPredicate(peekTimestamps);
+    const isExemptPeekKey = (ev: MidiInputEvent) =>
+      Boolean(scaffoldingExempt?.(ev)) ||
+      (ev.type !== "sustain" &&
+        ev.midi === 23 &&
+        peekExemptTimestampsRef.current.has(ev.timeStampMs));
 
     const attr = attributeContinuousBout({
       clockAnchor: anchor,
@@ -654,7 +716,7 @@ export function useGuidedSessionController({
       practiceMode: ctx.practiceMode,
       junctionBoundaryCoord: ctx.plannedItem?.junction?.boundaryCoord,
       junctionStepIndex: ctx.plannedItem?.junction?.bridgeWindowSteps.junctionStepIndex,
-      isExemptPeekKey: createPeekKeyExemptionPredicate(peekTimestamps),
+      isExemptPeekKey,
       switchPoint,
       l3RelaxedDrift: ctx.l3RelaxedDrift,
     });
@@ -688,21 +750,29 @@ export function useGuidedSessionController({
     const prevUnit = cur.piecePracticeState?.chunkStates[ctx.chunk.chunkId];
     const isFirstChunkVisitInSession = !seenChunksInSessionRef.current.has(ctx.chunk.chunkId);
     seenChunksInSessionRef.current.add(ctx.chunk.chunkId);
+    const boutKind = ctx.plannedItem?.boutKind ?? "chunk";
     const crossedSleepGate =
       Boolean(prevUnit?.lastSleepGateDateKey && prevUnit.lastSleepGateDateKey < localDateKey);
     const wasColdFirstPass =
-      Boolean(ctx.plannedItem?.isColdFirstPass) ||
-      (crossedSleepGate && isFirstChunkVisitInSession);
+      boutKind === "cold-probe"
+        ? computeColdProbeIsCrossDay(prevUnit, t, localDateKey)
+        : Boolean(ctx.plannedItem?.isColdFirstPass) ||
+          (crossedSleepGate && isFirstChunkVisitInSession);
 
-    const boutKind = ctx.plannedItem?.boutKind ?? "chunk";
+    const activeBridgeState = cur.bridgeWindowState;
+    const isLinkedVerifyBout = Boolean(ctx.isLinkedVerify && activeBridgeState?.phase === "linked-verify");
     const endCoord =
       boutKind === "cold-probe" && ctx.plannedItem?.probeEndCoord
         ? ctx.plannedItem.probeEndCoord
-        : ctx.chunk.endCoord;
+        : isLinkedVerifyBout && activeBridgeState
+          ? activeBridgeState.rightChunk.endCoord
+          : ctx.chunk.endCoord;
     const startCoord =
       boutKind === "cold-probe" && ctx.plannedItem?.cue
         ? ctx.plannedItem.cue.coord
-        : ctx.chunk.startCoord;
+        : isLinkedVerifyBout && activeBridgeState
+          ? activeBridgeState.leftChunk.startCoord
+          : ctx.chunk.startCoord;
 
     const scaffoldingLevel: 0 | 1 | 2 | 3 = ctx.scaffoldingLevel;
 
@@ -735,23 +805,110 @@ export function useGuidedSessionController({
       measureFaultCounts: attr.measureFaultCounts,
     };
 
+    // Persist PracticeEvent & update derivedSnapshots asynchronously, while projecting immediately
+    const commitEvent = () => {
+      if (practiceStorage && activePieceProfile) {
+        const prevEventsPromise = practiceStorage.listPracticeEvents(activePieceProfile.pieceId);
+        const updatedProfile: PieceProfile = {
+          ...activePieceProfile,
+          lastPracticedAtMs: t,
+          bestStableSpeed: Math.max(
+            activePieceProfile.bestStableSpeed ?? 0,
+            autoGrade >= 3 ? roundSpeed(ctx.speedMultiplier) : 0,
+          ),
+        };
+        void practiceStorage
+          .commit({
+            practiceEvents: [newEvent],
+            pieceProfiles: [updatedProfile],
+          })
+          .then(async () => {
+            const allEvents = await prevEventsPromise;
+            const merged = allEvents.some((e) => e.eventId === newEvent.eventId)
+              ? allEvents
+              : [...allEvents, newEvent];
+            const nextState = reducePiecePracticeState(merged, {
+              pieceId: activePieceProfile.pieceId,
+              chunks: motorChunks,
+              junctions: chunkJunctions,
+              chunkOverrides: activePieceProfile.chunkOverrides,
+              nowTimestampMs: t,
+              nowLocalDateKey: localDateKey,
+            });
+            await writeDerivedSnapshot(practiceStorage, activePieceProfile.pieceId, nextState);
+            useGuidedSessionStore.getState().setPiecePracticeState(nextState);
+          })
+          .catch(() => undefined);
+      }
+    };
+
+    // Bridge Window multi-pass loop -> automatic speed restoration & 1 linked verification pass
+    if (boutKind === "bridge" && activeBridgeState) {
+      if (activeBridgeState.phase === "bridging") {
+        const nextBridge = recordBridgeWindowPass(activeBridgeState, {
+          attribution: attr,
+          nowMs: t,
+        });
+        commitEvent();
+        cur.setLastPersistedEvent(newEvent);
+        if (nextBridge.phase === "bridging") {
+          cur.setBridgeWindowState(nextBridge);
+          cur.setCommandNotice(
+            nextBridge.lastSlipNotice ??
+              `Bridge Window 顺畅通过 ${nextBridge.smoothPassesDone}/${nextBridge.requiredSmoothPasses}（2 拍 Count-In 继续）`,
+          );
+          startContinuousChunkPlayRef.current(ctx.chunk, ctx.plannedItem);
+          return;
+        }
+        // Exited bridging -> restore originalSpeed & launch 1 full linked two-chunk verification pass
+        if (playbackEngineRef.current) {
+          playbackEngineRef.current.setSpeed(nextBridge.originalSpeed);
+          onChangePlaybackSpeed?.(nextBridge.originalSpeed);
+        }
+        cur.setBridgeWindowState(nextBridge);
+        cur.setCommandNotice("Bridge Window 达标退出 · 自动恢复原速进入双块联排检验");
+        startContinuousChunkPlayRef.current(ctx.chunk, ctx.plannedItem);
+        return;
+      }
+
+      if (activeBridgeState.phase === "linked-verify") {
+        completeBridgeLinkedVerification(activeBridgeState);
+        cur.setBridgeWindowState(null);
+      }
+    }
+
     // Update MotorScheduler
     let nextScheduler = cur.schedulerState;
     let insertRescueItem: PlannedQueueItem | null = null;
     let enterMacroRest = false;
+
+    const hasPlayedNotes = midiEvents.some((e) => e.type === "noteon");
+    const adjacentJunctions = chunkJunctions.filter(
+      (j) => j.leftChunkId === ctx.chunk.chunkId || j.rightChunkId === ctx.chunk.chunkId,
+    );
+    const faultedAdjacentJunction = hasPlayedNotes
+      ? adjacentJunctions.find((junc) =>
+          isEmpiricalJunctionFault({
+            attribution: attr,
+            junction: junc,
+            expectedSteps: ctx.expectedSteps,
+          }),
+        )
+      : undefined;
 
     if (nextScheduler) {
       const faultedSteps: number[] = [];
       for (const missed of attr.missedNotes) faultedSteps.push(missed.stepIndex);
       for (const brk of attr.hesitationBreaks) faultedSteps.push(brk.stepIndex);
       const boundaryFault =
+        Boolean(faultedAdjacentJunction) ||
         attr.fluency.junctionHesitationRatio > 1.6 ||
         attr.hesitationBreaks.some((b) => b.isJunction);
 
       nextScheduler = recordSchedulerBoutOutcome(nextScheduler, {
         chunkId: ctx.chunk.chunkId,
         boutKind,
-        junction: ctx.plannedItem?.junction,
+        junction: ctx.plannedItem?.junction ?? faultedAdjacentJunction,
         practiceMode: ctx.practiceMode,
         speedMultiplier: ctx.speedMultiplier,
         grade: autoGrade,
@@ -769,17 +926,25 @@ export function useGuidedSessionController({
 
       const updatedUnit = nextScheduler.units[ctx.chunk.chunkId];
       if (updatedUnit?.activeRescue) {
+        const isBridgeRescue = updatedUnit.activeRescue.kind === "bridge";
+        const bridgeBaseSpeed = isBridgeRescue
+          ? Math.max(updatedUnit.activeRescue.preRescueSpeed, ctx.speedMultiplier)
+          : updatedUnit.activeRescue.preRescueSpeed;
+        const rescueTargetSpeed = isBridgeRescue
+          ? Math.max(0.45, roundSpeed(bridgeBaseSpeed * 0.88))
+          : updatedUnit.activeRescue.targetSpeed;
         insertRescueItem = {
           itemId: `rescue-${seq}-${ctx.chunk.chunkId}`,
           segment: "middle-build",
-          boutKind: updatedUnit.activeRescue.kind === "bridge" ? "bridge" : "chunk",
+          boutKind: isBridgeRescue ? "bridge" : "chunk",
           chunk: ctx.chunk,
           ...(updatedUnit.activeRescue.junction
             ? { junction: updatedUnit.activeRescue.junction }
             : {}),
           skipStage0: updatedUnit.activeRescue.kind !== "waiting-rescue",
           isColdFirstPass: false,
-          targetSpeed: updatedUnit.activeRescue.targetSpeed,
+          targetSpeed: rescueTargetSpeed,
+          ...(isBridgeRescue ? { preBridgeOriginalSpeed: bridgeBaseSpeed } : {}),
           estimatedDurationSec: 25,
         };
       } else if (shouldOfferEarlyMacroRest(nextScheduler, t)) {
@@ -788,40 +953,111 @@ export function useGuidedSessionController({
       }
     }
 
-    // Persist PracticeEvent & update derivedSnapshots asynchronously, while projecting immediately
-    if (practiceStorage && activePieceProfile) {
-      const prevEventsPromise = practiceStorage.listPracticeEvents(activePieceProfile.pieceId);
-      const updatedProfile: PieceProfile = {
-        ...activePieceProfile,
-        lastPracticedAtMs: t,
-        bestStableSpeed: Math.max(
-          activePieceProfile.bestStableSpeed ?? 0,
-          autoGrade >= 3 ? roundSpeed(ctx.speedMultiplier) : 0,
-        ),
-      };
-      void practiceStorage
-        .commit({
-          practiceEvents: [newEvent],
-          pieceProfiles: [updatedProfile],
-        })
-        .then(async () => {
-          const allEvents = await prevEventsPromise;
-          const merged = allEvents.some((e) => e.eventId === newEvent.eventId)
-            ? allEvents
-            : [...allEvents, newEvent];
-          const nextState = reducePiecePracticeState(merged, {
-            pieceId: activePieceProfile.pieceId,
-            chunks: motorChunks,
-            junctions: chunkJunctions,
-            chunkOverrides: activePieceProfile.chunkOverrides,
+    // Empirical 2-consecutive junction fault / hesitation (>1.6x & >=0.45s) auto-narrowing
+    if (boutKind === "chunk" && !insertRescueItem && hasPlayedNotes) {
+      for (const junc of adjacentJunctions) {
+        const empRes = recordEmpiricalJunctionOutcome(empiricalTrackerRef.current, {
+          junction: junc,
+          attribution: attr,
+          expectedSteps: ctx.expectedSteps,
+        });
+        empiricalTrackerRef.current = empRes.tracker;
+        if (empRes.triggered) {
+          const leftChunk = motorChunks.find((c) => c.chunkId === junc.leftChunkId) ?? ctx.chunk;
+          const activeSpeed = Math.max(0.45, roundSpeed(ctx.speedMultiplier * 0.88));
+          insertRescueItem = {
+            itemId: `emp-bridge-${seq}-${junc.junctionId}`,
+            segment: "middle-build",
+            boutKind: "bridge",
+            chunk: leftChunk,
+            junction: junc,
+            skipStage0: true,
+            isColdFirstPass: false,
+            targetSpeed: activeSpeed,
+            preBridgeOriginalSpeed: ctx.speedMultiplier,
+            estimatedDurationSec: 25,
+          };
+          break;
+        }
+      }
+    }
+
+    // Chaffin Cold-Start Probe evaluation & SwitchPoint divergence -> Bridge Window queue
+    let lastProbeResult = null as ReturnType<typeof evaluateColdStartProbeOutcome> | null;
+    let pauseForProbeFailure = false;
+    if (boutKind === "cold-probe" && ctx.plannedItem?.cue) {
+      const retriesUsed = cur.probeRetriesByItemId[ctx.plannedItem.itemId] ?? 0;
+      lastProbeResult = evaluateColdStartProbeOutcome({
+        attribution: attr,
+        clockAnchor: anchor,
+        expectedSteps: ctx.expectedSteps,
+        midiEvents,
+        measureTimelines: scoreDoc.measureTimelines,
+        cue: ctx.plannedItem.cue,
+        chunkJunctions,
+        retriesUsed,
+        isExemptPeekKey,
+      });
+
+      if (!lastProbeResult.passed) {
+        pauseForProbeFailure = true;
+        if (lastProbeResult.queuedBridgeJunction) {
+          const qJunc = lastProbeResult.queuedBridgeJunction;
+          const qLeft = motorChunks.find((c) => c.chunkId === qJunc.leftChunkId) ?? ctx.chunk;
+          insertRescueItem = {
+            itemId: `switch-bridge-${seq}-${qJunc.junctionId}`,
+            segment: "middle-build",
+            boutKind: "bridge",
+            chunk: qLeft,
+            junction: qJunc,
+            skipStage0: true,
+            isColdFirstPass: false,
+            targetSpeed: Math.max(0.5, roundSpeed(ctx.speedMultiplier * 0.88)),
+            estimatedDurationSec: 25,
+          };
+        }
+      }
+    }
+
+    // Dynamic cold-start probe unlock once >=1 MacroSection or >=3 contiguous MotorChunks finish Stage 0 + clean linking
+    if (boutKind === "chunk" && !cur.coldProbeSessionMode && autoGrade >= 3) {
+      cur.markChunkCompletedInSession(ctx.chunk.chunkId);
+      const afterCur = useGuidedSessionStore.getState();
+      const hasProbesAlready = afterCur.plannedQueue.some((i) => i.boutKind === "cold-probe");
+      const hasEnoughSessionContext =
+        afterCur.chunkQueue.length >= 3 || macroSections.length >= 2;
+      if (!hasProbesAlready && hasEnoughSessionContext) {
+        const completedSet = new Set(afterCur.inSessionCompletedChunkIds);
+        if (
+          isColdProbeLocallyUnlocked({
+            macroSections,
+            motorChunks,
+            piecePracticeState: afterCur.piecePracticeState,
+            inSessionCompletedChunkIds: completedSet,
+          })
+        ) {
+          const unlockedProbes = buildColdStartProbeItems({
+            macroSections,
+            motorChunks,
+            performanceCues,
+            passageClusters,
+            piecePracticeState: afterCur.piecePracticeState,
+            selectedMacroSectionId: afterCur.selectedMacroSectionId,
+            inSessionCompletedChunkIds: completedSet,
             nowTimestampMs: t,
             nowLocalDateKey: localDateKey,
+            count: afterCur.timeBoxMinutes === 15 ? 2 : 3,
+            seed: t & 0xffffffff,
+            manualMode: false,
           });
-          await writeDerivedSnapshot(practiceStorage, activePieceProfile.pieceId, nextState);
-          useGuidedSessionStore.getState().setPiecePracticeState(nextState);
-        })
-        .catch(() => undefined);
+          if (unlockedProbes.length >= 2) {
+            cur.appendClosingProbes(unlockedProbes);
+          }
+        }
+      }
     }
+
+    commitEvent();
 
     const gradeLabel =
       autoGrade === 4
@@ -832,13 +1068,20 @@ export function useGuidedSessionController({
             ? "Hard"
             : "Again";
     const pct = Math.round(attr.fluency.pitchAccuracy * 100);
-    const hasPlayedNotes = midiEvents.some((e) => e.type === "noteon");
+    const headlinePrefix =
+      boutKind === "cold-probe" && ctx.plannedItem?.cue
+        ? `冷启动检索「${ctx.plannedItem.cue.customLabel || ctx.plannedItem.cue.label}」`
+        : boutKind === "bridge"
+          ? `接缝桥接联排（m.${ctx.chunk.startMeasureIndex + 1}–${ctx.chunk.endMeasureIndex + 1}）`
+          : `块 ${ctx.chunk.index + 1}（m.${ctx.chunk.startMeasureIndex + 1}–${ctx.chunk.endMeasureIndex + 1}）`;
 
     cur.completePlayingBout(t, {
       persistedEvent: newEvent,
       schedulerState: nextScheduler,
       enterMacroRest,
       insertRescueItem,
+      lastProbeResult,
+      pauseForProbeFailure,
       summary: {
         boutKind,
         accuracy: attr.fluency.pitchAccuracy,
@@ -848,10 +1091,12 @@ export function useGuidedSessionController({
         canMarkHard: autoGrade >= 3,
         markedHard: false,
         ...(acousticProfile ? { acousticProfile } : {}),
-        headline: `块 ${ctx.chunk.index + 1}（m.${ctx.chunk.startMeasureIndex + 1}–${ctx.chunk.endMeasureIndex + 1}）${hasPlayedNotes ? `· 准确度 ${pct}% · ${gradeLabel}` : "回合结束"}`,
-        detail: enterMacroRest
-          ? "已完成开场穿插轮次，进入前期离键大休息（Early Macro-Rest）"
-          : "进入清醒微休息，静放双手以巩固动作记忆",
+        headline: `${headlinePrefix}${hasPlayedNotes ? ` · 准确度 ${pct}% · ${gradeLabel}` : "回合结束"}`,
+        detail: pauseForProbeFailure && lastProbeResult
+          ? lastProbeResult.reasonSummary
+          : enterMacroRest
+            ? "已完成开场穿插轮次，进入前期离键大休息（Early Macro-Rest）"
+            : "进入清醒微休息，静放双手以巩固动作记忆",
       },
     });
   }, [
@@ -867,6 +1112,11 @@ export function useGuidedSessionController({
     practiceStorage,
     motorChunks,
     chunkJunctions,
+    macroSections,
+    performanceCues,
+    practiceSteps,
+    playbackEngineRef,
+    onChangePlaybackSpeed,
     clearPeekTimer,
   ]);
 
@@ -876,6 +1126,52 @@ export function useGuidedSessionController({
       clearPeekTimer();
       peekStrikeTimestampsRef.current = [];
       const store = useGuidedSessionStore.getState();
+
+      // Ensure BridgeWindowState is initialized when entering a bridge item
+      let activeBridge = store.bridgeWindowState;
+      if (plannedItem?.boutKind === "bridge" && plannedItem.junction) {
+        if (!activeBridge || activeBridge.junction.junctionId !== plannedItem.junction.junctionId) {
+          const leftChunk =
+            motorChunks.find((c) => c.chunkId === plannedItem.junction!.leftChunkId) ?? chunk;
+          const rightChunk =
+            motorChunks.find((c) => c.chunkId === plannedItem.junction!.rightChunkId) ?? chunk;
+          const bSpan = resolveBridgeWindowSpan({
+            scoreDoc,
+            practiceSteps,
+            junction: plannedItem.junction,
+            leftChunk,
+            rightChunk,
+          });
+          const unitRt = store.schedulerState?.units[chunk.chunkId];
+          const baseSpeed =
+            plannedItem.preBridgeOriginalSpeed ??
+            unitRt?.activeRescue?.preRescueSpeed ??
+            unitRt?.workingSpeed ??
+            playbackSpeed;
+          const trigger = plannedItem.itemId.startsWith("switch-bridge-")
+            ? "switch-mismatch"
+            : plannedItem.itemId.startsWith("mid-bridge-")
+              ? "static-prewarm"
+              : "empirical-fault";
+          activeBridge = createBridgeWindowState({
+            trigger,
+            junction: plannedItem.junction,
+            leftChunk,
+            rightChunk,
+            span: bSpan,
+            originalSpeed: baseSpeed,
+            startedAtMs: nowMs(),
+            ...(plannedItem.targetSpeed && trigger !== "static-prewarm"
+              ? { speedFactor: plannedItem.targetSpeed / Math.max(0.25, baseSpeed) }
+              : {}),
+          });
+          store.setBridgeWindowState(activeBridge);
+        }
+      } else if (activeBridge && plannedItem?.boutKind !== "bridge") {
+        store.setBridgeWindowState(null);
+        activeBridge = null;
+      }
+
       const resolved = resolveBoutSpanAndSteps(chunk, plannedItem);
       const unitRuntime = store.schedulerState?.units[chunk.chunkId];
       const chunkPersistedState = store.piecePracticeState?.chunkStates[chunk.chunkId];
@@ -887,16 +1183,21 @@ export function useGuidedSessionController({
         l3SilentBeatEnabled: store.l3SilentBeatEnabled,
       });
       const hasChunkHistory = Boolean(
-        (chunkPersistedState && chunkPersistedState.reviewCount > 0) ||
+        (chunkPersistedState &&
+          chunkPersistedState.reviewCount > 0 &&
+          (store.sessionStartedAtMs === null ||
+            (chunkPersistedState.lastEventTimestampMs ?? 0) < store.sessionStartedAtMs)) ||
           plannedItem?.isClusterWarmStart,
       );
-      const speedFromScheduler = unitRuntime?.activeRescue
-        ? unitRuntime.activeRescue.targetSpeed
-        : unitRuntime && (hasChunkHistory || unitRuntime.speedUpgradesThisSession > 0)
-          ? unitRuntime.workingSpeed
-          : plannedItem && (hasChunkHistory || plannedItem.boutKind !== "chunk")
-            ? plannedItem.targetSpeed
-            : playbackSpeed;
+      const speedFromScheduler = activeBridge
+        ? activeBridge.activeSpeed
+        : unitRuntime?.activeRescue
+          ? unitRuntime.activeRescue.targetSpeed
+          : unitRuntime && (hasChunkHistory || unitRuntime.speedUpgradesThisSession > 0)
+            ? unitRuntime.workingSpeed
+            : plannedItem && (hasChunkHistory || plannedItem.boutKind !== "chunk")
+              ? plannedItem.targetSpeed
+              : playbackSpeed;
 
       if (Math.abs(speedFromScheduler - playbackEngineRef.current.getSpeed()) > 1e-4) {
         playbackEngineRef.current.setSpeed(speedFromScheduler);
@@ -923,6 +1224,8 @@ export function useGuidedSessionController({
         l3RelaxedDrift: boutScaffolding.useRelaxedDriftAttribution,
         startedAtMs: nowMs(),
         anchor: null,
+        isLinkedVerify: resolved.isLinkedVerify,
+        switchPointSpec: resolved.switchPointSpec,
       };
 
       const metronomeMode = boutScaffolding.useCountInOnlyMetronome ? "count-in-only" : "full";
@@ -959,9 +1262,12 @@ export function useGuidedSessionController({
       nowMs,
       setMidiCaptureMode,
       finalizeContinuousBout,
+      motorChunks,
+      practiceSteps,
       clearPeekTimer,
     ],
   );
+  startContinuousChunkPlayRef.current = startContinuousChunkPlay;
 
   const beginChunkStage0 = useCallback(
     (chunk: MotorChunk, steps: PracticeStep[], plannedItem: PlannedQueueItem | null = null) => {
@@ -1145,6 +1451,112 @@ export function useGuidedSessionController({
     launchFromPlan,
   ]);
 
+  const handleStartColdProbeDrill = useCallback(() => {
+    const store = useGuidedSessionStore.getState();
+    const t = nowMs();
+    const tz = resolveTimezoneOffsetMin(t);
+    const localDateKey = timestampToUtcDateKey(t, tz);
+    const probeItems = buildColdStartProbeItems({
+      macroSections,
+      motorChunks,
+      performanceCues,
+      passageClusters,
+      piecePracticeState: store.piecePracticeState,
+      selectedMacroSectionId: store.selectedMacroSectionId,
+      nowTimestampMs: t,
+      nowLocalDateKey: localDateKey,
+      count: 3,
+      seed: t & 0xffffffff,
+      manualMode: true,
+    });
+    if (probeItems.length === 0) return;
+
+    seenChunksInSessionRef.current = new Set();
+    const firstItem = probeItems[0];
+    const firstChunk = firstItem.chunk;
+    const firstSteps = getStepsForChunk(scoreDoc, practiceSteps, firstChunk);
+    playbackEngineRef.current?.stop();
+    store.startSession({
+      chunks: probeItems.map((i) => i.chunk),
+      plannedItems: probeItems,
+      schedulerState: null,
+      firstChunkSteps: firstSteps,
+      speedMultiplier: firstItem.targetSpeed,
+      nowMs: t,
+      startInStage0: false,
+      coldProbeSessionMode: true,
+    });
+    startContinuousChunkPlay(firstChunk, firstItem);
+  }, [
+    nowMs,
+    resolveTimezoneOffsetMin,
+    macroSections,
+    motorChunks,
+    performanceCues,
+    passageClusters,
+    scoreDoc,
+    practiceSteps,
+    playbackEngineRef,
+    startContinuousChunkPlay,
+  ]);
+
+  const triggerBlindPeek = useCallback(() => {
+    clearPeekTimer();
+    const t = nowMs();
+    useGuidedSessionStore.getState().setBlindPeekUntilMs(t + 1500);
+    peekTimerRef.current = globalThis.setTimeout(() => {
+      peekTimerRef.current = null;
+      useGuidedSessionStore.getState().setBlindPeekUntilMs(null);
+    }, 1500);
+  }, [clearPeekTimer, nowMs]);
+
+  const handleSkipBridgeWindow = useCallback(() => {
+    const store = useGuidedSessionStore.getState();
+    const bState = store.bridgeWindowState;
+    if (!bState) return;
+    const skipped = skipBridgeWindow(bState);
+    playbackEngineRef.current?.stop();
+    activeBoutCtxRef.current = null;
+    resetMidiCapture();
+
+    if (Math.abs(skipped.originalSpeed - (playbackEngineRef.current?.getSpeed() ?? skipped.originalSpeed)) > 1e-4) {
+      playbackEngineRef.current?.setSpeed(skipped.originalSpeed);
+      onChangePlaybackSpeed?.(skipped.originalSpeed);
+    }
+
+    if (store.schedulerState) {
+      const nextSched = skipCircuitBreaker(
+        store.schedulerState,
+        bState.leftChunk.chunkId,
+        nowMs(),
+      );
+      store.setSchedulerState(nextSched);
+    }
+
+    store.setBridgeWindowState(null);
+    store.setCommandNotice("已跳过当前 Bridge Window 接缝桥接");
+
+    const nextIdx = store.currentQueueIndex + 1;
+    if (nextIdx >= store.chunkQueue.length) {
+      store.advanceToNextChunk([], playbackSpeed, nowMs());
+      return;
+    }
+    const next = store.chunkQueue[nextIdx];
+    const nextPlanned = store.plannedQueue[nextIdx] ?? null;
+    const nextSteps = getStepsForChunk(scoreDoc, practiceSteps, next);
+    store.advanceToNextChunk(nextSteps, skipped.originalSpeed, nowMs());
+    beginChunkStage0(next, nextSteps, nextPlanned);
+  }, [
+    playbackEngineRef,
+    resetMidiCapture,
+    onChangePlaybackSpeed,
+    nowMs,
+    playbackSpeed,
+    scoreDoc,
+    practiceSteps,
+    beginChunkStage0,
+  ]);
+
   const handleMarkLastBoutHard = useCallback(async () => {
     const store = useGuidedSessionStore.getState();
     const ev = store.lastPersistedEvent;
@@ -1211,7 +1623,21 @@ export function useGuidedSessionController({
         return;
       }
 
+      if (action === "peek-reveal") {
+        triggerBlindPeek();
+        return;
+      }
+
       if (action === "toggle-view") {
+        const activeItem = store.plannedQueue[store.currentQueueIndex] ?? null;
+        if (
+          activeItem?.boutKind === "cold-probe" &&
+          store.blindColdProbeEnabled &&
+          (store.sessionPhase === "playing" || store.sessionPhase === "paused")
+        ) {
+          triggerBlindPeek();
+          return;
+        }
         store.toggleBottomSlotView();
         return;
       }
@@ -1235,6 +1661,29 @@ export function useGuidedSessionController({
         }
         const chunk = store.chunkQueue[store.currentQueueIndex];
         if (!chunk) return;
+        const plannedItem = store.plannedQueue[store.currentQueueIndex] ?? null;
+        if (
+          plannedItem?.boutKind === "cold-probe" &&
+          store.lastProbeResult &&
+          !store.lastProbeResult.passed
+        ) {
+          if (!store.lastProbeResult.canRetryA0) {
+            store.setCommandNotice("冷启动即时重测已用完 1 次，请按 C8 记录薄弱点并继续");
+            return;
+          }
+          store.incrementProbeRetry(plannedItem.itemId);
+          store.setLastProbeResult(null);
+          const steps = getStepsForChunk(scoreDoc, practiceSteps, chunk);
+          store.replayCurrentChunk(steps, plannedItem.targetSpeed, nowMs(), false);
+          startContinuousChunkPlay(chunk, plannedItem);
+          return;
+        }
+        if (plannedItem?.boutKind === "bridge") {
+          const steps = getStepsForChunk(scoreDoc, practiceSteps, chunk);
+          store.replayCurrentChunk(steps, plannedItem.targetSpeed, nowMs(), false);
+          startContinuousChunkPlay(chunk, plannedItem);
+          return;
+        }
         const steps = getStepsForChunk(scoreDoc, practiceSteps, chunk);
         store.replayCurrentChunk(steps, playbackSpeed, nowMs(), true);
         beginChunkStage0(chunk, steps, null);
@@ -1246,7 +1695,32 @@ export function useGuidedSessionController({
           handleStartSession();
           return;
         }
+        if (
+          (store.sessionPhase === "playing" || store.sessionPhase === "paused") &&
+          store.bridgeWindowState &&
+          (store.bridgeWindowState.phase === "bridging" ||
+            store.bridgeWindowState.phase === "linked-verify") &&
+          action === "continue-next"
+        ) {
+          handleSkipBridgeWindow();
+          return;
+        }
         if (store.sessionPhase === "paused") {
+          if (store.lastProbeResult && !store.lastProbeResult.passed) {
+            // C8 log-and-continue on failed cold-start probe
+            store.setLastProbeResult(null);
+            const nextIdx = store.currentQueueIndex + 1;
+            if (nextIdx >= store.chunkQueue.length) {
+              store.advanceToNextChunk([], playbackSpeed, nowMs());
+              return;
+            }
+            const next = store.chunkQueue[nextIdx];
+            const nextPlanned = store.plannedQueue[nextIdx] ?? null;
+            const nextSteps = getStepsForChunk(scoreDoc, practiceSteps, next);
+            store.advanceToNextChunk(nextSteps, playbackSpeed, nowMs());
+            beginChunkStage0(next, nextSteps, nextPlanned);
+            return;
+          }
           const resumeTarget = store.pausedFromPhase ?? "playing";
           store.resumePausedPlay(nowMs());
           const chunk = store.chunkQueue[store.currentQueueIndex];
@@ -1292,6 +1766,8 @@ export function useGuidedSessionController({
       nowMs,
       playbackEngineRef,
       stopAudiationPreview,
+      triggerBlindPeek,
+      handleSkipBridgeWindow,
       scoreDoc,
       practiceSteps,
       playbackSpeed,
@@ -1393,14 +1869,29 @@ export function useGuidedSessionController({
       const targetSteps =
         store.sessionPhase === "audiation" ? readyChunkSteps : activeChunkSteps;
       const firstTargetMidis = targetSteps[0]?.expectedMidis ?? [];
+      const activeItem = store.plannedQueue[store.currentQueueIndex] ?? null;
+      const allowActivePeek = Boolean(
+        activeItem?.boutKind === "cold-probe" && store.blindColdProbeEnabled,
+      );
+      const allowActiveBridgeSkip = Boolean(
+        store.bridgeWindowState &&
+          (store.bridgeWindowState.phase === "bridging" ||
+            store.bridgeWindowState.phase === "linked-verify"),
+      );
 
       const res = routerRef.current.routeMidi(event, {
         phase: store.sessionPhase,
         firstTargetMidis,
         chunkMidis: activeChunkMidis,
         cc64CommandEnabled: store.cc64CommandEnabled,
+        allowActivePeek,
+        allowActiveBridgeSkip,
         cuesObscured: scaffoldingPolicy.cuesObscured,
       });
+
+      if (res.peekDisabled) {
+        store.setCommandNotice("当前检索段落包含 B0，已自动禁用演奏态 B0 偷看（请用 F 键或屏幕按钮）");
+      }
 
       if (res.action === "peek-fingerings") {
         triggerScaffoldingPeek(event.timeStampMs);
@@ -1408,6 +1899,9 @@ export function useGuidedSessionController({
       }
 
       if (res.action !== "none") {
+        if (res.action === "peek-reveal" && event.type === "noteon") {
+          peekExemptTimestampsRef.current.add(event.timeStampMs);
+        }
         executeCommandAction(res.action);
         return { intercepted: true };
       }
@@ -1430,7 +1924,12 @@ export function useGuidedSessionController({
       if (store.studioMode !== "guided" || store.sessionPhase === "idle" || store.sessionPhase === "suspended") {
         return false;
       }
+      const activeItem = store.plannedQueue[store.currentQueueIndex] ?? null;
+      const allowActivePeek = Boolean(
+        activeItem?.boutKind === "cold-probe" && store.blindColdProbeEnabled,
+      );
       const action = routeKeyboardCommand(event, store.sessionPhase, {
+        allowActivePeek,
         cuesObscured: scaffoldingPolicy.cuesObscured,
       });
       if (action === "none") return false;
@@ -1712,6 +2211,75 @@ export function useGuidedSessionController({
           Math.max(0, macroRestDurationMs - Math.max(0, nowMs() - macroRestStartedAtMs)) / 1000,
         );
 
+  const activePlannedItem = plannedQueue[currentQueueIndex] ?? null;
+
+  const bridgeHandPreview = useMemo<BridgeHandPositionPreview | null>(() => {
+    if (
+      studioMode !== "guided" ||
+      !scoreDoc ||
+      (sessionPhase !== "playing" && sessionPhase !== "paused" && sessionPhase !== "audiation")
+    ) {
+      return null;
+    }
+    const targetBridge =
+      bridgeWindowState &&
+      (bridgeWindowState.phase === "bridging" || bridgeWindowState.phase === "linked-verify")
+        ? bridgeWindowState
+        : null;
+    if (targetBridge) {
+      return deriveBridgeHandPositionPreview({
+        scoreDoc,
+        solveResult,
+        span: targetBridge.span,
+        practiceMode: effectivePracticeMode,
+      });
+    }
+    if (activePlannedItem?.boutKind === "bridge" && activePlannedItem.junction) {
+      const j = activePlannedItem.junction;
+      const leftChunk = motorChunks.find((c) => c.chunkId === j.leftChunkId) ?? activeChunk;
+      const rightChunk = motorChunks.find((c) => c.chunkId === j.rightChunkId) ?? activeChunk;
+      if (!leftChunk || !rightChunk) return null;
+      const span = resolveBridgeWindowSpan({
+        scoreDoc,
+        practiceSteps,
+        junction: j,
+        leftChunk,
+        rightChunk,
+      });
+      return deriveBridgeHandPositionPreview({
+        scoreDoc,
+        solveResult,
+        span,
+        practiceMode: effectivePracticeMode,
+      });
+    }
+    return null;
+  }, [
+    studioMode,
+    scoreDoc,
+    sessionPhase,
+    bridgeWindowState,
+    solveResult,
+    effectivePracticeMode,
+    activePlannedItem,
+    motorChunks,
+    activeChunk,
+    practiceSteps,
+  ]);
+
+  const blindCurtainActive = Boolean(
+    studioMode === "guided" &&
+      blindColdProbeEnabled &&
+      activePlannedItem?.boutKind === "cold-probe" &&
+      (sessionPhase === "playing" || sessionPhase === "paused" || sessionPhase === "audiation"),
+  );
+  const blindPeeking = Boolean(
+    blindCurtainActive && blindPeekUntilMs !== null && nowMs() < blindPeekUntilMs,
+  );
+  const blindProbeLabel = activePlannedItem?.cue
+    ? `锚点：${activePlannedItem.cue.customLabel || activePlannedItem.cue.label}（第 ${activePlannedItem.cue.measureIndex + 1} 小节起）`
+    : null;
+
   const handleSkipCircuitBreaker = useCallback(() => {
     const store = useGuidedSessionStore.getState();
     if (!store.schedulerState || !activeChunk) return;
@@ -1741,6 +2309,13 @@ export function useGuidedSessionController({
     audiationPreviewMode,
     audiationImageryTimerEnabled,
     overspeedProbeEnabled,
+    blindColdProbeEnabled,
+    blindCurtainActive,
+    blindPeeking,
+    blindProbeLabel,
+    bridgeWindowState,
+    bridgeHandPreview,
+    lastProbeResult,
     scaffoldingPreference,
     l3SilentBeatEnabled,
     scaffoldingPolicy,
@@ -1784,6 +2359,8 @@ export function useGuidedSessionController({
       useGuidedSessionStore.getState().setAudiationImageryTimerEnabled(enabled),
     setOverspeedProbeEnabled: (enabled: boolean) =>
       useGuidedSessionStore.getState().setOverspeedProbeEnabled(enabled),
+    setBlindColdProbeEnabled: (enabled: boolean) =>
+      useGuidedSessionStore.getState().setBlindColdProbeEnabled(enabled),
     setScaffoldingPreference: (pref: ScaffoldingPreference) =>
       useGuidedSessionStore.getState().setScaffoldingPreference(pref),
     setL3SilentBeatEnabled: (enabled: boolean) =>
@@ -1794,6 +2371,9 @@ export function useGuidedSessionController({
 
     handleStartSession,
     handleStartQuickTriage,
+    handleStartColdProbeDrill,
+    triggerBlindPeek,
+    handleSkipBridgeWindow,
     handleMarkLastBoutHard,
     handleSkipCircuitBreaker,
     executeCommandAction,

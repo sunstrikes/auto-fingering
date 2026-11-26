@@ -2,6 +2,8 @@ import { create } from "zustand";
 import type { MotorChunk } from "../chunking/types";
 import type { PracticeMode, PracticeStep } from "../domain/types";
 import type { AcousticProfileResult } from "../guided/acousticProfile";
+import type { BridgeWindowState } from "../guided/bridgeWindow";
+import type { ColdStartProbeEvaluation } from "../guided/coldStartProbe";
 import type { ScaffoldingPreference } from "../guided/fadingScaffolding";
 import type { MotorGrade, PiecePracticeState } from "../guided/motorFsrs";
 import {
@@ -79,6 +81,7 @@ export interface StartGuidedSessionPayload {
   speedMultiplier: number;
   nowMs: number;
   startInStage0?: boolean;
+  coldProbeSessionMode?: boolean;
   plannedItems?: PlannedQueueItem[];
   schedulerState?: MotorSchedulerState | null;
   sessionId?: string;
@@ -91,6 +94,8 @@ export interface CompletePlayingBoutOptions {
   schedulerState?: MotorSchedulerState | null;
   enterMacroRest?: boolean;
   insertRescueItem?: PlannedQueueItem | null;
+  lastProbeResult?: ColdStartProbeEvaluation | null;
+  pauseForProbeFailure?: boolean;
 }
 
 export interface GuidedSessionState {
@@ -113,6 +118,13 @@ export interface GuidedSessionState {
   audiationPreviewMode: AudiationPreviewMode;
   audiationImageryTimerEnabled: boolean;
   overspeedProbeEnabled: boolean;
+  blindColdProbeEnabled: boolean;
+  blindPeekUntilMs: number | null;
+  coldProbeSessionMode: boolean;
+  bridgeWindowState: BridgeWindowState | null;
+  lastProbeResult: ColdStartProbeEvaluation | null;
+  inSessionCompletedChunkIds: string[];
+  probeRetriesByItemId: Record<string, number>;
   scaffoldingPreference: ScaffoldingPreference;
   l3SilentBeatEnabled: boolean;
   scaffoldingPeekUntilMs: number | null;
@@ -140,6 +152,13 @@ export interface GuidedSessionState {
   setAudiationPreviewMode: (mode: AudiationPreviewMode) => void;
   setAudiationImageryTimerEnabled: (enabled: boolean) => void;
   setOverspeedProbeEnabled: (enabled: boolean) => void;
+  setBlindColdProbeEnabled: (enabled: boolean) => void;
+  setBlindPeekUntilMs: (untilMs: number | null) => void;
+  setBridgeWindowState: (next: BridgeWindowState | null) => void;
+  setLastProbeResult: (next: ColdStartProbeEvaluation | null) => void;
+  markChunkCompletedInSession: (chunkId: string) => void;
+  incrementProbeRetry: (itemId: string) => void;
+  appendClosingProbes: (probeItems: PlannedQueueItem[]) => void;
   setScaffoldingPreference: (preference: ScaffoldingPreference) => void;
   setL3SilentBeatEnabled: (enabled: boolean) => void;
   setScaffoldingPeekUntilMs: (untilMs: number | null) => void;
@@ -199,6 +218,13 @@ const initialGuidedState = {
   audiationPreviewMode: "auto-unfamiliar" as AudiationPreviewMode,
   audiationImageryTimerEnabled: false,
   overspeedProbeEnabled: false,
+  blindColdProbeEnabled: false,
+  blindPeekUntilMs: null as number | null,
+  coldProbeSessionMode: false,
+  bridgeWindowState: null as BridgeWindowState | null,
+  lastProbeResult: null as ColdStartProbeEvaluation | null,
+  inSessionCompletedChunkIds: [] as string[],
+  probeRetriesByItemId: {} as Record<string, number>,
   scaffoldingPreference: "auto-fade" as ScaffoldingPreference,
   l3SilentBeatEnabled: true,
   scaffoldingPeekUntilMs: null as number | null,
@@ -272,6 +298,12 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       microRestState: null,
       macroRestStartedAtMs: null,
       audiationState: null,
+      blindPeekUntilMs: null,
+      coldProbeSessionMode: false,
+      bridgeWindowState: null,
+      lastProbeResult: null,
+      inSessionCompletedChunkIds: [],
+      probeRetriesByItemId: {},
       commandNotice: null,
       scaffoldingPeekUntilMs: null,
       bottomSlotView: "piano",
@@ -300,6 +332,38 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
     set({ audiationImageryTimerEnabled }),
 
   setOverspeedProbeEnabled: (overspeedProbeEnabled) => set({ overspeedProbeEnabled }),
+
+  setBlindColdProbeEnabled: (blindColdProbeEnabled) => set({ blindColdProbeEnabled }),
+
+  setBlindPeekUntilMs: (blindPeekUntilMs) => set({ blindPeekUntilMs }),
+
+  setBridgeWindowState: (bridgeWindowState) => set({ bridgeWindowState }),
+
+  setLastProbeResult: (lastProbeResult) => set({ lastProbeResult }),
+
+  markChunkCompletedInSession: (chunkId) =>
+    set((state) =>
+      state.inSessionCompletedChunkIds.includes(chunkId)
+        ? state
+        : { inSessionCompletedChunkIds: [...state.inSessionCompletedChunkIds, chunkId] },
+    ),
+
+  incrementProbeRetry: (itemId) =>
+    set((state) => ({
+      probeRetriesByItemId: {
+        ...state.probeRetriesByItemId,
+        [itemId]: (state.probeRetriesByItemId[itemId] ?? 0) + 1,
+      },
+    })),
+
+  appendClosingProbes: (probeItems) =>
+    set((state) => {
+      if (probeItems.length === 0) return state;
+      return {
+        chunkQueue: [...state.chunkQueue, ...probeItems.map((i) => i.chunk)],
+        plannedQueue: [...state.plannedQueue, ...probeItems],
+      };
+    }),
 
   setScaffoldingPreference: (scaffoldingPreference) => set({ scaffoldingPreference }),
 
@@ -349,6 +413,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
     speedMultiplier,
     nowMs,
     startInStage0 = true,
+    coldProbeSessionMode = false,
     plannedItems = [],
     schedulerState = null,
     sessionId,
@@ -387,6 +452,12 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       microRestState: null,
       macroRestStartedAtMs: null,
       audiationState: null,
+      blindPeekUntilMs: null,
+      coldProbeSessionMode,
+      bridgeWindowState: null,
+      lastProbeResult: null,
+      inSessionCompletedChunkIds: [],
+      probeRetriesByItemId: {},
       commandNotice: null,
       scaffoldingPeekUntilMs: null,
       lastBoutSummary: null,
@@ -453,12 +524,14 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
     }
 
     const enterMacroRest = Boolean(options?.enterMacroRest);
-    const microRestState = enterMacroRest
-      ? null
-      : createMicroRestState({
-          startedAtMs: nowMs,
-          durationSec: state.microRestDurationSec,
-        });
+    const pauseForProbeFailure = Boolean(options?.pauseForProbeFailure);
+    const microRestState =
+      enterMacroRest || pauseForProbeFailure
+        ? null
+        : createMicroRestState({
+            startedAtMs: nowMs,
+            durationSec: state.microRestDurationSec,
+          });
 
     const summaryPatch = options?.summary;
     const nextSummary: GuidedBoutSummary = {
@@ -492,16 +565,25 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
     };
 
     set({
-      sessionPhase: enterMacroRest ? "macro-rest" : "micro-rest",
-      pausedFromPhase: null,
+      sessionPhase: pauseForProbeFailure
+        ? "paused"
+        : enterMacroRest
+          ? "macro-rest"
+          : "micro-rest",
+      pausedFromPhase: pauseForProbeFailure ? "playing" : null,
+      bottomSlotView: pauseForProbeFailure ? "feedback" : state.bottomSlotView,
       chunkQueue: nextChunkQueue,
       plannedQueue: nextPlannedQueue,
-      microRestStartedAtMs: enterMacroRest ? null : nowMs,
+      microRestStartedAtMs: enterMacroRest || pauseForProbeFailure ? null : nowMs,
       microRestDurationMs: microRestState ? microRestState.durationMs : state.microRestDurationMs,
       microRestReminder: null,
       microRestState,
       macroRestStartedAtMs: enterMacroRest ? nowMs : null,
       audiationState: null,
+      blindPeekUntilMs: null,
+      ...(options?.lastProbeResult !== undefined
+        ? { lastProbeResult: options.lastProbeResult }
+        : { lastProbeResult: null }),
       chunkPassCountsById: {
         ...state.chunkPassCountsById,
         [chunk.chunkId]: prevPasses + 1,
@@ -513,7 +595,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
         ? { piecePracticeState: options.piecePracticeState }
         : {}),
       ...(options?.schedulerState !== undefined ? { schedulerState: options.schedulerState } : {}),
-      commandNotice: null,
+      commandNotice: pauseForProbeFailure ? (options?.lastProbeResult?.reasonSummary ?? null) : null,
       scaffoldingPeekUntilMs: null,
       lastBoutSummary: nextSummary,
     });
@@ -688,6 +770,8 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       microRestState: null,
       macroRestStartedAtMs: null,
       audiationState: null,
+      blindPeekUntilMs: null,
+      lastProbeResult: null,
       bottomSlotView: "piano",
       commandNotice: null,
       scaffoldingPeekUntilMs: null,
@@ -808,6 +892,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       audiationPreviewMode: state.audiationPreviewMode,
       audiationImageryTimerEnabled: state.audiationImageryTimerEnabled,
       overspeedProbeEnabled: state.overspeedProbeEnabled,
+      blindColdProbeEnabled: state.blindColdProbeEnabled,
       scaffoldingPreference: state.scaffoldingPreference,
       l3SilentBeatEnabled: state.l3SilentBeatEnabled,
       scaffoldingPeekUntilMs: null,

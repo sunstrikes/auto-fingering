@@ -1070,6 +1070,10 @@ export interface ScoreViewerProps {
   hasCueOverrides?: boolean;
   inspectedClusterInstance?: PassageInstance | null;
   inspectedClusterLabel?: string | null;
+  blindCurtainActive?: boolean;
+  blindPeeking?: boolean;
+  blindProbeLabel?: string | null;
+  onTriggerBlindPeek?: () => void;
   onLayoutModeChange?: (mode: ScoreLayoutMode) => void;
   onSelectMeasure?: (measureIndex: number) => void;
   onSelectNote?: (noteUid: string, anchorRect?: PopoverAnchorRect) => void;
@@ -1116,6 +1120,10 @@ export function ScoreViewer({
   hasCueOverrides = false,
   inspectedClusterInstance = null,
   inspectedClusterLabel = null,
+  blindCurtainActive = false,
+  blindPeeking = false,
+  blindProbeLabel = null,
+  onTriggerBlindPeek,
   onLayoutModeChange,
   onSelectMeasure,
   onSelectNote,
@@ -1635,6 +1643,42 @@ export function ScoreViewer({
             onClick={handleSurfaceClick}
             className={layoutMode === "horizontal" ? "min-w-full cursor-pointer" : "w-full cursor-pointer"}
           />
+
+          {blindCurtainActive && !blindPeeking && (
+            <div
+              data-testid="cold-probe-blind-curtain"
+              className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-lg bg-slate-900/95 p-6 text-center text-white backdrop-blur-xs"
+            >
+              <span className="rounded-full border border-teal-400/50 bg-teal-500/20 px-3 py-0.5 text-xs font-semibold text-teal-200">
+                Chaffin 盲考冷启动检索 · 乐谱已隐藏
+              </span>
+              <div className="text-sm font-semibold text-white">
+                {blindProbeLabel || "按 1 小节 Count-In 零助跑直接起弹"}
+              </div>
+              <p className="max-w-md text-xs text-slate-300">
+                随时按 B0 / F 键或下方按钮瞬时偷看 1.5s 乐谱与指法（不计入错音）。
+              </p>
+              {onTriggerBlindPeek && (
+                <button
+                  type="button"
+                  data-testid="cold-probe-peek-btn"
+                  onClick={onTriggerBlindPeek}
+                  className="min-h-[44px] min-w-[44px] rounded-lg border border-teal-300 bg-teal-600 px-4 py-2 text-xs font-semibold text-white hover:bg-teal-500"
+                >
+                  瞬时偷看乐谱与指法 1.5s (B0 / F)
+                </button>
+              )}
+            </div>
+          )}
+
+          {blindCurtainActive && blindPeeking && (
+            <div
+              data-testid="cold-probe-peek-active-badge"
+              className="pointer-events-none absolute top-2 right-2 z-20 rounded-full border border-amber-300 bg-amber-50/95 px-3 py-1 text-xs font-semibold text-amber-900 shadow-xs"
+            >
+              瞬时偷看中 · 1.5s（B0 / F 不计入错音）
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -2433,10 +2433,15 @@ export default function App({
             sessionPlan={guided.sessionPlan}
             timeBoxMinutes={guided.timeBoxMinutes}
             selectedMacroSectionId={guided.selectedMacroSectionId}
+            blindColdProbeEnabled={guided.blindColdProbeEnabled}
             onSelectTimeBox={guided.setTimeBoxMinutes}
             onSelectMacroSection={guided.setSelectedMacroSectionId}
+            onToggleBlindColdProbe={() =>
+              guided.setBlindColdProbeEnabled(!guided.blindColdProbeEnabled)
+            }
             onStartSession={guided.handleStartSession}
             onStartQuickTriage={guided.handleStartQuickTriage}
+            onStartColdProbeDrill={guided.handleStartColdProbeDrill}
             onBackToFreeStudio={guided.returnToFreeStudio}
           />
         )}
@@ -2450,6 +2455,16 @@ export default function App({
               className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-white px-3 py-1 text-xs"
             >
               <div className="flex flex-wrap items-center gap-2">
+                {guided.bridgeWindowState && (
+                  <span
+                    data-testid="guided-bridge-status"
+                    className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-950"
+                  >
+                    {guided.bridgeWindowState.phase === "linked-verify"
+                      ? `双块联排检验 · 恢复原速 ${guided.bridgeWindowState.activeSpeed.toFixed(2)}×`
+                      : `Bridge Window 接缝桥接 · 顺畅 ${guided.bridgeWindowState.smoothPassesDone}/${guided.bridgeWindowState.requiredSmoothPasses} · ${guided.bridgeWindowState.activeSpeed.toFixed(2)}×`}
+                  </span>
+                )}
                 <span
                   data-testid="guided-scaffolding-badge"
                   className="rounded-full border border-teal-300 bg-teal-50 px-2 py-0.5 text-[11px] font-semibold text-teal-900"
@@ -2506,6 +2521,16 @@ export default function App({
               </div>
 
               <div className="flex flex-wrap items-center gap-1.5">
+                {guided.bridgeWindowState && (
+                  <button
+                    type="button"
+                    data-testid="guided-skip-bridge-btn"
+                    onClick={guided.handleSkipBridgeWindow}
+                    className="min-h-[44px] min-w-[44px] rounded-lg border border-amber-400 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-950 hover:bg-amber-100"
+                  >
+                    跳过接缝桥接 (C8)
+                  </button>
+                )}
                 {guided.sessionPhase === "playing" && guided.scaffoldingPolicy.cuesObscured && (
                   <button
                     type="button"
@@ -3120,6 +3145,10 @@ export default function App({
               playbackState === "playing" ? null : chunking.inspectedClusterInstance
             }
             inspectedClusterLabel={chunking.inspectedClusterLabel}
+            blindCurtainActive={guided.blindCurtainActive}
+            blindPeeking={guided.blindPeeking}
+            blindProbeLabel={guided.blindProbeLabel}
+            onTriggerBlindPeek={guided.triggerBlindPeek}
             onLayoutModeChange={setLayoutMode}
             onSelectMeasure={handleSelectMeasure}
             onSelectNote={handleSelectNote}
@@ -3227,6 +3256,7 @@ export default function App({
           <GuidedBottomSlot
             sessionPhase={guided.sessionPhase}
             lastBoutSummary={guided.lastBoutSummary}
+            lastProbeResult={guided.lastProbeResult}
             audiationCue={guided.audiationCue}
             audiationState={guided.audiationState}
             imageryRemainingSec={
@@ -3298,6 +3328,7 @@ export default function App({
               : waitingState.holdProgress
           }
           commandKeyBadges={guided.commandKeyBadges}
+          bridgeHandPreview={guided.bridgeHandPreview}
           onSelectSlice={handleSelectSlice}
           onVirtualNoteOn={(midi, velocity = 96) =>
             handleMidiInputEvent(createLocalMidiNoteEvent("virtual", midi, velocity))
