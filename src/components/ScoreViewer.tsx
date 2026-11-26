@@ -1,7 +1,20 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { OpenSheetMusicDisplay, PointF2D, type Cursor } from "opensheetmusicdisplay";
-import type { CursorSyncTarget, PlaybackFrame } from "../audio/playbackEngine";
-import type { Finger, Hand, NoteEvent, ScoreCoord, ScoreDocument } from "../domain/types";
+import type { CursorSyncTarget, PlaybackClockAnchor, PlaybackFrame } from "../audio/playbackEngine";
+import type { MetronomeBeatEvent } from "../audio/metronome";
+import type { Finger, Hand, NoteEvent, PracticeStep, ScoreCoord, ScoreDocument } from "../domain/types";
+import type {
+  EhsActiveLookaheadPreset,
+  EhsController,
+  EhsFrameSnapshot,
+  EhsGhostOpacity,
+} from "../guided/ehsController";
+import {
+  createEhsOsmdOverlayApplier,
+  extractEhsOsmdGeometry,
+  type EhsExtractedGeometry,
+  type EhsVisualInspection,
+} from "./ehsOsmdOverlay";
 import type {
   ChunkJunction,
   MotorChunk,
@@ -61,6 +74,28 @@ export interface FadingScaffoldingVisual {
   preservedMeasureIndices: readonly number[];
 }
 
+export type { EhsVisualInspection } from "./ehsOsmdOverlay";
+
+export interface EhsScoreViewerRuntime {
+  enabled: boolean;
+  preset: EhsActiveLookaheadPreset;
+  ghostOpacity: EhsGhostOpacity;
+  autoStallFlashEnabled: boolean;
+  scaffoldingLevel: 0 | 1 | 2 | 3;
+  manualPeekActive: boolean;
+  peekActiveRef?: { current: boolean };
+  controller: EhsController;
+  practiceSteps: PracticeStep[];
+  speedMultiplier: number;
+  isPlaying: boolean;
+  clockAnchorRef: { current: PlaybackClockAnchor | null };
+  playbackFrameRef: { current: PlaybackFrame | null };
+  activeMetronomeBeatRef: { current: MetronomeBeatEvent | null };
+  nowMs: () => number;
+  requestAnimationFrame?: (cb: FrameRequestCallback) => number;
+  cancelAnimationFrame?: (id: number) => void;
+}
+
 export type AbPickStep = "idle" | "start" | "end";
 
 export interface ScoreRendererHandle {
@@ -72,7 +107,13 @@ export interface ScoreRendererHandle {
     measureGeometry: MeasureGeometry[];
   }>;
   setNoteEvents?(noteEvents: NoteEvent[]): void;
+  setScoreDoc?(scoreDoc: ScoreDocument | null): void;
   setFadingScaffoldingVisual?(visual: FadingScaffoldingVisual | null): void;
+  applyEhsFrame?(
+    snapshot: EhsFrameSnapshot | null,
+    options?: { layoutMode?: ScoreLayoutMode; scrollContainer?: HTMLElement | null }
+  ): EhsVisualInspection;
+  getEhsInspection?(): EhsVisualInspection | null;
   highlightMeasure(measureIndex: number | null): void;
   highlightAbLoop?(range: AbLoopHighlightRange | null): void;
   highlightSpotlightRange?(range: ChunkSpotlightRange | null): void;
@@ -411,7 +452,10 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
   let osmd = buildOsmd(activeLayoutMode);
   let lastCursorKey: { measureIndex: number; onsetTick: number; isGrace: boolean } | null = null;
   let currentNoteEvents: NoteEvent[] = [];
+  let currentScoreDoc: ScoreDocument | null = null;
   let cachedFingeringNodes: IndexedFingeringNode[] | null = null;
+  let cachedEhsGeometry: EhsExtractedGeometry | null = null;
+  const ehsApplier = createEhsOsmdOverlayApplier(container);
 
   const buildFingeringNodeIndex = (): IndexedFingeringNode[] => {
     const nodes: IndexedFingeringNode[] = [];
@@ -618,6 +662,8 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       osmd.Zoom = options?.zoom ?? 0.85;
       osmd.render();
       cachedFingeringNodes = null;
+      cachedEhsGeometry = null;
+      ehsApplier.reset();
       lastCursorKey = null;
       osmd.cursor?.hide();
       const measureList = osmd.GraphicSheet?.MeasureList ?? [];
@@ -631,7 +677,38 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       if (events !== currentNoteEvents) {
         currentNoteEvents = events;
         cachedFingeringNodes = null;
+        cachedEhsGeometry = null;
       }
+    },
+
+    setScoreDoc(doc: ScoreDocument | null) {
+      if (doc !== currentScoreDoc) {
+        currentScoreDoc = doc;
+        cachedEhsGeometry = null;
+      }
+    },
+
+    applyEhsFrame(
+      snapshot: EhsFrameSnapshot | null,
+      options?: { layoutMode?: ScoreLayoutMode; scrollContainer?: HTMLElement | null }
+    ): EhsVisualInspection {
+      if (!cachedEhsGeometry) {
+        cachedEhsGeometry = extractEhsOsmdGeometry(
+          osmd,
+          container,
+          currentScoreDoc,
+          currentNoteEvents,
+          options?.layoutMode ?? activeLayoutMode
+        );
+      }
+      return ehsApplier.applyFrame(cachedEhsGeometry, snapshot, {
+        layoutMode: options?.layoutMode ?? activeLayoutMode,
+        scrollContainer: options?.scrollContainer,
+      });
+    },
+
+    getEhsInspection() {
+      return ehsApplier.getInspection();
     },
 
     setFadingScaffoldingVisual(visual: FadingScaffoldingVisual | null) {
@@ -1034,6 +1111,8 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       osmd.cursor?.hide();
       lastCursorKey = null;
       cachedFingeringNodes = null;
+      cachedEhsGeometry = null;
+      ehsApplier.reset();
       clearElementsByAttr("data-studio-highlight", "data-active-measure");
       clearElementsByAttr("data-studio-ab-loop", "data-ab-loop-measure");
       clearElementsByAttr("data-studio-anchor-marker", "data-anchor-note");
@@ -1062,6 +1141,7 @@ export interface ScoreViewerProps {
   abPickStep?: AbPickStep;
   spotlightChunk?: ChunkSpotlightRange | null;
   fadingScaffolding?: FadingScaffoldingVisual | null;
+  ehsRuntime?: EhsScoreViewerRuntime | null;
   motorChunks?: MotorChunk[];
   chunkJunctions?: ChunkJunction[];
   performanceCues?: PerformanceCue[];
@@ -1108,6 +1188,7 @@ export function ScoreViewer({
   abPickStep = "idle",
   spotlightChunk = null,
   fadingScaffolding = null,
+  ehsRuntime = null,
   motorChunks = [],
   chunkJunctions = [],
   performanceCues = [],
@@ -1291,8 +1372,130 @@ export function ScoreViewer({
   useEffect(() => {
     if (!isRendered || !rendererRef.current) return;
     rendererRef.current.setNoteEvents?.(noteEvents);
+    rendererRef.current.setScoreDoc?.(scoreDoc);
     rendererRef.current.setFadingScaffoldingVisual?.(fadingScaffolding ?? null);
-  }, [isRendered, fadingScaffolding, noteEvents]);
+  }, [isRendered, fadingScaffolding, noteEvents, scoreDoc]);
+
+  // Imperative EHS Hybrid B+C requestAnimationFrame loop strictly outside React state
+  const ehsRuntimeRef = useRef<EhsScoreViewerRuntime | null>(ehsRuntime);
+  ehsRuntimeRef.current = ehsRuntime;
+  const stepEhsFrameRef = useRef<(() => void) | null>(null);
+  const ehsActiveForLoop = Boolean(
+    isRendered &&
+      ehsRuntime &&
+      ehsRuntime.enabled &&
+      ehsRuntime.scaffoldingLevel >= 1 &&
+      ehsRuntime.isPlaying
+  );
+
+  useEffect(() => {
+    if (!isRendered || !rendererRef.current) return;
+    const renderer = rendererRef.current;
+    renderer.setScoreDoc?.(scoreDoc);
+    renderer.setNoteEvents?.(noteEvents);
+
+    if (!ehsActiveForLoop) {
+      stepEhsFrameRef.current = null;
+      renderer.applyEhsFrame?.(null, {
+        layoutMode,
+        scrollContainer: scrollContainerRef.current,
+      });
+      return;
+    }
+
+    const reqRaf =
+      ehsRuntimeRef.current?.requestAnimationFrame ??
+      ((cb: FrameRequestCallback) => globalThis.requestAnimationFrame(cb));
+    const cancelRaf =
+      ehsRuntimeRef.current?.cancelAnimationFrame ??
+      ((id: number) => globalThis.cancelAnimationFrame(id));
+
+    let cancelled = false;
+    let rafId = 0;
+
+    const applyCurrentFrame = () => {
+      const rt = ehsRuntimeRef.current;
+      if (!rt || !rt.enabled || rt.scaffoldingLevel < 1 || !rt.isPlaying) {
+        renderer.applyEhsFrame?.(null, {
+          layoutMode,
+          scrollContainer: scrollContainerRef.current,
+        });
+        return false;
+      }
+
+      const tMs = rt.nowMs();
+      const beatEvent = rt.activeMetronomeBeatRef.current;
+      const anchor = rt.clockAnchorRef.current;
+      const frame = rt.playbackFrameRef.current;
+      const isCountIn = Boolean(beatEvent?.isCountIn || (anchor && tMs < anchor.t0PerfMs));
+
+      let scoreSec = frame?.scoreSec ?? anchor?.startScoreSec ?? 0;
+      if (!isCountIn && anchor) {
+        const anchorSec =
+          tMs >= anchor.t0PerfMs
+            ? Math.min(
+                anchor.endScoreSec,
+                anchor.startScoreSec + ((tMs - anchor.t0PerfMs) / 1000) * anchor.speedMultiplier
+              )
+            : anchor.startScoreSec;
+        if (frame && Math.abs(frame.scoreSec - anchorSec) > 0.05) {
+          scoreSec = frame.scoreSec;
+        } else {
+          scoreSec = anchorSec;
+        }
+      }
+
+      const snapshot = rt.controller.tick({
+        nowMs: tMs,
+        scoreDoc,
+        scoreSec,
+        isPlaying: rt.isPlaying,
+        isCountIn,
+        countdownRemaining: beatEvent?.countdownRemaining ?? 0,
+        speedMultiplier: rt.speedMultiplier,
+        practiceSteps: rt.practiceSteps,
+        config: {
+          enabled: rt.enabled,
+          preset: rt.preset,
+          ghostOpacity: rt.ghostOpacity,
+          autoStallFlashEnabled: rt.autoStallFlashEnabled,
+        },
+        scaffoldingLevel: rt.scaffoldingLevel,
+        manualPeekActive: rt.peekActiveRef ? rt.peekActiveRef.current : rt.manualPeekActive,
+      });
+
+      renderer.applyEhsFrame?.(snapshot, {
+        layoutMode,
+        scrollContainer: scrollContainerRef.current,
+      });
+      return true;
+    };
+
+    const stepFrame = () => {
+      if (cancelled) return;
+      if (!applyCurrentFrame()) return;
+      rafId = reqRaf(stepFrame);
+    };
+
+    stepEhsFrameRef.current = applyCurrentFrame;
+    stepFrame();
+
+    return () => {
+      cancelled = true;
+      stepEhsFrameRef.current = null;
+      if (rafId) cancelRaf(rafId);
+      renderer.applyEhsFrame?.(null, {
+        layoutMode,
+        scrollContainer: scrollContainerRef.current,
+      });
+    };
+  }, [isRendered, ehsActiveForLoop, layoutMode, scoreDoc, noteEvents]);
+
+  useEffect(() => {
+    if (ehsActiveForLoop) {
+      stepEhsFrameRef.current?.();
+    }
+  }, [ehsActiveForLoop, ehsRuntime?.manualPeekActive]);
 
   const handleSurfaceClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (abPickStep !== "idle" && onPickAbMeasure) {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PianoAudioEngine } from "../audio/pianoAudio";
-import type { PlaybackClockAnchor, PlaybackEngine } from "../audio/playbackEngine";
+import type { PlaybackClockAnchor, PlaybackEngine, PlaybackFrame } from "../audio/playbackEngine";
 import type {
   ChunkJunction,
   MacroSection,
@@ -22,6 +22,14 @@ import {
   toPracticeEventAcoustic,
 } from "../guided/acousticProfile";
 import { attributeContinuousBout, type SwitchPointSpec } from "../guided/boundedAttribution";
+import {
+  createEhsController,
+  recordEhsBoutProgression,
+  resolveEffectiveEhsPreset,
+  type EhsActiveLookaheadPreset,
+  type EhsGhostOpacity,
+  type EhsLookaheadPreset,
+} from "../guided/ehsController";
 import {
   SCAFFOLDING_PEEK_DURATION_MS,
   collectL2PreservedFingeringTargets,
@@ -101,6 +109,7 @@ export interface UseGuidedSessionControllerOptions {
   effectivePracticeMode: PracticeMode;
   playbackSpeed: number;
   playbackEngineRef: React.RefObject<PlaybackEngine | null>;
+  playbackFrameRef?: { current: PlaybackFrame | null };
   audioEngineRef: React.RefObject<PianoAudioEngine | null>;
   countInEnabled: boolean;
   practiceStorage?: PracticeStoragePort | null;
@@ -196,6 +205,7 @@ export function useGuidedSessionController({
   effectivePracticeMode,
   playbackSpeed,
   playbackEngineRef,
+  playbackFrameRef,
   audioEngineRef,
   countInEnabled,
   practiceStorage = null,
@@ -224,6 +234,11 @@ export function useGuidedSessionController({
   const scaffoldingPreference = useGuidedSessionStore((s) => s.scaffoldingPreference);
   const l3SilentBeatEnabled = useGuidedSessionStore((s) => s.l3SilentBeatEnabled);
   const scaffoldingPeekUntilMs = useGuidedSessionStore((s) => s.scaffoldingPeekUntilMs);
+  const ehsEnabled = useGuidedSessionStore((s) => s.ehsEnabled);
+  const ehsLookaheadPreset = useGuidedSessionStore((s) => s.ehsLookaheadPreset);
+  const ehsGhostOpacity = useGuidedSessionStore((s) => s.ehsGhostOpacity);
+  const ehsAutoStallFlashEnabled = useGuidedSessionStore((s) => s.ehsAutoStallFlashEnabled);
+  const ehsProgressionPrompt = useGuidedSessionStore((s) => s.ehsProgressionPrompt);
   const bottomSlotView = useGuidedSessionStore((s) => s.bottomSlotView);
   const cc64CommandEnabled = useGuidedSessionStore((s) => s.cc64CommandEnabled);
   const microRestDurationSec = useGuidedSessionStore((s) => s.microRestDurationSec);
@@ -243,8 +258,11 @@ export function useGuidedSessionController({
   const suspendedSnapshot = useGuidedSessionStore((s) => s.suspendedSnapshot);
 
   const routerRef = useRef(createPianoCommandRouter());
+  const ehsControllerRef = useRef(createEhsController());
+  const clockAnchorRef = useRef<PlaybackClockAnchor | null>(null);
   const previewTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
   const peekTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+  const peekActiveRef = useRef(false);
   const peekStrikeTimestampsRef = useRef<number[]>([]);
   const previewTokenRef = useRef(0);
   const autoPreviewFiredKeyRef = useRef<string | null>(null);
@@ -259,6 +277,7 @@ export function useGuidedSessionController({
     speedMultiplier: number;
     practiceMode: PracticeMode;
     scaffoldingLevel: ScaffoldingLevel;
+    ehsLookaheadPreset: EhsLookaheadPreset;
     l3RelaxedDrift: boolean;
     startedAtMs: number;
     anchor: PlaybackClockAnchor | null;
@@ -351,6 +370,7 @@ export function useGuidedSessionController({
   }, []);
 
   const clearPeekTimer = useCallback(() => {
+    peekActiveRef.current = false;
     if (peekTimerRef.current !== null) {
       globalThis.clearTimeout(peekTimerRef.current);
       peekTimerRef.current = null;
@@ -365,10 +385,12 @@ export function useGuidedSessionController({
         peekStrikeTimestampsRef.current.push(midiTimeStampMs);
       }
       clearPeekTimer();
+      peekActiveRef.current = true;
       const untilMs = nowMs() + SCAFFOLDING_PEEK_DURATION_MS;
       store.setScaffoldingPeekUntilMs(untilMs);
       peekTimerRef.current = globalThis.setTimeout(() => {
         peekTimerRef.current = null;
+        peekActiveRef.current = false;
         useGuidedSessionStore.getState().setScaffoldingPeekUntilMs(null);
       }, SCAFFOLDING_PEEK_DURATION_MS);
     },
@@ -705,6 +727,12 @@ export function useGuidedSessionController({
         : ctx.chunk.startCoord;
 
     const scaffoldingLevel: 0 | 1 | 2 | 3 = ctx.scaffoldingLevel;
+    const effectiveBoutEhsPreset: EhsLookaheadPreset =
+      cur.ehsEnabled && scaffoldingLevel >= 1
+        ? ctx.ehsLookaheadPreset !== "off"
+          ? ctx.ehsLookaheadPreset
+          : cur.ehsLookaheadPreset
+        : "off";
 
     const seq = ++eventSeqRef.current;
     const pieceId = activePieceProfile?.pieceId ?? "ephemeral";
@@ -729,6 +757,7 @@ export function useGuidedSessionController({
       passCount: 1,
       wasColdFirstPass,
       scaffoldingLevel,
+      ehsLookaheadPreset: effectiveBoutEhsPreset,
       autoGrade,
       fluency: attr.fluency,
       ...(acousticProfile ? { acoustic: toPracticeEventAcoustic(acousticProfile) } : {}),
@@ -834,6 +863,16 @@ export function useGuidedSessionController({
     const pct = Math.round(attr.fluency.pitchAccuracy * 100);
     const hasPlayedNotes = midiEvents.some((e) => e.type === "noteon");
 
+    const ehsProg = recordEhsBoutProgression(cur.ehsProgressionState, {
+      ehsActive: effectiveBoutEhsPreset !== "off",
+      autoGrade,
+      pitchAccuracy: attr.fluency.pitchAccuracy,
+      interiorHesitationCount: attr.fluency.interiorHesitationCount,
+      stallDetected: attr.fluency.stallDetected,
+    });
+    cur.setEhsProgression(ehsProg.nextState, ehsProg.prompt);
+    clockAnchorRef.current = null;
+
     cur.completePlayingBout(t, {
       persistedEvent: newEvent,
       schedulerState: nextScheduler,
@@ -885,7 +924,15 @@ export function useGuidedSessionController({
         useWaitingMode: unitRuntime?.activeRescue?.kind === "waiting-rescue" ? true : false,
         circuitBreakerTriggered: Boolean(unitRuntime?.activeRescue),
         l3SilentBeatEnabled: store.l3SilentBeatEnabled,
+        ehsOverlayActive: store.ehsEnabled,
       });
+      const ehsPresetForBout = resolveEffectiveEhsPreset({
+        enabled: store.ehsEnabled,
+        preset: store.ehsLookaheadPreset,
+        scaffoldingLevel: boutScaffolding.level,
+      });
+      ehsControllerRef.current.resetForBout({ startScoreSec: resolved.startScoreSec });
+      clockAnchorRef.current = null;
       const hasChunkHistory = Boolean(
         (chunkPersistedState && chunkPersistedState.reviewCount > 0) ||
           plannedItem?.isClusterWarmStart,
@@ -920,6 +967,7 @@ export function useGuidedSessionController({
         speedMultiplier: speedFromScheduler,
         practiceMode: boutPracticeMode,
         scaffoldingLevel: boutScaffolding.level,
+        ehsLookaheadPreset: ehsPresetForBout,
         l3RelaxedDrift: boutScaffolding.useRelaxedDriftAttribution,
         startedAtMs: nowMs(),
         anchor: null,
@@ -940,6 +988,7 @@ export function useGuidedSessionController({
         practiceMode: boutPracticeMode,
         metronomeMode,
         onClockAnchor: (anchor) => {
+          clockAnchorRef.current = anchor;
           if (activeBoutCtxRef.current) {
             activeBoutCtxRef.current.anchor = anchor;
           }
@@ -1329,12 +1378,14 @@ export function useGuidedSessionController({
       useWaitingMode,
       circuitBreakerTriggered: Boolean(activeUnitRuntime?.activeRescue),
       l3SilentBeatEnabled,
+      ehsOverlayActive: ehsEnabled,
     });
   }, [
     activeUnitMemoryState,
     activeUnitRuntime,
     scaffoldingPreference,
     l3SilentBeatEnabled,
+    ehsEnabled,
     sessionPhase,
   ]);
 
@@ -1412,6 +1463,34 @@ export function useGuidedSessionController({
         return { intercepted: true };
       }
 
+      if (
+        store.sessionPhase === "playing" &&
+        event.type === "noteon" &&
+        store.ehsEnabled &&
+        scaffoldingPolicy.level >= 1
+      ) {
+        const ctx = activeBoutCtxRef.current;
+        const anchor = clockAnchorRef.current ?? ctx?.anchor ?? null;
+        const speed = ctx?.speedMultiplier ?? playbackSpeed;
+        let scoreSec = playbackFrameRef?.current?.scoreSec ?? anchor?.startScoreSec ?? 0;
+        if (anchor && event.timeStampMs >= anchor.t0PerfMs) {
+          const anchorSec = Math.min(
+            anchor.endScoreSec,
+            anchor.startScoreSec + ((event.timeStampMs - anchor.t0PerfMs) / 1000) * anchor.speedMultiplier,
+          );
+          if (!playbackFrameRef?.current || Math.abs(playbackFrameRef.current.scoreSec - anchorSec) <= 0.05) {
+            scoreSec = anchorSec;
+          }
+        }
+        ehsControllerRef.current.recordMidiNoteOn({
+          midi: event.midi,
+          nowMs: event.timeStampMs,
+          scoreSec,
+          speedMultiplier: speed,
+          practiceSteps: ctx?.expectedSteps ?? activeChunkSteps,
+        });
+      }
+
       return { intercepted: false };
     },
     [
@@ -1419,6 +1498,9 @@ export function useGuidedSessionController({
       activeChunkSteps,
       activeChunkMidis,
       scaffoldingPolicy.cuesObscured,
+      scaffoldingPolicy.level,
+      playbackSpeed,
+      playbackFrameRef,
       triggerScaffoldingPeek,
       executeCommandAction,
     ],
@@ -1743,6 +1825,19 @@ export function useGuidedSessionController({
     overspeedProbeEnabled,
     scaffoldingPreference,
     l3SilentBeatEnabled,
+    ehsEnabled,
+    ehsLookaheadPreset,
+    ehsGhostOpacity,
+    ehsAutoStallFlashEnabled,
+    ehsActive:
+      studioMode === "guided" &&
+      sessionPhase === "playing" &&
+      ehsEnabled &&
+      scaffoldingPolicy.level >= 1,
+    ehsProgressionPrompt,
+    ehsController: ehsControllerRef.current,
+    clockAnchorRef,
+    peekActiveRef,
     scaffoldingPolicy,
     scaffoldingLevel: scaffoldingPolicy.level,
     peekActive,
@@ -1788,6 +1883,18 @@ export function useGuidedSessionController({
       useGuidedSessionStore.getState().setScaffoldingPreference(pref),
     setL3SilentBeatEnabled: (enabled: boolean) =>
       useGuidedSessionStore.getState().setL3SilentBeatEnabled(enabled),
+    setEhsEnabled: (enabled: boolean) =>
+      useGuidedSessionStore.getState().setEhsEnabled(enabled),
+    setEhsLookaheadPreset: (preset: EhsActiveLookaheadPreset) =>
+      useGuidedSessionStore.getState().setEhsLookaheadPreset(preset),
+    setEhsGhostOpacity: (opacity: EhsGhostOpacity) =>
+      useGuidedSessionStore.getState().setEhsGhostOpacity(opacity),
+    setEhsAutoStallFlashEnabled: (enabled: boolean) =>
+      useGuidedSessionStore.getState().setEhsAutoStallFlashEnabled(enabled),
+    acceptEhsProgressionPrompt: () =>
+      useGuidedSessionStore.getState().acceptEhsProgressionPrompt(),
+    dismissEhsProgressionPrompt: () =>
+      useGuidedSessionStore.getState().dismissEhsProgressionPrompt(),
     triggerScaffoldingPeek,
     setBottomSlotView: (v: "piano" | "feedback") =>
       useGuidedSessionStore.getState().setBottomSlotView(v),

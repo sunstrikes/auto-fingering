@@ -2,6 +2,16 @@ import { create } from "zustand";
 import type { MotorChunk } from "../chunking/types";
 import type { PracticeMode, PracticeStep } from "../domain/types";
 import type { AcousticProfileResult } from "../guided/acousticProfile";
+import {
+  EHS_DEFAULT_AUTO_STALL_FLASH_ENABLED,
+  EHS_DEFAULT_ENABLED,
+  EHS_DEFAULT_GHOST_OPACITY,
+  EHS_DEFAULT_PRESET,
+  type EhsActiveLookaheadPreset,
+  type EhsGhostOpacity,
+  type EhsProgressionPrompt,
+  type EhsProgressionState,
+} from "../guided/ehsController";
 import type { ScaffoldingPreference } from "../guided/fadingScaffolding";
 import type { MotorGrade, PiecePracticeState } from "../guided/motorFsrs";
 import {
@@ -116,6 +126,12 @@ export interface GuidedSessionState {
   scaffoldingPreference: ScaffoldingPreference;
   l3SilentBeatEnabled: boolean;
   scaffoldingPeekUntilMs: number | null;
+  ehsEnabled: boolean;
+  ehsLookaheadPreset: EhsActiveLookaheadPreset;
+  ehsGhostOpacity: EhsGhostOpacity;
+  ehsAutoStallFlashEnabled: boolean;
+  ehsProgressionState: EhsProgressionState;
+  ehsProgressionPrompt: EhsProgressionPrompt | null;
   sessionStartedAtMs: number | null;
   pausedFromPhase: "stage0" | "playing" | null;
   microRestStartedAtMs: number | null;
@@ -143,6 +159,13 @@ export interface GuidedSessionState {
   setScaffoldingPreference: (preference: ScaffoldingPreference) => void;
   setL3SilentBeatEnabled: (enabled: boolean) => void;
   setScaffoldingPeekUntilMs: (untilMs: number | null) => void;
+  setEhsEnabled: (enabled: boolean) => void;
+  setEhsLookaheadPreset: (preset: EhsActiveLookaheadPreset) => void;
+  setEhsGhostOpacity: (opacity: EhsGhostOpacity) => void;
+  setEhsAutoStallFlashEnabled: (enabled: boolean) => void;
+  setEhsProgression: (state: EhsProgressionState, prompt: EhsProgressionPrompt | null) => void;
+  acceptEhsProgressionPrompt: () => void;
+  dismissEhsProgressionPrompt: () => void;
   setPiecePracticeState: (next: PiecePracticeState | null) => void;
   setSchedulerState: (next: MotorSchedulerState | null) => void;
   setLastPersistedEvent: (ev: PracticeEvent | null) => void;
@@ -202,6 +225,15 @@ const initialGuidedState = {
   scaffoldingPreference: "auto-fade" as ScaffoldingPreference,
   l3SilentBeatEnabled: true,
   scaffoldingPeekUntilMs: null as number | null,
+  ehsEnabled: EHS_DEFAULT_ENABLED,
+  ehsLookaheadPreset: EHS_DEFAULT_PRESET as EhsActiveLookaheadPreset,
+  ehsGhostOpacity: EHS_DEFAULT_GHOST_OPACITY as EhsGhostOpacity,
+  ehsAutoStallFlashEnabled: EHS_DEFAULT_AUTO_STALL_FLASH_ENABLED,
+  ehsProgressionState: {
+    preset: EHS_DEFAULT_PRESET as EhsActiveLookaheadPreset,
+    consecutiveSmoothPasses: 0,
+  } as EhsProgressionState,
+  ehsProgressionPrompt: null as EhsProgressionPrompt | null,
   sessionStartedAtMs: null as number | null,
   pausedFromPhase: null as "stage0" | "playing" | null,
   microRestStartedAtMs: null as number | null,
@@ -307,6 +339,35 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
 
   setScaffoldingPeekUntilMs: (scaffoldingPeekUntilMs) => set({ scaffoldingPeekUntilMs }),
 
+  setEhsEnabled: (ehsEnabled) => set({ ehsEnabled }),
+
+  setEhsLookaheadPreset: (ehsLookaheadPreset) =>
+    set({
+      ehsLookaheadPreset,
+      ehsProgressionState: { preset: ehsLookaheadPreset, consecutiveSmoothPasses: 0 },
+      ehsProgressionPrompt: null,
+    }),
+
+  setEhsGhostOpacity: (ehsGhostOpacity) => set({ ehsGhostOpacity }),
+
+  setEhsAutoStallFlashEnabled: (ehsAutoStallFlashEnabled) => set({ ehsAutoStallFlashEnabled }),
+
+  setEhsProgression: (ehsProgressionState, ehsProgressionPrompt) =>
+    set({ ehsProgressionState, ehsProgressionPrompt }),
+
+  acceptEhsProgressionPrompt: () =>
+    set((state) => {
+      if (!state.ehsProgressionPrompt) return state;
+      const nextPreset = state.ehsProgressionPrompt.toPreset;
+      return {
+        ehsLookaheadPreset: nextPreset,
+        ehsProgressionState: { preset: nextPreset, consecutiveSmoothPasses: 0 },
+        ehsProgressionPrompt: null,
+      };
+    }),
+
+  dismissEhsProgressionPrompt: () => set({ ehsProgressionPrompt: null }),
+
   setPiecePracticeState: (piecePracticeState) => set({ piecePracticeState }),
 
   setSchedulerState: (schedulerState) => set({ schedulerState }),
@@ -392,6 +453,11 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       lastBoutSummary: null,
       lastPersistedEvent: null,
       suspendedSnapshot: null,
+      ehsProgressionState: {
+        preset: get().ehsLookaheadPreset,
+        consecutiveSmoothPasses: 0,
+      },
+      ehsProgressionPrompt: null,
     });
   },
 
@@ -810,6 +876,15 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       overspeedProbeEnabled: state.overspeedProbeEnabled,
       scaffoldingPreference: state.scaffoldingPreference,
       l3SilentBeatEnabled: state.l3SilentBeatEnabled,
+      ehsEnabled: state.ehsEnabled,
+      ehsLookaheadPreset: state.ehsLookaheadPreset,
+      ehsGhostOpacity: state.ehsGhostOpacity,
+      ehsAutoStallFlashEnabled: state.ehsAutoStallFlashEnabled,
+      ehsProgressionState: {
+        preset: state.ehsLookaheadPreset,
+        consecutiveSmoothPasses: 0,
+      },
+      ehsProgressionPrompt: null,
       scaffoldingPeekUntilMs: null,
       piecePracticeState: state.piecePracticeState,
       chunkPassCountsById: state.chunkPassCountsById,

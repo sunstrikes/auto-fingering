@@ -59,6 +59,7 @@ import { useWorkspaceScoreLifecycle } from "./hooks/useWorkspaceScoreLifecycle";
 import { useGuidedSessionController } from "./hooks/useGuidedSessionController";
 import { GuidedSessionLaunchCard } from "./components/GuidedSessionLaunchCard";
 import { GuidedResumePill, GuidedSessionHeader } from "./components/GuidedSessionHeader";
+import { EhsControlStrip } from "./components/EhsControlStrip";
 import { GuidedBottomSlot } from "./components/GuidedBottomSlot";
 import { AcousticProfileSlot } from "./components/AcousticProfileSlot";
 import { EarlyMacroRestVeil } from "./components/EarlyMacroRestVeil";
@@ -78,6 +79,7 @@ import {
   ScoreViewer,
   type AbPickStep,
   type AnchorMarkerInfo,
+  type EhsScoreViewerRuntime,
   type ScoreLayoutMode,
   type ScoreRendererFactory,
 } from "./components/ScoreViewer";
@@ -218,6 +220,7 @@ export default function App({
   const [metronomeVolume, setMetronomeVolume] = useState<number>(0.7);
   const [countInEnabled, setCountInEnabled] = useState<boolean>(false);
   const [activeMetronomeBeat, setActiveMetronomeBeat] = useState<MetronomeBeatEvent | null>(null);
+  const activeMetronomeBeatRef = useRef<MetronomeBeatEvent | null>(null);
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("both");
   const [waitingModeEnabled, setWaitingModeEnabled] = useState<boolean>(false);
   const setWaitingModeEnabledSync = (enabled: boolean) => {
@@ -268,6 +271,7 @@ export default function App({
   pianoTimbreRef.current = pianoTimbre;
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
   const [playbackFrame, setPlaybackFrame] = useState<PlaybackFrame | null>(null);
+  const playbackFrameRef = useRef<PlaybackFrame | null>(null);
   const [layoutMode, setLayoutMode] = useState<ScoreLayoutMode>("page");
   const [measureGeometry, setMeasureGeometry] = useState<MeasureGeometry[]>([]);
   const [abPickStep, setAbPickStep] = useState<AbPickStep>("idle");
@@ -333,15 +337,21 @@ export default function App({
   const overspeedProbeEnabled = useGuidedSessionStore((s) => s.overspeedProbeEnabled);
   const scaffoldingPreference = useGuidedSessionStore((s) => s.scaffoldingPreference);
   const l3SilentBeatEnabled = useGuidedSessionStore((s) => s.l3SilentBeatEnabled);
+  const ehsEnabled = useGuidedSessionStore((s) => s.ehsEnabled);
+  const ehsLookaheadPreset = useGuidedSessionStore((s) => s.ehsLookaheadPreset);
+  const ehsGhostOpacity = useGuidedSessionStore((s) => s.ehsGhostOpacity);
+  const ehsAutoStallFlashEnabled = useGuidedSessionStore((s) => s.ehsAutoStallFlashEnabled);
   const durablePrefs = useMemo(() => ({
     handSpanProfile, speedMultiplier: playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
     absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
     microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled,
     scaffoldingPreference, l3SilentBeatEnabled,
+    ehsEnabled, ehsLookaheadPreset, ehsGhostOpacity, ehsAutoStallFlashEnabled,
   }), [handSpanProfile, playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
     absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
     microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled,
-    scaffoldingPreference, l3SilentBeatEnabled]);
+    scaffoldingPreference, l3SilentBeatEnabled,
+    ehsEnabled, ehsLookaheadPreset, ehsGhostOpacity, ehsAutoStallFlashEnabled]);
   const persistence = usePracticePersistence(practiceStorage, durablePrefs, playbackState === "playing");
   const effectivePracticeMode: PracticeMode = isSingleStaff
     ? singleStaffHand === "LH"
@@ -433,8 +443,14 @@ export default function App({
         useStudioStore.getState().selectSlice(slice.sliceId);
       },
       onCursorSync: setCursorTarget,
-      onFrame: setPlaybackFrame,
-      onMetronomeBeat: setActiveMetronomeBeat,
+      onFrame: (frame) => {
+        playbackFrameRef.current = frame;
+        setPlaybackFrame(frame);
+      },
+      onMetronomeBeat: (beat) => {
+        activeMetronomeBeatRef.current = beat;
+        setActiveMetronomeBeat(beat);
+      },
       onAbLoopIterationComplete: ({ anchor, startMeasureIndex, endMeasureIndex, completedAtPerfMs }) => {
         const ctx = freeLoopContextRef.current;
         if (guidedControllerRef.current?.studioMode !== "free" || ctx.waitingModeEnabled) return;
@@ -677,6 +693,18 @@ export default function App({
       }
       if (saved?.l3SilentBeatEnabled !== undefined) {
         useGuidedSessionStore.getState().setL3SilentBeatEnabled(saved.l3SilentBeatEnabled);
+      }
+      if (saved?.ehsEnabled !== undefined) {
+        useGuidedSessionStore.getState().setEhsEnabled(saved.ehsEnabled);
+      }
+      if (saved?.ehsLookaheadPreset !== undefined) {
+        useGuidedSessionStore.getState().setEhsLookaheadPreset(saved.ehsLookaheadPreset);
+      }
+      if (saved?.ehsGhostOpacity !== undefined) {
+        useGuidedSessionStore.getState().setEhsGhostOpacity(saved.ehsGhostOpacity);
+      }
+      if (saved?.ehsAutoStallFlashEnabled !== undefined) {
+        useGuidedSessionStore.getState().setEhsAutoStallFlashEnabled(saved.ehsAutoStallFlashEnabled);
       }
       setAbLoop(loop);
       setAbPickStep("idle");
@@ -1307,6 +1335,7 @@ export default function App({
     effectivePracticeMode,
     playbackSpeed,
     playbackEngineRef,
+    playbackFrameRef,
     audioEngineRef,
     countInEnabled,
     practiceStorage: persistence.storage,
@@ -1322,6 +1351,44 @@ export default function App({
     nowMs,
   });
   guidedControllerRef.current = guided;
+
+  const ehsRuntime = useMemo<EhsScoreViewerRuntime | null>(() => {
+    if (!guided.ehsActive) return null;
+    return {
+      enabled: guided.ehsEnabled,
+      preset: guided.ehsLookaheadPreset,
+      ghostOpacity: guided.ehsGhostOpacity,
+      autoStallFlashEnabled: guided.ehsAutoStallFlashEnabled,
+      scaffoldingLevel: guided.scaffoldingLevel,
+      manualPeekActive: guided.peekActive,
+      peekActiveRef: guided.peekActiveRef,
+      controller: guided.ehsController,
+      practiceSteps: guided.activeChunkSteps,
+      speedMultiplier: playbackSpeed,
+      isPlaying: playbackState === "playing",
+      clockAnchorRef: guided.clockAnchorRef,
+      playbackFrameRef,
+      activeMetronomeBeatRef,
+      nowMs,
+      requestAnimationFrame: audioDeps?.requestAnimationFrame,
+      cancelAnimationFrame: audioDeps?.cancelAnimationFrame,
+    };
+  }, [
+    guided.ehsActive,
+    guided.ehsEnabled,
+    guided.ehsLookaheadPreset,
+    guided.ehsGhostOpacity,
+    guided.ehsAutoStallFlashEnabled,
+    guided.scaffoldingLevel,
+    guided.peekActive,
+    guided.ehsController,
+    guided.activeChunkSteps,
+    guided.clockAnchorRef,
+    playbackSpeed,
+    playbackState,
+    nowMs,
+    audioDeps,
+  ]);
 
   const coach = useExternalFocusCoach({
     coachFetch,
@@ -2469,6 +2536,19 @@ export default function App({
                     <span>L3 静音跟拍 (仅Count-In)</span>
                   </label>
                 )}
+                <EhsControlStrip
+                  scaffoldingLevel={guided.scaffoldingLevel}
+                  sessionPhase={guided.sessionPhase}
+                  ehsEnabled={guided.ehsEnabled}
+                  ehsLookaheadPreset={guided.ehsLookaheadPreset}
+                  ehsGhostOpacity={guided.ehsGhostOpacity}
+                  progressionPrompt={guided.ehsProgressionPrompt}
+                  onToggleEhs={guided.setEhsEnabled}
+                  onChangePreset={guided.setEhsLookaheadPreset}
+                  onChangeGhostOpacity={guided.setEhsGhostOpacity}
+                  onAcceptProgression={guided.acceptEhsProgressionPrompt}
+                  onDismissProgression={guided.dismissEhsProgressionPrompt}
+                />
                 {guided.dualPitchDisabled && (
                   <span
                     data-testid="guided-dual-pitch-notice"
@@ -3107,6 +3187,7 @@ export default function App({
             abPickStep={abPickStep}
             spotlightChunk={guided.spotlightChunk}
             fadingScaffolding={guided.fadingScaffoldingVisual}
+            ehsRuntime={ehsRuntime}
             motorChunks={chunking.motorChunks}
             chunkJunctions={chunking.chunkJunctions}
             performanceCues={chunking.performanceCues}
@@ -3330,6 +3411,16 @@ export default function App({
         overspeedProbeEnabled={guided.overspeedProbeEnabled}
         scaffoldingPreference={guided.scaffoldingPreference}
         l3SilentBeatEnabled={guided.l3SilentBeatEnabled}
+        ehsEnabled={guided.ehsEnabled}
+        ehsLookaheadPreset={guided.ehsLookaheadPreset}
+        ehsGhostOpacity={guided.ehsGhostOpacity}
+        ehsAutoStallFlashEnabled={guided.ehsAutoStallFlashEnabled}
+        ehsDisabledInL0={
+          guided.studioMode === "guided" &&
+          guided.sessionPhase !== "launch" &&
+          guided.sessionPhase !== "idle" &&
+          guided.scaffoldingLevel === 0
+        }
         showStatusBar={showStatusBar}
         showPianoOverhead={showPianoOverhead}
         showFullPalm={showFullPalm}
@@ -3393,6 +3484,12 @@ export default function App({
         onChangeScaffoldingPreference={guided.setScaffoldingPreference}
         onToggleL3SilentBeat={() =>
           guided.setL3SilentBeatEnabled(!guided.l3SilentBeatEnabled)
+        }
+        onToggleEhsEnabled={() => guided.setEhsEnabled(!guided.ehsEnabled)}
+        onChangeEhsLookaheadPreset={guided.setEhsLookaheadPreset}
+        onChangeEhsGhostOpacity={guided.setEhsGhostOpacity}
+        onToggleEhsAutoStallFlash={() =>
+          guided.setEhsAutoStallFlashEnabled(!guided.ehsAutoStallFlashEnabled)
         }
         onToggleShowStatusBar={() => setShowStatusBar((v) => !v)}
         onToggleShowPianoOverhead={() => setShowPianoOverhead((v) => !v)}

@@ -109,6 +109,10 @@ export interface WorkspacePrefs {
   overspeedProbeEnabled?: boolean;
   scaffoldingPreference?: "auto-fade" | "always-full" | "hide-keyboard-early";
   l3SilentBeatEnabled?: boolean;
+  ehsEnabled?: boolean;
+  ehsLookaheadPreset?: "1-beat" | "2-beats" | "1-bar";
+  ehsGhostOpacity?: 0 | 0.06;
+  ehsAutoStallFlashEnabled?: boolean;
   freePracticeMinutes?: number;
   repairEdge?: RepairEdge;
   updatedAtMs?: number;
