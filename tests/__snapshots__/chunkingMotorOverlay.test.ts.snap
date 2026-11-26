@@ -1,0 +1,193 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`chunking synchronous motor overlay (< 2 ms) > produces deterministic motor overlay snapshots across test-corpus/01..05 1`] = `
+{
+  "01-single-staff-melody.musicxml": {
+    "clusterMotorReuse": [],
+    "collapsedExpressiveCount": 0,
+    "highRiskJunctionMeasures": [],
+    "junctionCount": 1,
+    "primaryCues": [
+      {
+        "kind": "structural",
+        "measure": 0,
+        "roles": [
+          "structural",
+        ],
+      },
+    ],
+  },
+  "02-grand-staff-arpeggio-chord.musicxml": {
+    "clusterMotorReuse": [],
+    "collapsedExpressiveCount": 0,
+    "highRiskJunctionMeasures": [],
+    "junctionCount": 0,
+    "primaryCues": [
+      {
+        "kind": "structural",
+        "measure": 0,
+        "roles": [
+          "structural",
+        ],
+      },
+    ],
+  },
+  "03-partial-fingering-hanon.musicxml": {
+    "clusterMotorReuse": [],
+    "collapsedExpressiveCount": 0,
+    "highRiskJunctionMeasures": [],
+    "junctionCount": 0,
+    "primaryCues": [
+      {
+        "kind": "structural",
+        "measure": 0,
+        "roles": [
+          "structural",
+        ],
+      },
+    ],
+  },
+  "04-tie-cross-staff-compressed.mxl": {
+    "clusterMotorReuse": [],
+    "collapsedExpressiveCount": 0,
+    "highRiskJunctionMeasures": [],
+    "junctionCount": 0,
+    "primaryCues": [
+      {
+        "kind": "structural",
+        "measure": 0,
+        "roles": [
+          "structural",
+        ],
+      },
+    ],
+  },
+  "05-realworld-wuchang.musicxml": {
+    "clusterMotorReuse": [
+      [
+        {
+          "iso": 1,
+          "m": 5,
+          "reuse": 1,
+        },
+        {
+          "iso": 0.91,
+          "m": 34,
+          "reuse": 0.94,
+        },
+      ],
+    ],
+    "collapsedExpressiveCount": 1,
+    "highRiskJunctionMeasures": [
+      5,
+      11,
+      25,
+      40,
+      46,
+      50,
+      52,
+      54,
+      56,
+      58,
+      62,
+    ],
+    "junctionCount": 33,
+    "primaryCues": [
+      {
+        "kind": "structural",
+        "measure": 0,
+        "roles": [
+          "structural",
+        ],
+      },
+      {
+        "kind": "structural",
+        "measure": 5,
+        "roles": [
+          "structural",
+          "technical",
+        ],
+      },
+      {
+        "kind": "structural",
+        "measure": 9,
+        "roles": [
+          "structural",
+        ],
+      },
+      {
+        "kind": "structural",
+        "measure": 17,
+        "roles": [
+          "structural",
+        ],
+      },
+      {
+        "kind": "structural",
+        "measure": 23,
+        "roles": [
+          "structural",
+        ],
+      },
+      {
+        "kind": "structural",
+        "measure": 29,
+        "roles": [
+          "structural",
+        ],
+      },
+      {
+        "kind": "structural",
+        "measure": 34,
+        "roles": [
+          "structural",
+        ],
+      },
+      {
+        "kind": "structural",
+        "measure": 42,
+        "roles": [
+          "structural",
+        ],
+      },
+      {
+        "kind": "technical",
+        "measure": 46,
+        "roles": [
+          "technical",
+        ],
+      },
+      {
+        "kind": "structural",
+        "measure": 50,
+        "roles": [
+          "structural",
+          "technical",
+        ],
+      },
+      {
+        "kind": "technical",
+        "measure": 54,
+        "roles": [
+          "technical",
+        ],
+      },
+      {
+        "kind": "structural",
+        "measure": 58,
+        "roles": [
+          "structural",
+          "technical",
+        ],
+      },
+      {
+        "kind": "structural",
+        "measure": 65,
+        "roles": [
+          "structural",
+        ],
+      },
+    ],
+  },
+}
+`;
