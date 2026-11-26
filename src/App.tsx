@@ -124,6 +124,7 @@ import {
 } from "./audio/playbackEngine";
 import type { ChunkingClient } from "./workers/chunkingClient";
 import { useChunkingAnalysis } from "./hooks/useChunkingAnalysis";
+import { useExternalFocusCoach } from "./hooks/useExternalFocusCoach";
 
 const PIANO_TIMBRE_STORAGE_KEY = "auto-fingering:piano-timbre";
 
@@ -167,6 +168,7 @@ export interface AppProps {
   midiDeps?: AppMidiDeps;
   practiceStorage?: PracticeStoragePort | null;
   clockDeps?: AppClockDeps;
+  coachFetch?: typeof fetch;
 }
 
 export default function App({
@@ -177,6 +179,7 @@ export default function App({
   midiDeps,
   practiceStorage,
   clockDeps,
+  coachFetch,
 }: AppProps) {
   const nowMs = useCallback(() => clockDeps?.nowMs?.() ?? Date.now(), [clockDeps]);
   const solverClientRef = useRef<SolverClient | null>(null);
@@ -1320,6 +1323,43 @@ export default function App({
   });
   guidedControllerRef.current = guided;
 
+  const coach = useExternalFocusCoach({
+    coachFetch,
+    scoreDoc,
+    solveResult,
+    scoreTitle,
+    effectivePracticeMode,
+    studioMode: guided.studioMode,
+    sessionPhase: guided.sessionPhase,
+    lastBoutSummary: guided.lastBoutSummary,
+    onUpsertCueOverride: chunking.handleUpsertCueOverride,
+  });
+  const triggerCoachActionRef = useRef<() => boolean>(() => false);
+  triggerCoachActionRef.current = () => {
+    const g = useGuidedSessionStore.getState();
+    if (
+      g.studioMode !== "guided" ||
+      g.sessionPhase === "idle" ||
+      g.sessionPhase === "suspended" ||
+      g.sessionPhase === "stage0" ||
+      g.sessionPhase === "playing" ||
+      g.sessionPhase === "micro-rest" ||
+      g.sessionPhase === "macro-rest" ||
+      !g.lastBoutSummary?.acousticProfile
+    ) {
+      return false;
+    }
+    if (g.bottomSlotView !== "feedback") {
+      g.setBottomSlotView("feedback");
+    }
+    coach.triggerCoach();
+    return true;
+  };
+  const freeAcousticCoachTip = useMemo(
+    () => coach.buildFreeOfflineTip(freeAcousticState),
+    [coach.buildFreeOfflineTip, freeAcousticState],
+  );
+
   const playAccompanimentNotes = (step: PracticeStep) => {
     if (effectivePracticeMode === "both" || step.accompanimentNotes.length === 0) return;
     const audio = audioEngineRef.current;
@@ -1830,6 +1870,16 @@ export default function App({
         if (e.code === "Space" || e.key === " ") {
           e.preventDefault();
         }
+        return;
+      }
+      if (
+        e.key.toLowerCase() === "g" &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.repeat &&
+        triggerCoachActionRef.current()
+      ) {
         return;
       }
       if (
@@ -2703,6 +2753,15 @@ export default function App({
                         setFreeAcousticOpen(false);
                       }}
                     />
+                    {freeAcousticCoachTip && (
+                      <div
+                        data-testid="free-acoustic-coach-tip"
+                        className="mt-2 rounded-lg border border-teal-200 bg-teal-50/70 px-2.5 py-1.5 text-[11px] text-teal-950"
+                      >
+                        <span className="font-semibold">外部注意提示（0 ms）：</span>
+                        <span>{freeAcousticCoachTip}</span>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -3072,6 +3131,8 @@ export default function App({
             onUpsertCueOverride={chunking.handleUpsertCueOverride}
             onRemoveCueOverride={chunking.handleRemoveCueOverride}
             onResetCueOverrides={chunking.handleResetCueOverrides}
+            onPolishCueLabel={coach.polishCueLabel}
+            polishingCueId={coach.polishingCueId}
             onCloseInspectCluster={chunking.closeInspectCluster}
             rendererFactory={scoreRendererFactory}
           />
@@ -3173,6 +3234,10 @@ export default function App({
                 ? guided.audiationImageryTick.remainingSec
                 : null
             }
+            coachResult={coach.coachResult}
+            coachLoading={coach.coachLoading}
+            coachRemoteConfigured={coach.remoteConfigured}
+            onTriggerCoach={coach.triggerCoach}
             onTriggerPreview={guided.triggerAudiationPreview}
             onStopPreview={() => guided.stopAudiationPreview("manual-stop")}
             onShowFingerings={() => guided.setBottomSlotView("piano")}
@@ -3336,6 +3401,7 @@ export default function App({
         onChangePriorMode={handlePriorModeChange}
         onChangePriorLambda={handlePriorLambdaChange}
         onChangeCustomModelBaseUrl={handleCustomModelBaseUrlChange}
+        coachSettingsProps={coach.coachSettingsProps}
         onClose={() => setSettingsOpen(false)}
       />
     </div>

@@ -26,6 +26,8 @@ export interface ChunkCueEditorStripProps {
   onUpsertCueOverride?: (entry: PerformanceCueOverrideEntry) => void;
   onRemoveCueOverride?: (coord: ScoreCoord, kind?: PerformanceCueKind) => void;
   onResetCueOverrides?: () => void;
+  onPolishCueLabel?: (cue: PerformanceCue) => void;
+  polishingCueId?: string | null;
   onCloseInspectCluster?: () => void;
 }
 
@@ -57,6 +59,8 @@ export function ChunkCueEditorStrip({
   onResetChunkOverrides,
   onUpsertCueOverride,
   onResetCueOverrides,
+  onPolishCueLabel,
+  polishingCueId = null,
   onCloseInspectCluster,
 }: ChunkCueEditorStripProps) {
   const [editingCueId, setEditingCueId] = useState<string | null>(null);
@@ -306,6 +310,18 @@ export function ChunkCueEditorStrip({
                 >
                   改口诀
                 </button>
+                {onPolishCueLabel && (
+                  <button
+                    type="button"
+                    data-testid={`cue-polish-btn-${cue.cueId}`}
+                    disabled={polishingCueId === cue.cueId}
+                    onClick={() => onPolishCueLabel(cue)}
+                    title="生成外部注意听觉意象口诀"
+                    className="rounded border border-teal-200 bg-teal-50 px-1 text-[10px] font-medium text-teal-800 hover:bg-teal-100 disabled:opacity-50"
+                  >
+                    {polishingCueId === cue.cueId ? "润色中..." : "润色口诀"}
+                  </button>
+                )}
                 <button
                   type="button"
                   data-testid={`cue-hide-btn-${cue.cueId}`}

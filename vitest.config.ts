@@ -16,6 +16,7 @@ export default defineConfig({
         "src/chunking/**/*.ts",
         "src/workers/chunkingClient.ts",
         "src/guided/**/*.ts",
+        "src/coach/**/*.ts",
       ],
       exclude: ["src/practice/useScreenWakeLock.ts"],
       reporter: ["text", "json-summary"],
