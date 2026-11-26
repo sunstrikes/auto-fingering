@@ -51,10 +51,14 @@ import { applyAnchorOverridesToSlices, localResolveFingering } from "./solver/lo
 import type { PriorLoadProgress } from "./prior/loader";
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
 import { computeNextAnchorState, useStudioStore } from "./store/useStudioStore";
+import { useGuidedSessionStore } from "./store/useGuidedSessionStore";
 import type { PracticeStoragePort } from "./persistence/storagePort";
 import { remapAnchorState, type AnchorState } from "./persistence/anchorDrafts";
 import { usePracticePersistence } from "./hooks/usePracticePersistence";
 import { useWorkspaceScoreLifecycle } from "./hooks/useWorkspaceScoreLifecycle";
+import { useGuidedSessionController } from "./hooks/useGuidedSessionController";
+import { GuidedSessionLaunchCard } from "./components/GuidedSessionLaunchCard";
+import { GuidedResumePill, GuidedSessionHeader } from "./components/GuidedSessionHeader";
 import { PracticeBackupPanel, ScoreOpenChoice } from "./components/PracticeBackupPanel";
 import { buildMeasureRiskSummaries, type MeasureGeometry } from "./components/MarginRiskGutter";
 import { NoteAnchorPopover, type PopoverAnchorRect } from "./components/NoteAnchorPopover";
@@ -142,6 +146,11 @@ export interface AppMidiDeps {
   requestMIDIAccess?: () => Promise<MIDIAccessLike>;
 }
 
+export interface AppClockDeps {
+  nowMs?: () => number;
+  getTimezoneOffsetMin?: () => number;
+}
+
 export interface AppProps {
   solverClientFactory?: () => SolverClient;
   chunkingClientFactory?: () => ChunkingClient;
@@ -149,6 +158,7 @@ export interface AppProps {
   audioDeps?: AppAudioDeps;
   midiDeps?: AppMidiDeps;
   practiceStorage?: PracticeStoragePort | null;
+  clockDeps?: AppClockDeps;
 }
 
 export default function App({
@@ -158,7 +168,9 @@ export default function App({
   audioDeps,
   midiDeps,
   practiceStorage,
+  clockDeps,
 }: AppProps) {
+  const nowMs = useCallback(() => clockDeps?.nowMs?.() ?? Date.now(), [clockDeps]);
   const solverClientRef = useRef<SolverClient | null>(null);
   const audioEngineRef = useRef<PianoAudioEngine | null>(null);
   const playbackEngineRef = useRef<PlaybackEngine | null>(null);
@@ -285,11 +297,12 @@ export default function App({
   const status = useStudioStore((s) => s.status);
   const errorMsg = useStudioStore((s) => s.errorMsg);
 
+  const cc64CommandEnabled = useGuidedSessionStore((s) => s.cc64CommandEnabled);
   const durablePrefs = useMemo(() => ({
     handSpanProfile, speedMultiplier: playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
-    absoluteStrictnessEnabled, strictHoldDurationEnabled,
+    absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
   }), [handSpanProfile, playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
-    absoluteStrictnessEnabled, strictHoldDurationEnabled]);
+    absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled]);
   const persistence = usePracticePersistence(practiceStorage, durablePrefs, playbackState === "playing");
   const effectivePracticeMode: PracticeMode = isSingleStaff
     ? singleStaffHand === "LH"
@@ -374,8 +387,23 @@ export default function App({
     };
   }, [audioDeps, updatePlaybackState]);
 
+  const guidedControllerRef = useRef<{
+    studioMode: "free" | "guided";
+    sessionPhase: string;
+    routeGuidedMidiEvent: (event: MidiInputEvent) => { intercepted: boolean };
+    routeGuidedKeyboardEvent: (event: KeyboardEvent) => boolean;
+    handleStage0WrongNote: (midi: number) => void;
+    handleStage0StepCompleted: (stepIdx: number) => void;
+    activeChunkSteps: PracticeStep[];
+  } | null>(null);
+
   const handleMidiInputEvent = (event: MidiInputEvent) => {
     midiCapture.record(event);
+    const guidedState = guidedControllerRef.current;
+    const isGuidedStage0 =
+      guidedState?.studioMode === "guided" && guidedState.sessionPhase === "stage0";
+    const waitingActive = isGuidedStage0 || waitingModeEnabled;
+
     if (event.type === "noteon") {
       setPressedMidis((prev) => {
         if (prev.has(event.midi)) return prev;
@@ -383,7 +411,13 @@ export default function App({
         next.add(event.midi);
         return next;
       });
-      const shouldPlayLocalAudio = waitingModeEnabled
+      if (guidedState?.studioMode === "guided") {
+        const routed = guidedState.routeGuidedMidiEvent(event);
+        if (routed.intercepted) {
+          return;
+        }
+      }
+      const shouldPlayLocalAudio = waitingActive
         ? midiLocalSoundRef.current
         : event.source !== "midi" || midiLocalSoundRef.current;
       if (shouldPlayLocalAudio) {
@@ -400,7 +434,7 @@ export default function App({
           });
         }
       }
-      if (waitingModeEnabled) {
+      if (waitingActive) {
         processWaitingNoteOn(event.midi);
       }
       return;
@@ -413,7 +447,10 @@ export default function App({
         next.delete(event.midi);
         return next;
       });
-      if (waitingModeEnabled) {
+      if (guidedState?.studioMode === "guided") {
+        guidedState.routeGuidedMidiEvent(event);
+      }
+      if (waitingActive) {
         processWaitingNoteOff(event.midi);
       }
       return;
@@ -421,6 +458,9 @@ export default function App({
 
     if (event.type === "sustain") {
       setSustainPedalPressed(event.pressed);
+      if (guidedState?.studioMode === "guided") {
+        guidedState.routeGuidedMidiEvent(event);
+      }
     }
   };
 
@@ -531,6 +571,9 @@ export default function App({
       if (saved?.practiceMode) setPracticeMode(saved.practiceMode);
       if (saved?.absoluteStrictnessEnabled !== undefined) setAbsoluteStrictnessEnabled(saved.absoluteStrictnessEnabled);
       if (saved?.strictHoldDurationEnabled !== undefined) setStrictHoldDurationEnabled(saved.strictHoldDurationEnabled);
+      if (saved?.cc64CommandEnabled !== undefined) {
+        useGuidedSessionStore.getState().setCc64CommandEnabled(saved.cc64CommandEnabled);
+      }
       setAbLoop(loop);
       setAbPickStep("idle");
       setAbPickStartMeasure(null);
@@ -603,6 +646,7 @@ export default function App({
     }
 
     playbackEngineRef.current?.stop();
+    useGuidedSessionStore.getState().endSession();
     const store = useStudioStore.getState();
     store.setErrorMsg(null);
     store.setStatus("正在解析 MusicXML...");
@@ -1127,6 +1171,23 @@ export default function App({
     });
   };
 
+  const guided = useGuidedSessionController({
+    scoreDoc,
+    practiceSteps,
+    motorChunks: chunking.motorChunks,
+    macroSections: chunking.macroSections,
+    effectivePracticeMode,
+    playbackSpeed,
+    playbackEngineRef,
+    countInEnabled,
+    setMidiCaptureMode: (mode) => midiCapture.setMode(mode),
+    resetMidiCapture,
+    syncWaitingToStep: syncToPracticeStep,
+    resetWaitingCursor: (stepIndex = 0) => setWaitingStateSync(createWaitingModeState(stepIndex)),
+    nowMs,
+  });
+  guidedControllerRef.current = guided;
+
   const playAccompanimentNotes = (step: PracticeStep) => {
     if (effectivePracticeMode === "both" || step.accompanimentNotes.length === 0) return;
     const audio = audioEngineRef.current;
@@ -1475,13 +1536,15 @@ export default function App({
   };
 
   const processWaitingNoteOn = (midi: number) => {
-    if (!waitingModeEnabled || practiceSteps.length === 0) return;
-    if (waitingLoopGapActiveRef.current) return;
+    const isGuidedStage0 = guided.studioMode === "guided" && guided.sessionPhase === "stage0";
+    const activeSteps = isGuidedStage0 ? guided.activeChunkSteps : practiceSteps;
+    if ((!waitingModeEnabled && !isGuidedStage0) || activeSteps.length === 0) return;
+    if (!isGuidedStage0 && waitingLoopGapActiveRef.current) return;
 
     const currentWaiting = waitingStateRef.current;
-    let isPlayingNow = playbackState === "playing";
-    if (playbackState === "paused") {
-      const currentStep = practiceSteps[currentWaiting.currentStepIndex];
+    let isPlayingNow = isGuidedStage0 || playbackState === "playing";
+    if (!isGuidedStage0 && playbackState === "paused") {
+      const currentStep = activeSteps[currentWaiting.currentStepIndex];
       if (!doesNoteOnMatchPausedStep(currentStep, midi)) {
         return;
       }
@@ -1493,17 +1556,18 @@ export default function App({
 
     if (!isPlayingNow) return;
 
-    const activeStep = practiceSteps[currentWaiting.currentStepIndex];
-    const result = handleWaitingNoteOn(currentWaiting, practiceSteps, midi, abLoop, {
-      absoluteStrictness: absoluteStrictnessEnabled,
-      enforceHoldDuration: strictHoldDurationEnabled,
+    const activeStep = activeSteps[currentWaiting.currentStepIndex];
+    const effectiveAbLoop = isGuidedStage0 ? createDefaultAbLoopBounds(0) : abLoop;
+    const result = handleWaitingNoteOn(currentWaiting, activeSteps, midi, effectiveAbLoop, {
+      absoluteStrictness: isGuidedStage0 ? false : absoluteStrictnessEnabled,
+      enforceHoldDuration: isGuidedStage0 ? false : strictHoldDurationEnabled,
       nowSec: getWaitingClockSec(),
       speedMultiplier: playbackSpeed,
     });
     setWaitingStateSync(result.nextState);
 
     if (result.faultReason === "wrong-note") {
-      if (!absoluteStrictnessEnabled) {
+      if (isGuidedStage0 || !absoluteStrictnessEnabled) {
         // Keep quick grazes visible even if NoteOn and NoteOff render together.
         const timers = wrongKeyFlashTimers.current;
         clearTimeout(timers.get(midi));
@@ -1517,25 +1581,48 @@ export default function App({
           });
         }, 180));
       }
-      setPracticeAnalytics((prev) =>
-        recordPracticeStepFault(prev, activeStep, "wrong-note", midi)
-      );
+      if (isGuidedStage0) {
+        guided.handleStage0WrongNote(midi);
+      } else {
+        setPracticeAnalytics((prev) =>
+          recordPracticeStepFault(prev, activeStep, "wrong-note", midi)
+        );
+      }
+    }
+
+    if (isGuidedStage0) {
+      if (result.completedStep) {
+        playAccompanimentNotes(result.completedStep);
+        guided.handleStage0StepCompleted(currentWaiting.currentStepIndex);
+        if (useGuidedSessionStore.getState().sessionPhase === "stage0") {
+          if (result.advancedToStep) {
+            triggerStepAdvanceMetronome(result.advancedToStep);
+            syncToPracticeStep(result.advancedToStep, "playing");
+          } else if (result.completedScore) {
+            setWaitingStateSync(createWaitingModeState(0));
+            syncToPracticeStep(activeSteps[0] ?? null, "playing");
+          }
+        }
+      }
+      return;
     }
 
     applyWaitingAdvanceSideEffects(result);
   };
 
   const processWaitingNoteOff = (midi: number) => {
-    if (!waitingModeEnabled || practiceSteps.length === 0) return;
+    const isGuidedStage0 = guided.studioMode === "guided" && guided.sessionPhase === "stage0";
+    const activeSteps = isGuidedStage0 ? guided.activeChunkSteps : practiceSteps;
+    if ((!waitingModeEnabled && !isGuidedStage0) || activeSteps.length === 0) return;
     const currentWaiting = waitingStateRef.current;
-    const activeStep = practiceSteps[currentWaiting.currentStepIndex];
+    const activeStep = activeSteps[currentWaiting.currentStepIndex];
     const res = handleWaitingNoteOffWithResult(currentWaiting, midi, {
-      absoluteStrictness: absoluteStrictnessEnabled,
-      enforceHoldDuration: strictHoldDurationEnabled,
+      absoluteStrictness: isGuidedStage0 ? false : absoluteStrictnessEnabled,
+      enforceHoldDuration: isGuidedStage0 ? false : strictHoldDurationEnabled,
       sustainPedalPressed,
     });
     setWaitingStateSync(res.nextState);
-    if (res.faultReason === "early-release") {
+    if (!isGuidedStage0 && res.faultReason === "early-release") {
       setPracticeAnalytics((prev) =>
         recordPracticeStepFault(prev, activeStep, "early-release", midi)
       );
@@ -1605,6 +1692,12 @@ export default function App({
         setRepairPanelOpen(false);
         setPracticeReportOpen(false);
         setSettingsOpen(false);
+        return;
+      }
+      if (guidedControllerRef.current?.routeGuidedKeyboardEvent(e)) {
+        if (e.code === "Space" || e.key === " ") {
+          e.preventDefault();
+        }
         return;
       }
       if (
@@ -1914,19 +2007,56 @@ export default function App({
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-slate-50 text-slate-900">
       {simulatedMidi && <SimulatedMidiDebugBar harness={simulatedMidi} onPlay={handlePlaySimulatedMidi} />}
-      <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-1.5 sm:px-4">
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 lg:flex-nowrap">
-          <div className="shrink-0">
-            <h1 className="whitespace-nowrap text-sm font-semibold tracking-tight text-slate-900 sm:text-base">
-              MusicXML 钢琴自动指法
-            </h1>
-            <p className="hidden text-[11px] text-slate-500 2xl:block">
-              纯浏览器端 Beam Search DP 钢琴指法推导与双轨实时演练
-            </p>
-          </div>
+      {guided.studioMode === "guided" ? (
+        <GuidedSessionHeader
+          pieceTitle={scoreTitle || fileName}
+          sessionPhase={guided.sessionPhase}
+          activeChunk={guided.activeChunk}
+          queueIndex={guided.currentQueueIndex}
+          queueLength={guided.chunkQueue.length}
+          timeBoxMinutes={guided.timeBoxMinutes}
+          remainingMinutes={guided.remainingMinutes}
+          effectivePracticeMode={effectivePracticeMode}
+          isSingleStaff={isSingleStaff}
+          midiState={midiState}
+          onChangePracticeMode={handlePracticeModeChange}
+          onSuspendForFingering={guided.handleSuspendForFingering}
+          onEndSession={guided.handleEndSession}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
+      ) : (
+        <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-1.5 sm:px-4">
+          <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 lg:flex-nowrap">
+            <div className="shrink-0">
+              <h1 className="whitespace-nowrap text-sm font-semibold tracking-tight text-slate-900 sm:text-base">
+                MusicXML 钢琴自动指法
+              </h1>
+              <p className="hidden text-[11px] text-slate-500 2xl:block">
+                纯浏览器端 Beam Search DP 钢琴指法推导与双轨实时演练
+              </p>
+            </div>
 
-          <div className="flex flex-wrap items-center gap-1.5 lg:flex-nowrap">
-            <label className="shrink-0 cursor-pointer whitespace-nowrap rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-800">
+            <div className="flex flex-wrap items-center gap-1.5 lg:flex-nowrap">
+              {guided.sessionPhase === "suspended" && guided.suspendedSnapshot ? (
+                <GuidedResumePill
+                  remainingMinutes={guided.remainingMinutes}
+                  queueIndex={guided.suspendedSnapshot.currentQueueIndex}
+                  queueLength={guided.suspendedSnapshot.chunkQueue.length}
+                  onResume={guided.handleResumeSuspendedSession}
+                  onEndSession={guided.handleEndSession}
+                />
+              ) : scoreDoc ? (
+                <button
+                  type="button"
+                  data-testid="enter-guided-session-btn"
+                  onClick={guided.enterGuidedLaunch}
+                  className="shrink-0 whitespace-nowrap rounded-lg border border-teal-500 bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-900 hover:bg-teal-100"
+                >
+                  科学练琴 (Guided)
+                </button>
+              ) : null}
+
+              <label className="shrink-0 cursor-pointer whitespace-nowrap rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-800">
               上传<span className="hidden xl:inline"> .musicxml / .mxl</span>
               <input
                 type="file"
@@ -2089,8 +2219,124 @@ export default function App({
           </div>
         </div>
       </header>
+      )}
 
       <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-1.5 px-2.5 pt-1.5 pb-1 sm:px-4">
+        {scoreDoc && guided.studioMode === "free" && guided.sessionPhase === "idle" && (
+          <div
+            data-testid="guided-launch-strip"
+            className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-teal-50/70 px-3 py-1 text-xs text-teal-950"
+          >
+            <span>
+              当前处于 <strong data-testid="free-studio-mode-label">Free Studio</strong> · 可自由修改指法或随时进入科学练琴。
+            </span>
+            <button
+              type="button"
+              data-testid="guided-strip-start-btn"
+              onClick={guided.enterGuidedLaunch}
+              className="rounded-md bg-teal-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-teal-700"
+            >
+              开启 Guided Session
+            </button>
+          </div>
+        )}
+
+        {guided.studioMode === "guided" && guided.sessionPhase === "launch" && (
+          <GuidedSessionLaunchCard
+            pieceTitle={scoreTitle || fileName}
+            macroSections={chunking.macroSections}
+            motorChunks={chunking.motorChunks}
+            passageClusters={chunking.passageClusters}
+            chunkJunctions={chunking.chunkJunctions}
+            timeBoxMinutes={guided.timeBoxMinutes}
+            selectedMacroSectionId={guided.selectedMacroSectionId}
+            onSelectTimeBox={guided.setTimeBoxMinutes}
+            onSelectMacroSection={guided.setSelectedMacroSectionId}
+            onStartSession={guided.handleStartSession}
+            onBackToFreeStudio={guided.returnToFreeStudio}
+          />
+        )}
+
+        {guided.studioMode === "guided" &&
+          guided.sessionPhase !== "launch" &&
+          guided.sessionPhase !== "idle" &&
+          guided.sessionPhase !== "suspended" && (
+            <div
+              data-testid="guided-control-strip"
+              className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-white px-3 py-1 text-xs"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                {guided.dualPitchDisabled && (
+                  <span
+                    data-testid="guided-dual-pitch-notice"
+                    className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900"
+                  >
+                    当前块包含 A0+A#0，已自动禁用双键紧急暂停，请使用触控暂停或空格键
+                  </span>
+                )}
+                {guided.commandNotice && (
+                  <span
+                    data-testid="guided-command-notice"
+                    className="rounded bg-teal-50 px-2 py-0.5 text-[11px] font-medium text-teal-900"
+                  >
+                    {guided.commandNotice}
+                  </span>
+                )}
+                {guided.sessionPhase === "stage0" && guided.stage0State && (
+                  <span
+                    data-testid="guided-stage0-progress"
+                    className="text-[11px] font-medium text-slate-600"
+                  >
+                    Stage 0 落键步进: {guided.stage0State.currentStepIndex + 1}/
+                    {Math.max(1, guided.stage0State.steps.length)} · 尝试{" "}
+                    {guided.stage0State.passAttempts + 1}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {guided.sessionPhase === "stage0" || guided.sessionPhase === "playing" ? (
+                  <button
+                    type="button"
+                    data-testid="guided-cmd-pause-btn"
+                    onClick={() => guided.executeCommandAction("emergency-pause")}
+                    className="min-h-[44px] min-w-[44px] rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+                  >
+                    暂停 (A0+A#0 / Space)
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      data-testid="guided-cmd-replay-btn"
+                      onClick={() => guided.executeCommandAction("replay-chunk")}
+                      className="min-h-[44px] min-w-[44px] rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                    >
+                      重练本块 (A0 / ←)
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="guided-cmd-toggle-view-btn"
+                      onClick={() => guided.executeCommandAction("toggle-view")}
+                      className="min-h-[44px] min-w-[44px] rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                    >
+                      {guided.bottomSlotView === "piano" ? "查看延迟反馈 (B0 / F)" : "查看指法与 88 键 (B0 / F)"}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="guided-cmd-continue-btn"
+                      onClick={() => guided.executeCommandAction("continue-next")}
+                      className="min-h-[44px] min-w-[44px] rounded-lg bg-teal-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-teal-700"
+                    >
+                      {guided.sessionPhase === "paused"
+                        ? "继续 (C8 / Space)"
+                        : "下一块 (C8 / →)"}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
         {persistence.backupReminder && (
           <aside data-testid="practice-backup-reminder" className="flex shrink-0 items-center gap-2 rounded-md bg-amber-50 px-3 py-1 text-xs text-amber-900">
             <span>浏览器可能会清理本地数据，建议定期备份练习记录。</span>
@@ -2106,7 +2352,7 @@ export default function App({
           onArchive={scoreDoc && persistence.getActive() ? workspaceScores.handleArchivePiece : undefined} />}
         {workspaceScores.openChoice && <ScoreOpenChoice choice={workspaceScores.openChoice} onAnswer={workspaceScores.answerOpenChoice} />}
 
-        {showStatusBar && (
+        {showStatusBar && (guided.studioMode === "free" || guided.sessionPhase === "launch") && (
           <div
             data-testid="top-status-warning-bar"
             className="relative flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
@@ -2565,10 +2811,14 @@ export default function App({
                 : null
             }
             abPickStep={abPickStep}
+            spotlightChunk={guided.spotlightChunk}
             motorChunks={chunking.motorChunks}
             chunkJunctions={chunking.chunkJunctions}
             performanceCues={chunking.performanceCues}
-            chunkEditingEnabled={playbackState !== "playing"}
+            chunkEditingEnabled={
+              playbackState !== "playing" &&
+              (guided.studioMode === "free" || guided.sessionPhase === "launch")
+            }
             hasChunkOverrides={chunking.hasChunkOverrides}
             hasCueOverrides={chunking.hasCueOverrides}
             inspectedClusterInstance={
@@ -2606,10 +2856,50 @@ export default function App({
               onClose={() => setPopoverOpen(false)}
             />
           )}
+
+          {guided.studioMode === "guided" && guided.sessionPhase === "micro-rest" && (
+            <div
+              data-testid="guided-micro-rest-veil"
+              className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-xl bg-slate-900/55 p-6 text-center text-white backdrop-blur-xs"
+            >
+              <div className="text-sm font-semibold tracking-wide">
+                清醒微休息（Micro-Rest）
+              </div>
+              <p className="max-w-md text-xs text-slate-200">
+                双手离开琴键静放{" "}
+                {Math.max(
+                  1,
+                  Math.ceil(
+                    (guided.microRestDurationMs -
+                      Math.max(0, nowMs() - (guided.microRestStartedAtMs ?? nowMs()))) /
+                      1000,
+                  ),
+                )}{" "}
+                秒，让动作记忆自然巩固。
+              </p>
+              {guided.microRestReminder && (
+                <p
+                  data-testid="guided-micro-rest-reminder"
+                  className="rounded-md bg-white/15 px-3 py-1 text-xs text-amber-100"
+                >
+                  {guided.microRestReminder}
+                </p>
+              )}
+              <button
+                type="button"
+                data-testid="guided-skip-micro-rest-btn"
+                onClick={() => guided.executeCommandAction("continue-next")}
+                className="min-h-[44px] min-w-[44px] rounded-lg border border-white/40 bg-white/15 px-4 py-2 text-xs font-semibold text-white hover:bg-white/25"
+              >
+                跳过微休息 (C8 / →)
+              </button>
+            </div>
+          )}
         </div>
       </main>
 
       {/* Middle Pane: Dedicated Transport & Practice Bar */}
+      {(guided.studioMode === "free" || guided.sessionPhase === "launch") && (
       <TransportPracticeBar
         hasScore={Boolean(scoreDoc && onsetSlices.length > 0)}
         hasSelectedSlice={Boolean(selectedSliceId)}
@@ -2651,9 +2941,43 @@ export default function App({
         onChangeAbLoopBounds={handleChangeAbLoopBounds}
         onClearAbLoop={handleClearAbLoop}
       />
+      )}
 
       {/* Bottom Pane: Full-Width 88-Key Physical Piano & Dual-Hand Posture Simulation */}
       <div data-testid="bottom-piano-pane" className="shrink-0">
+        {guided.studioMode === "guided" && guided.bottomSlotView === "feedback" ? (
+          <section
+            data-testid="guided-delayed-feedback-panel"
+            className="flex flex-wrap items-center justify-between gap-3 border-t border-teal-200 bg-white px-4 py-4 text-xs"
+          >
+            <div className="space-y-1">
+              <div className="font-semibold text-slate-900">
+                {guided.lastBoutSummary?.headline ?? "当前组块反馈"}
+              </div>
+              <div className="text-slate-600">
+                {guided.lastBoutSummary?.detail ??
+                  "Stage 0 落键停顿遥测已严格隔离，不写入连续声学画像；可按 B0 或 F 切回 88 键手型与指法。"}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                data-testid="guided-back-to-piano-btn"
+                onClick={() => guided.setBottomSlotView("piano")}
+                className="min-h-[44px] min-w-[44px] rounded-lg border border-teal-500 bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-900 hover:bg-teal-100"
+              >
+                切回指法与 88 键手型 (B0 / F)
+              </button>
+              <button
+                type="button"
+                onClick={() => guided.executeCommandAction("continue-next")}
+                className="min-h-[44px] min-w-[44px] rounded-lg bg-teal-600 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-700"
+              >
+                继续 / 下一块 (C8)
+              </button>
+            </div>
+          </section>
+        ) : (
         <UnifiedPiano88
           scoreDoc={scoreDoc}
           solveResult={solveResult}
@@ -2663,9 +2987,14 @@ export default function App({
           practiceMode={effectivePracticeMode}
           showOverhead={showPianoOverhead}
           showFullPalm={showFullPalm}
-          wrongMidis={waitingModeEnabled && !absoluteStrictnessEnabled && flashedWrongMidis.size > 0
-            ? new Set([...waitingState.wrongMidis, ...flashedWrongMidis])
-            : waitingState.wrongMidis}
+          wrongMidis={
+            (guided.studioMode === "guided" && guided.sessionPhase === "stage0") ||
+            (waitingModeEnabled && !absoluteStrictnessEnabled)
+              ? flashedWrongMidis.size > 0
+                ? new Set([...waitingState.wrongMidis, ...flashedWrongMidis])
+                : waitingState.wrongMidis
+              : waitingState.wrongMidis
+          }
           hitMidis={waitingState.hitMidis}
           pressedMidis={pressedMidis}
           sustainPedalPressed={sustainPedalPressed}
@@ -2673,6 +3002,7 @@ export default function App({
           waitingResetReason={waitingState.lastResetReason}
           waitingIsHolding={waitingState.isHolding}
           waitingHoldProgress={waitingState.holdProgress}
+          commandKeyBadges={guided.commandKeyBadges}
           onSelectSlice={handleSelectSlice}
           onVirtualNoteOn={(midi, velocity = 96) =>
             handleMidiInputEvent(createLocalMidiNoteEvent("virtual", midi, velocity))
@@ -2681,6 +3011,7 @@ export default function App({
             handleMidiInputEvent(createLocalMidiNoteEvent("virtual", midi, 0))
           }
         />
+        )}
       </div>
 
       <PracticeSettingsModal
@@ -2697,6 +3028,7 @@ export default function App({
         skipGraceNotes={skipGraceNotes}
         absoluteStrictnessEnabled={absoluteStrictnessEnabled}
         strictHoldDurationEnabled={strictHoldDurationEnabled}
+        cc64CommandEnabled={guided.cc64CommandEnabled}
         showStatusBar={showStatusBar}
         showPianoOverhead={showPianoOverhead}
         showFullPalm={showFullPalm}
@@ -2748,6 +3080,7 @@ export default function App({
           setStrictHoldDurationEnabled((prev) => !prev);
           setWaitingStateSync(createWaitingModeState(waitingStateRef.current.currentStepIndex));
         }}
+        onToggleCc64Command={() => guided.setCc64CommandEnabled(!guided.cc64CommandEnabled)}
         onToggleShowStatusBar={() => setShowStatusBar((v) => !v)}
         onToggleShowPianoOverhead={() => setShowPianoOverhead((v) => !v)}
         onToggleShowFullPalm={() => setShowFullPalm((v) => !v)}

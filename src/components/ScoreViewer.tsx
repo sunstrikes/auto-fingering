@@ -48,6 +48,12 @@ export interface AbLoopHighlightRange {
   endMeasureIndex: number;
 }
 
+export interface ChunkSpotlightRange {
+  chunkId: string;
+  startMeasureIndex: number;
+  endMeasureIndex: number;
+}
+
 export type AbPickStep = "idle" | "start" | "end";
 
 export interface ScoreRendererHandle {
@@ -61,6 +67,7 @@ export interface ScoreRendererHandle {
   setNoteEvents?(noteEvents: NoteEvent[]): void;
   highlightMeasure(measureIndex: number | null): void;
   highlightAbLoop?(range: AbLoopHighlightRange | null): void;
+  highlightSpotlightRange?(range: ChunkSpotlightRange | null): void;
   markAnchoredNotes(anchors: AnchorMarkerInfo[]): void;
   markDiffNotes?(diffs: NoteDiffEntry[]): void;
   highlightVariantDiffs?(diffs: VariantDiffCoord[] | null): void;
@@ -559,6 +566,28 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       }
     },
 
+    highlightSpotlightRange(range: ChunkSpotlightRange | null) {
+      const measureList = osmd.GraphicSheet?.MeasureList ?? [];
+      for (let m = 0; m < measureList.length; m++) {
+        const els = getMeasureSvgElements(m);
+        for (const g of els) {
+          if (!range) {
+            g.style.opacity = "";
+            g.removeAttribute("data-spotlight-dimmed");
+            g.removeAttribute("data-spotlight-active");
+          } else if (m >= range.startMeasureIndex && m <= range.endMeasureIndex) {
+            g.style.opacity = "1";
+            g.removeAttribute("data-spotlight-dimmed");
+            g.setAttribute("data-spotlight-active", "true");
+          } else {
+            g.style.opacity = "0.42";
+            g.setAttribute("data-spotlight-dimmed", "true");
+            g.removeAttribute("data-spotlight-active");
+          }
+        }
+      }
+    },
+
     markAnchoredNotes(anchors: AnchorMarkerInfo[]) {
       clearElementsByAttr("data-studio-anchor-marker", "data-anchor-note");
       iterateMeasureGraphicalNotes(anchors, false, (matched, noteSvg) => {
@@ -863,6 +892,7 @@ export interface ScoreViewerProps {
   layoutMode?: ScoreLayoutMode;
   abLoopRange?: AbLoopHighlightRange | null;
   abPickStep?: AbPickStep;
+  spotlightChunk?: ChunkSpotlightRange | null;
   motorChunks?: MotorChunk[];
   chunkJunctions?: ChunkJunction[];
   performanceCues?: PerformanceCue[];
@@ -905,6 +935,7 @@ export function ScoreViewer({
   layoutMode = "page",
   abLoopRange = null,
   abPickStep = "idle",
+  spotlightChunk = null,
   motorChunks = [],
   chunkJunctions = [],
   performanceCues = [],
@@ -1056,6 +1087,24 @@ export function ScoreViewer({
     rendererRef.current.highlightAbLoop?.(abLoopRange ?? null);
   }, [isRendered, abLoopRange]);
 
+  const lastSpotlightKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isRendered || !rendererRef.current) return;
+    rendererRef.current.highlightSpotlightRange?.(spotlightChunk ?? null);
+    if (spotlightChunk) {
+      const key = `${spotlightChunk.chunkId}:${spotlightChunk.startMeasureIndex}:${spotlightChunk.endMeasureIndex}`;
+      if (lastSpotlightKeyRef.current !== key) {
+        lastSpotlightKeyRef.current = key;
+        rendererRef.current.scrollToMeasure(
+          spotlightChunk.startMeasureIndex,
+          scrollContainerRef.current,
+        );
+      }
+    } else {
+      lastSpotlightKeyRef.current = null;
+    }
+  }, [isRendered, spotlightChunk]);
+
   useEffect(() => {
     if (!isRendered || !rendererRef.current) return;
     const diffs =
@@ -1173,6 +1222,12 @@ export function ScoreViewer({
       data-active-measure={selectedMeasureIndex !== null ? String(selectedMeasureIndex) : undefined}
       data-selected-slice={selectedSliceId ?? undefined}
       data-selected-note={selectedNoteUid ?? undefined}
+      data-spotlight-chunk-id={spotlightChunk?.chunkId ?? undefined}
+      data-spotlight-measures={
+        spotlightChunk
+          ? `${spotlightChunk.startMeasureIndex}-${spotlightChunk.endMeasureIndex}`
+          : undefined
+      }
       className="flex min-h-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white p-2 shadow-sm sm:p-2.5"
     >
       <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1 text-xs">
