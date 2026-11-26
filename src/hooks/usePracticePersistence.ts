@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStudioStore, type StudioState } from "../store/useStudioStore";
 import { exportMxlContainer } from "../musicxml/mxl";
-import { importPracticeBackup } from "../persistence/backupMerge";
+import { importPracticeBackup, type BackupImportResolutions } from "../persistence/backupMerge";
 import { createIndexedDbStorage } from "../persistence/indexedDbStorage";
 import { createInMemoryStorage } from "../persistence/inMemoryStorage";
 import type { PieceProfile, PracticeStoragePort } from "../persistence/storagePort";
@@ -112,13 +112,13 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
     setActive(binding);
   }
 
-  async function importBackup(json: string, restore: () => Promise<void>) {
+  async function importBackup(json: string, restore: () => Promise<void>, resolutions?: BackupImportResolutions) {
     if (!storage || importing.current) return;
     const flush = persistCurrent();
     importing.current = true;
     try {
       await flush;
-      await importPracticeBackup(storage, json);
+      await importPracticeBackup(storage, json, resolutions);
       // Do not let the pre-import score write back after the merge (even if restore fails).
       activeRef.current = null;
       setActive(null);

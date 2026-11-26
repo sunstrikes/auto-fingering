@@ -6,6 +6,7 @@ import { getScoreIdentity } from "../persistence/fingerprint";
 import { applyDraft, type AnchorState } from "../persistence/anchorDrafts";
 import { archivePieceAndRestart, newPieceProfile, readLastOpenedPrefs, readRepairAlternate, resolvePieceOpen,
   type CurrentWorkspace, type OpenChoice, type OpenDecision } from "../persistence/studioPersistence";
+import type { BackupImportResolutions } from "../persistence/backupMerge";
 import type { ScoreBlobSource, WorkspacePrefs } from "../persistence/storagePort";
 import { useStudioStore, type StudioSnapshot, type StudioState } from "../store/useStudioStore";
 import { SolverCancelledError } from "../workers/solverClient";
@@ -153,7 +154,7 @@ export function useWorkspaceScoreLifecycle({
     };
   }, [persistence.storage]);
 
-  const handleBackupImport = async (json: string) => {
+  const handleBackupImport = async (json: string, resolutions?: BackupImportResolutions) => {
     const { storage } = persistence;
     if (!storage) return;
     const generation = beginScoreOpen();
@@ -174,7 +175,7 @@ export function useWorkspaceScoreLifecycle({
         if (error instanceof SolverCancelledError) return;
       }
       if (isCurrent(generation)) opened.setStatus("练习数据已导入，请重新上传乐谱");
-    });
+    }, resolutions);
   };
 
   const handleArchivePiece = async () => {

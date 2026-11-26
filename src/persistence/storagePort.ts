@@ -11,6 +11,7 @@ export interface PieceProfile {
   measureHashesByFingerprint: Record<string, string[]>;
   lastPracticedAtMs?: number;
   archivedAtMs?: number;
+  bestStableSpeed?: number;
   chunkOverrides?: {
     addedBoundaries: ScoreCoord[];
     removedBoundaries: ScoreCoord[];
