@@ -29,6 +29,7 @@ export type PianoCommandAction =
   | "start-first-note"
   | "emergency-pause"
   | "micro-rest-reminder"
+  | "peek-reveal"
   | "peek-fingerings";
 
 export interface PianoCommandRouteContext {
@@ -36,6 +37,8 @@ export interface PianoCommandRouteContext {
   firstTargetMidis: readonly number[];
   chunkMidis: Iterable<number>;
   cc64CommandEnabled: boolean;
+  allowActivePeek?: boolean;
+  allowActiveBridgeSkip?: boolean;
   /** True when cues are obscured during active play (L2, L3, hide-keyboard-early, or blind/EHS). */
   cuesObscured?: boolean;
 }
@@ -43,6 +46,7 @@ export interface PianoCommandRouteContext {
 export interface PianoCommandRouteResult {
   action: PianoCommandAction;
   emergencyPauseDisabled?: boolean;
+  peekDisabled?: boolean;
   b0PeekDisabled?: boolean;
 }
 
@@ -128,19 +132,39 @@ export function createPianoCommandRouter(options?: { chordWindowMs?: number }) {
       return { action: "none" };
     }
 
-    // Active play: single-key A0/C8 ignored; B0 triggers 1.5s peek ONLY when cuesObscured && !hasB0Collision;
+    // Active play: single-key A0/C8 ignored except Bridge C8 skip; B0 triggers 1.5s peek when blind/cuesObscured (with B0 collision guard);
     // A0+A#0 within chordWindowMs triggers pause
     if (ACTIVE_PLAY_PHASES.has(context.phase)) {
-      const b0Blocked = context.phase === "playing" && Boolean(context.cuesObscured) && hasB0Collision(context.chunkMidis);
-      if (event.midi === PIANO_COMMAND_MIDI.B0 && context.phase === "playing" && context.cuesObscured) {
-        if (b0Blocked) {
+      const b0Blocked =
+        context.phase === "playing" &&
+        Boolean(context.cuesObscured) &&
+        hasB0Collision(context.chunkMidis);
+      if (
+        context.phase === "playing" &&
+        (context.allowActivePeek || context.cuesObscured) &&
+        event.midi === PIANO_COMMAND_MIDI.B0
+      ) {
+        if (hasB0Collision(context.chunkMidis)) {
           return {
             action: "none",
             ...(dualPitchDisabled ? { emergencyPauseDisabled: true } : {}),
-            b0PeekDisabled: true,
+            ...(context.allowActivePeek ? { peekDisabled: true } : {}),
+            ...(b0Blocked ? { b0PeekDisabled: true } : {}),
           };
         }
-        return { action: "peek-fingerings" };
+        return { action: context.allowActivePeek ? "peek-reveal" : "peek-fingerings" };
+      }
+      if (context.phase === "playing" && context.allowActiveBridgeSkip && event.midi === PIANO_COMMAND_MIDI.C8) {
+        let hasC8 = false;
+        for (const m of context.chunkMidis) {
+          if (m === PIANO_COMMAND_MIDI.C8) {
+            hasC8 = true;
+            break;
+          }
+        }
+        if (!hasC8) {
+          return { action: "continue-next" };
+        }
       }
       if (event.midi === PIANO_COMMAND_MIDI.A0) {
         a0DownAtMs = event.timeStampMs;
@@ -215,7 +239,7 @@ export function createPianoCommandRouter(options?: { chordWindowMs?: number }) {
 export function routeKeyboardCommand(
   event: KeyboardCommandEventLike,
   phase: GuidedSessionPhase,
-  options?: { cuesObscured?: boolean },
+  options?: { allowActivePeek?: boolean; cuesObscured?: boolean },
 ): PianoCommandAction {
   if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
     return "none";
@@ -224,6 +248,9 @@ export function routeKeyboardCommand(
   const isSpace = event.code === "Space" || event.key === " ";
   if (ACTIVE_PLAY_PHASES.has(phase)) {
     if (isSpace) return "emergency-pause";
+    if (phase === "playing" && options?.allowActivePeek && event.key.toLowerCase() === "f") {
+      return "peek-reveal";
+    }
     if (phase === "playing" && options?.cuesObscured && event.key.toLowerCase() === "f") {
       return "peek-fingerings";
     }

@@ -1,4 +1,5 @@
 import type { CoachResult } from "../coach/types";
+import type { ColdStartProbeEvaluation } from "../guided/coldStartProbe";
 import type { GuidedSessionPhase } from "../guided/pianoCommandKeys";
 import type { AudiationCueSummary, AudiationPrimingState } from "../guided/transitionFlow";
 import type { GuidedBoutSummary } from "../store/useGuidedSessionStore";
@@ -9,6 +10,7 @@ import { ExternalFocusCoachCard } from "./ExternalFocusCoachCard";
 export interface GuidedBottomSlotProps {
   sessionPhase: GuidedSessionPhase;
   lastBoutSummary: GuidedBoutSummary | null;
+  lastProbeResult?: ColdStartProbeEvaluation | null;
   audiationCue: AudiationCueSummary;
   audiationState: AudiationPrimingState | null;
   imageryRemainingSec: number | null;
@@ -33,6 +35,7 @@ export interface GuidedBottomSlotProps {
 export function GuidedBottomSlot({
   sessionPhase,
   lastBoutSummary,
+  lastProbeResult = null,
   audiationCue,
   audiationState,
   imageryRemainingSec,
@@ -93,6 +96,44 @@ export function GuidedBottomSlot({
           profile={lastBoutSummary.acousticProfile}
           onSelectTroubleMeasure={onSelectTroubleMeasure}
         />
+      )}
+
+      {lastProbeResult && !lastProbeResult.passed && (
+        <div
+          data-testid="cold-probe-result-banner"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            {lastProbeResult.branchDivergenceDetected && (
+              <span
+                data-testid="cold-probe-switch-divergence-badge"
+                className="rounded bg-red-600 px-1.5 py-0.5 text-[11px] font-semibold text-white"
+              >
+                {lastProbeResult.flaggedLabel ?? "Switch Point 分支跑偏"}
+              </span>
+            )}
+            <span>{lastProbeResult.reasonSummary}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="cold-probe-retry-a0-btn"
+              disabled={!lastProbeResult.canRetryA0}
+              onClick={onReplayCurrent}
+              className="min-h-[44px] rounded-lg border border-amber-400 bg-white px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              立即重测 1 次 (A0)
+            </button>
+            <button
+              type="button"
+              data-testid="cold-probe-continue-c8-btn"
+              onClick={onContinueNext}
+              className="min-h-[44px] rounded-lg bg-teal-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-teal-700"
+            >
+              记录并继续 (C8)
+            </button>
+          </div>
+        </div>
       )}
 
       {showAcousticSlot && coachResult && (

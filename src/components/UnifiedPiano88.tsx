@@ -11,6 +11,7 @@ import {
   type TransitionCue,
   type WaitingResetReason,
 } from "../domain/types";
+import type { BridgeHandPositionPreview } from "../guided/bridgeWindow";
 import { isBlackKey, midiToPitchLabel } from "../solver/keyboard";
 import { whiteKeyIndexToMidi } from "./dualTrackModel";
 import {
@@ -65,6 +66,7 @@ export interface UnifiedPiano88Props {
   waitingIsHolding?: boolean;
   waitingHoldProgress?: number;
   commandKeyBadges?: Partial<Record<21 | 22 | 23 | 108, PianoCommandBadge>>;
+  bridgeHandPreview?: BridgeHandPositionPreview | null;
   onSelectSlice?: (sliceId: string) => void;
   onAuditionMidi?: (midi: number) => void;
   onVirtualNoteOn?: (midi: number, velocity?: number) => void;
@@ -612,6 +614,7 @@ export function UnifiedPiano88({
   waitingIsHolding = false,
   waitingHoldProgress = 0,
   commandKeyBadges,
+  bridgeHandPreview = null,
   onSelectSlice,
   onAuditionMidi,
   onVirtualNoteOn,
@@ -890,6 +893,38 @@ export function UnifiedPiano88({
       </div>
 
       <div className="overflow-x-auto lg:overflow-x-visible">
+        {bridgeHandPreview && (
+          <div
+            data-testid="bridge-hand-position-preview"
+            className="mb-1 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50/90 px-2.5 py-1 text-[11px] text-amber-950"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded bg-amber-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                Bridge 手位预览
+              </span>
+              <span className="font-medium">{bridgeHandPreview.prepCueLabel}</span>
+              <span className="text-amber-800">{bridgeHandPreview.shiftSummary}</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[10px] text-amber-900">
+              {bridgeHandPreview.beforeRange.rh && (
+                <span>接缝前 RH {bridgeHandPreview.beforeRange.rh.label}</span>
+              )}
+              {bridgeHandPreview.afterRange.rh && (
+                <span className="font-semibold text-teal-800">
+                  → 接缝后 RH {bridgeHandPreview.afterRange.rh.label}
+                </span>
+              )}
+              {bridgeHandPreview.beforeRange.lh && (
+                <span>接缝前 LH {bridgeHandPreview.beforeRange.lh.label}</span>
+              )}
+              {bridgeHandPreview.afterRange.lh && (
+                <span className="font-semibold text-indigo-800">
+                  → 接缝后 LH {bridgeHandPreview.afterRange.lh.label}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         <svg
           width={SVG_W}
           height={viewBoxHeight}
@@ -1252,6 +1287,42 @@ export function UnifiedPiano88({
             <g data-layer="upcoming-target-markers">
               <UpcomingTargetMarkers posture={displayFrame.lh} dimmed={dimLh} />
               <UpcomingTargetMarkers posture={displayFrame.rh} dimmed={dimRh} />
+            </g>
+          )}
+
+          {/* Bridge Window Before/After HandPosition Markers */}
+          {bridgeHandPreview && (
+            <g data-layer="bridge-hand-preview">
+              {(
+                [
+                  { side: "before", hand: "RH", span: bridgeHandPreview.beforeRange.rh, color: "#94a3b8", y: KEYS_Y - 12 },
+                  { side: "after", hand: "RH", span: bridgeHandPreview.afterRange.rh, color: "#0d9488", y: KEYS_Y - 6 },
+                  { side: "before", hand: "LH", span: bridgeHandPreview.beforeRange.lh, color: "#a5b4fc", y: KEYS_Y - 12 },
+                  { side: "after", hand: "LH", span: bridgeHandPreview.afterRange.lh, color: "#4338ca", y: KEYS_Y - 6 },
+                ] as const
+              ).map(({ side, hand, span, color, y }) => {
+                if (!span) return null;
+                const x1 = (midiToWhiteUnitX(span.thumbMidi) - 0.45) * WHITE_KEY_W;
+                const x2 = (midiToWhiteUnitX(span.pinkyMidi) + 0.45) * WHITE_KEY_W;
+                const w = Math.max(WHITE_KEY_W, x2 - x1);
+                return (
+                  <g
+                    key={`${side}-${hand}`}
+                    data-testid={`bridge-preview-${side}-marker`}
+                    data-hand={hand}
+                  >
+                    <rect
+                      x={x1}
+                      y={y}
+                      width={w}
+                      height={4}
+                      rx={2}
+                      fill={color}
+                      opacity={side === "before" ? 0.65 : 0.95}
+                    />
+                  </g>
+                );
+              })}
             </g>
           )}
         </svg>

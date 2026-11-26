@@ -7,8 +7,9 @@ import type {
   PerformanceCue,
 } from "../chunking/types";
 import type { PracticeMode, ScoreCoord } from "../domain/types";
+import { shouldPrewarmStaticJunction } from "./bridgeWindow";
+import { buildColdStartProbeItems, isColdProbeLocallyUnlocked } from "./coldStartProbe";
 import {
-  compareScoreCoord,
   roundSpeed,
   spanContains,
   type MotorUnitMemoryState,
@@ -28,6 +29,7 @@ export interface PlannedQueueItem {
   skipStage0: boolean;
   isColdFirstPass: boolean;
   targetSpeed: number;
+  preBridgeOriginalSpeed?: number;
   estimatedDurationSec: number;
   clusterId?: string;
   isClusterWarmStart?: boolean;
@@ -80,10 +82,6 @@ export interface SessionPlannerInput {
 
 export const OVERDUE_BACKLOG_THRESHOLD = 10;
 export const DECODING_DEFAULT_SPEED = 0.55;
-
-function clamp(val: number, min: number, max: number): number {
-  return val < min ? min : val > max ? max : val;
-}
 
 function estimateChunkBoutSec(chunk: MotorChunk, speed: number): number {
   const safeSpeed = Math.max(0.45, speed);
@@ -239,24 +237,19 @@ export function isColdProbeUnlocked(
   motorChunks: readonly MotorChunk[],
   chunkStates: Record<string, MotorUnitMemoryState>,
 ): boolean {
-  for (const section of macroSections) {
-    if (section.chunkIds.length === 0) continue;
-    if (section.chunkIds.every((id) => (chunkStates[id]?.reviewCount ?? 0) > 0)) {
-      return true;
-    }
-  }
-
-  let contiguous = 0;
-  const ordered = [...motorChunks].sort((a, b) => a.index - b.index);
-  for (const chunk of ordered) {
-    if ((chunkStates[chunk.chunkId]?.reviewCount ?? 0) > 0) {
-      contiguous += 1;
-      if (contiguous >= 3) return true;
-    } else {
-      contiguous = 0;
-    }
-  }
-  return false;
+  return isColdProbeLocallyUnlocked({
+    macroSections,
+    motorChunks,
+    piecePracticeState: {
+      reducerVersion: 1,
+      pieceId: "",
+      eventCount: 0,
+      bestStableSpeed: 0,
+      layoutSignature: "",
+      chunkStates,
+      junctionStates: {},
+    },
+  });
 }
 
 /**
@@ -313,28 +306,6 @@ function computeChunkJunctionRisk(
     }
   }
   return { maxRisk, hasSwitchPoint };
-}
-
-function computeProbeEndCoord(
-  cue: PerformanceCue,
-  nextCue: PerformanceCue | undefined,
-  motorChunks: readonly MotorChunk[],
-): ScoreCoord {
-  const maxMeasure = motorChunks.reduce(
-    (max, c) => Math.max(max, c.endMeasureIndex),
-    cue.measureIndex,
-  );
-  const spanMeasures = cue.kind === "switch" ? 3 : 2;
-  const maxEndMeasure = Math.min(maxMeasure + 1, cue.measureIndex + spanMeasures);
-  const capEndCoord: ScoreCoord = { measureIndex: maxEndMeasure, beatNum: 0, beatDen: 1 };
-
-  if (nextCue && compareScoreCoord(nextCue.coord, cue.coord) > 0) {
-    if (cue.kind === "switch" && nextCue.measureIndex < cue.measureIndex + 2) {
-      return capEndCoord;
-    }
-    return compareScoreCoord(nextCue.coord, capEndCoord) < 0 ? nextCue.coord : capEndCoord;
-  }
-  return capEndCoord;
 }
 
 /**
@@ -579,7 +550,7 @@ export function planGuidedSession(input: SessionPlannerInput): SessionPlan {
   const fragileJunctions = input.chunkJunctions
     .filter(
       (j) =>
-        (j.isHighRisk || j.priorRisk >= 0.65 || j.reasonTags.includes("switch-point")) &&
+        shouldPrewarmStaticJunction(j) &&
         (sessionChunkIdSet.has(j.leftChunkId) || sessionChunkIdSet.has(j.rightChunkId)),
     )
     .slice(0, 2);
@@ -627,48 +598,22 @@ export function planGuidedSession(input: SessionPlannerInput): SessionPlan {
   }
 
   // 3. Closing retrieval reserve: 2-4 Chaffin PerformanceCue probes when unlocked
-  const closingProbes: PlannedQueueItem[] = [];
-  if (coldProbeUnlocked) {
-    const practicedMeasures = new Set<number>();
-    for (const chunk of orderedChunks) {
-      if ((chunkStates[chunk.chunkId]?.reviewCount ?? 0) > 0) {
-        for (let m = chunk.startMeasureIndex; m <= chunk.endMeasureIndex; m++) {
-          practicedMeasures.add(m);
-        }
-      }
-    }
-    const unlockedCues = input.performanceCues
-      .filter((c) => !c.hidden && !c.collapsed && practicedMeasures.has(c.measureIndex))
-      .sort((a, b) => b.priorityWeight - a.priorityWeight || a.measureIndex - b.measureIndex);
-
-    const probeCap = clamp(input.timeBoxMinutes === 15 ? 2 : 4, 2, 4);
-    const chosenCues = unlockedCues.slice(0, probeCap);
-
-    for (let i = 0; i < chosenCues.length; i++) {
-      const cue = chosenCues[i];
-      const nextCue = input.performanceCues.find(
-        (other) => compareScoreCoord(other.coord, cue.coord) > 0 && !other.hidden,
-      );
-      const anchorChunk =
-        orderedChunks.find(
-          (c) => cue.measureIndex >= c.startMeasureIndex && cue.measureIndex <= c.endMeasureIndex,
-        ) ?? effectiveChunks[0];
-      if (!anchorChunk) continue;
-      const st = chunkStates[anchorChunk.chunkId];
-      closingProbes.push({
-        itemId: `probe-${i}-${cue.cueId}`,
-        segment: "closing-probe",
-        boutKind: "cold-probe",
-        chunk: anchorChunk,
-        cue,
-        probeEndCoord: computeProbeEndCoord(cue, nextCue, orderedChunks),
-        skipStage0: true,
-        isColdFirstPass: isUnitDueForReview(st, input.nowLocalDateKey),
-        targetSpeed: st ? st.stableSpeed : 0.75,
-        estimatedDurationSec: 30,
-      });
-    }
-  }
+  const probeCap = input.timeBoxMinutes === 15 ? 2 : 4;
+  const closingProbes: PlannedQueueItem[] = coldProbeUnlocked
+    ? buildColdStartProbeItems({
+        macroSections: input.macroSections,
+        motorChunks: orderedChunks,
+        performanceCues: input.performanceCues,
+        passageClusters: input.passageClusters,
+        piecePracticeState: input.piecePracticeState,
+        selectedMacroSectionId: input.selectedMacroSectionId,
+        nowTimestampMs: input.nowTimestampMs,
+        nowLocalDateKey: input.nowLocalDateKey,
+        count: probeCap,
+        seed: input.nowTimestampMs & 0xffffffff,
+        manualMode: false,
+      })
+    : [];
 
   const items = [...openingReviews, ...middleItems, ...closingProbes];
   const summaryParts: string[] = [];
