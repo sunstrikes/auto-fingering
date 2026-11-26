@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { MotorChunk } from "../chunking/types";
 import type { PracticeStep } from "../domain/types";
+import type { AcousticProfileResult } from "../guided/acousticProfile";
 import type { GuidedSessionPhase } from "../guided/pianoCommandKeys";
 import {
   buildStage0TelemetrySummary,
@@ -35,8 +36,14 @@ export interface GuidedBoutSummary {
   accuracy: number;
   passAttempts: number;
   telemetryIsolated: boolean;
+  acousticProfile?: AcousticProfileResult;
   headline: string;
   detail: string;
+}
+
+export interface ContinuousBoutCompletionPayload {
+  accuracy?: number;
+  acousticProfile?: AcousticProfileResult;
 }
 
 export interface SuspendedGuidedSessionSnapshot {
@@ -103,7 +110,7 @@ export interface GuidedSessionState {
   startSession: (payload: StartGuidedSessionPayload) => void;
   setStage0State: (next: Stage0State | null) => void;
   graduateStage0ToPlaying: (nowMs: number) => void;
-  completePlayingBout: (nowMs: number) => void;
+  completePlayingBout: (nowMs: number, payload?: ContinuousBoutCompletionPayload) => void;
   skipMicroRest: (nowMs?: number) => void;
   finishMicroRest: (nowMs?: number) => void;
   pauseActivePlay: (nowMs: number) => void;
@@ -313,7 +320,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
     });
   },
 
-  completePlayingBout: (nowMs) => {
+  completePlayingBout: (nowMs, payload) => {
     const state = get();
     const chunk = state.chunkQueue[state.currentQueueIndex];
     if (!chunk) return;
@@ -322,6 +329,7 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       durationSec: state.microRestDurationSec,
     });
     const prevPasses = state.chunkPassCountsById[chunk.chunkId] ?? 0;
+    const accuracy = payload?.accuracy ?? state.lastBoutSummary?.accuracy ?? 1;
     set({
       sessionPhase: "micro-rest",
       pausedFromPhase: null,
@@ -341,9 +349,10 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
         startMeasureIndex: chunk.startMeasureIndex,
         endMeasureIndex: chunk.endMeasureIndex,
         stage: "continuous",
-        accuracy: state.lastBoutSummary?.accuracy ?? 1,
+        accuracy,
         passAttempts: (state.lastBoutSummary?.passAttempts ?? 0) + 1,
         telemetryIsolated: false,
+        ...(payload?.acousticProfile ? { acousticProfile: payload.acousticProfile } : {}),
         headline: `块 ${chunk.index + 1}（m.${chunk.startMeasureIndex + 1}–${chunk.endMeasureIndex + 1}）回合结束`,
         detail: "进入清醒微休息，静放双手以巩固动作记忆",
       },

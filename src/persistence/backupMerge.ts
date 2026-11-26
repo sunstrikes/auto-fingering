@@ -155,7 +155,7 @@ function isAcoustic(value: unknown) {
     optional(row.worstTimingMeasure, isCount) &&
     (row.secondaryDimension === "voicing" || row.secondaryDimension === "articulation" || row.secondaryDimension === "hidden") &&
     optional(row.voicingDeltaDb, isNumber) && optional(row.melodyRankDominance, isRatio) &&
-    optional(row.articulationKor, isNonnegative) &&
+    optional(row.articulationKor, (v) => isNumber(v) && v >= -1 && v <= 1) &&
     (row.tertiaryDimension === "pedal" || row.tertiaryDimension === "hand-sync" || row.tertiaryDimension === "hidden") &&
     optional(row.pedalClarityRate, isRatio) && optional(row.handSyncStatus, isStatus) &&
     optional(row.bleQuantizationRelaxed, isBoolean);

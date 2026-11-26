@@ -1,6 +1,7 @@
 import type { GuidedSessionPhase } from "../guided/pianoCommandKeys";
 import type { AudiationCueSummary, AudiationPrimingState } from "../guided/transitionFlow";
 import type { GuidedBoutSummary } from "../store/useGuidedSessionStore";
+import { AcousticProfileSlot } from "./AcousticProfileSlot";
 import { AudiationPrimingBar } from "./AudiationPrimingBar";
 
 export interface GuidedBottomSlotProps {
@@ -14,6 +15,7 @@ export interface GuidedBottomSlotProps {
   onShowFingerings: () => void;
   onContinueNext: () => void;
   onReplayCurrent: () => void;
+  onSelectTroubleMeasure?: (measureIndex: number) => void;
 }
 
 /**
@@ -32,7 +34,10 @@ export function GuidedBottomSlot({
   onShowFingerings,
   onContinueNext,
   onReplayCurrent,
+  onSelectTroubleMeasure,
 }: GuidedBottomSlotProps) {
+  const showAcousticSlot = sessionPhase !== "micro-rest" && Boolean(lastBoutSummary?.acousticProfile);
+
   return (
     <section
       data-testid="guided-delayed-feedback-panel"
@@ -44,6 +49,13 @@ export function GuidedBottomSlot({
           <span className="font-semibold text-slate-800">{lastBoutSummary.headline}</span>
           <span className="text-slate-500">{lastBoutSummary.detail}</span>
         </div>
+      )}
+
+      {showAcousticSlot && lastBoutSummary?.acousticProfile && (
+        <AcousticProfileSlot
+          profile={lastBoutSummary.acousticProfile}
+          onSelectTroubleMeasure={onSelectTroubleMeasure}
+        />
       )}
 
       {sessionPhase === "audiation" ? (

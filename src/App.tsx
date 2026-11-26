@@ -60,7 +60,12 @@ import { useGuidedSessionController } from "./hooks/useGuidedSessionController";
 import { GuidedSessionLaunchCard } from "./components/GuidedSessionLaunchCard";
 import { GuidedResumePill, GuidedSessionHeader } from "./components/GuidedSessionHeader";
 import { GuidedBottomSlot } from "./components/GuidedBottomSlot";
+import { AcousticProfileSlot } from "./components/AcousticProfileSlot";
 import { MicroRestVeil } from "./components/MicroRestVeil";
+import {
+  analyzeContinuousPerformanceWindow,
+  type AcousticProfileResult,
+} from "./guided/acousticProfile";
 import { PracticeBackupPanel, ScoreOpenChoice } from "./components/PracticeBackupPanel";
 import { buildMeasureRiskSummaries, type MeasureGeometry } from "./components/MarginRiskGutter";
 import { NoteAnchorPopover, type PopoverAnchorRect } from "./components/NoteAnchorPopover";
@@ -230,6 +235,13 @@ export default function App({
     createPracticeAnalyticsState()
   );
   const [practiceReportOpen, setPracticeReportOpen] = useState<boolean>(false);
+  const [freeAcousticState, setFreeAcousticState] = useState<{
+    profile: AcousticProfileResult;
+    startMeasureIndex: number;
+    endMeasureIndex: number;
+    passCount: number;
+  } | null>(null);
+  const [freeAcousticOpen, setFreeAcousticOpen] = useState<boolean>(false);
   const [handsRejoinSpeed, setHandsRejoinSpeed] = useState<{ from: number; to: number } | null>(null);
   const [abLoop, setAbLoop] = useState<AbLoopBounds>(() => createDefaultAbLoopBounds(0));
   const waitingLoopGapActiveRef = useRef<boolean>(false);
@@ -360,10 +372,28 @@ export default function App({
   // Close the old capture synchronously on score replacement, before another MIDI packet can arrive.
   useEffect(() => {
     const unsubscribe = useStudioStore.subscribe((state, previous) => {
-      if (state.scoreDoc !== previous.scoreDoc) resetMidiCapture();
+      if (state.scoreDoc !== previous.scoreDoc) {
+        resetMidiCapture();
+        setFreeAcousticState(null);
+        setFreeAcousticOpen(false);
+      }
     });
     return () => { unsubscribe(); resetMidiCapture(); };
   }, [resetMidiCapture]);
+
+  const freeLoopContextRef = useRef<{
+    waitingModeEnabled: boolean;
+    practiceSteps: PracticeStep[];
+    effectivePracticeMode: PracticeMode;
+    deviceNames: string[];
+    nowMs: () => number;
+  }>({
+    waitingModeEnabled: false,
+    practiceSteps: [],
+    effectivePracticeMode: "both",
+    deviceNames: [],
+    nowMs,
+  });
 
   useEffect(() => {
     const audioEngine = createPianoAudioEngine({
@@ -387,6 +417,32 @@ export default function App({
       onCursorSync: setCursorTarget,
       onFrame: setPlaybackFrame,
       onMetronomeBeat: setActiveMetronomeBeat,
+      onAbLoopIterationComplete: ({ anchor, startMeasureIndex, endMeasureIndex, completedAtPerfMs }) => {
+        const ctx = freeLoopContextRef.current;
+        if (guidedControllerRef.current?.studioMode !== "free" || ctx.waitingModeEnabled) return;
+        const activeDoc = useStudioStore.getState().scoreDoc;
+        if (!activeDoc) return;
+        const loopSteps = ctx.practiceSteps.filter(
+          (s) => s.measureIndex >= startMeasureIndex && s.measureIndex <= endMeasureIndex,
+        );
+        const analyzed = analyzeContinuousPerformanceWindow({
+          clockAnchor: anchor,
+          expectedSteps: loopSteps,
+          scoreDoc: activeDoc,
+          practiceMode: ctx.effectivePracticeMode,
+          sliceContinuousMidiWindow: (fromMs, toMs) =>
+            midiCapture.sliceWindow(fromMs, toMs, { mode: "continuous", transport: "playing" }),
+          endClockMs: Math.max(completedAtPerfMs, ctx.nowMs()),
+          deviceNames: ctx.deviceNames,
+        });
+        if (!analyzed) return;
+        setFreeAcousticState((prev) => ({
+          profile: analyzed.acousticProfile,
+          startMeasureIndex,
+          endMeasureIndex,
+          passCount: (prev?.passCount ?? 0) + 1,
+        }));
+      },
     });
     playbackEngineRef.current = engine;
     return () => {
@@ -394,7 +450,7 @@ export default function App({
       playbackEngineRef.current = null;
       audioEngineRef.current = null;
     };
-  }, [audioDeps, updatePlaybackState]);
+  }, [audioDeps, updatePlaybackState, midiCapture]);
 
   const guidedControllerRef = useRef<{
     studioMode: "free" | "guided";
@@ -930,6 +986,24 @@ export default function App({
     [scoreDoc, effectivePracticeMode, skipGraceNotes]
   );
 
+  const midiDeviceNames = useMemo(
+    () => midiState.devices.map((d) => d.name),
+    [midiState.devices],
+  );
+  freeLoopContextRef.current = {
+    waitingModeEnabled,
+    practiceSteps,
+    effectivePracticeMode,
+    deviceNames: midiDeviceNames,
+    nowMs,
+  };
+
+  const sliceContinuousMidiWindow = useCallback(
+    (fromMs: number, toMs: number) =>
+      midiCapture.sliceWindow(fromMs, toMs, { mode: "continuous", transport: "playing" }),
+    [midiCapture],
+  );
+
   const measureErrorsByIndex = useMemo(
     () => buildMeasureErrorSummaries(practiceAnalytics, effectivePracticeMode),
     [practiceAnalytics, effectivePracticeMode]
@@ -1204,6 +1278,8 @@ export default function App({
     countInEnabled,
     setMidiCaptureMode: (mode) => midiCapture.setMode(mode),
     resetMidiCapture,
+    sliceContinuousMidiWindow,
+    deviceNames: midiDeviceNames,
     syncWaitingToStep: syncToPracticeStep,
     resetWaitingCursor: (stepIndex = 0) => setWaitingStateSync(createWaitingModeState(stepIndex)),
     nowMs,
@@ -2495,6 +2571,70 @@ export default function App({
               </div>
             )}
 
+            {guided.studioMode === "free" && freeAcousticState && (
+              <div className="relative">
+                <button
+                  type="button"
+                  data-testid="free-acoustic-badge-btn"
+                  aria-expanded={freeAcousticOpen}
+                  onClick={() => {
+                    setFreeAcousticOpen((v) => !v);
+                    setPracticeReportOpen(false);
+                    setRepairPanelOpen(false);
+                    setDiffDropdownOpen(false);
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${
+                    freeAcousticState.profile.troubleMeasures.length > 0
+                      ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+                      : "border-teal-300 bg-teal-50 text-teal-900 hover:bg-teal-100"
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      freeAcousticState.profile.timingEvennessStatus === "red"
+                        ? "bg-rose-500"
+                        : freeAcousticState.profile.troubleMeasures.length > 0
+                          ? "bg-amber-500"
+                          : "bg-emerald-500"
+                    }`}
+                  />
+                  声学画像 · m.{freeAcousticState.startMeasureIndex + 1}–{freeAcousticState.endMeasureIndex + 1}
+                </button>
+                {freeAcousticOpen && (
+                  <div
+                    data-testid="free-acoustic-popover"
+                    className="absolute right-0 top-7 z-40 w-[360px] max-w-[92vw] rounded-xl border border-slate-200 bg-white p-3 shadow-xl"
+                  >
+                    <div className="mb-2 flex items-center justify-between border-b border-slate-100 pb-1.5 text-xs">
+                      <div>
+                        <span className="font-semibold text-slate-900">
+                          A-B Loop 声学画像（纯内存只读）
+                        </span>
+                        <span className="ml-2 text-[11px] text-slate-500">
+                          m.{freeAcousticState.startMeasureIndex + 1}–{freeAcousticState.endMeasureIndex + 1} · 第 {freeAcousticState.passCount} 遍
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFreeAcousticOpen(false)}
+                        className="rounded px-1 text-slate-400 hover:text-slate-700"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <AcousticProfileSlot
+                      profile={freeAcousticState.profile}
+                      compact
+                      onSelectTroubleMeasure={(mIdx) => {
+                        handleSelectMeasure(mIdx);
+                        setFreeAcousticOpen(false);
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
             {(totalPracticeFaults > 0 || practiceAnalytics.completedPasses > 0 || handsRejoinSpeed) && (
               <div className="relative">
                 <button
@@ -2938,7 +3078,9 @@ export default function App({
 
       {/* Bottom Pane: Full-Width 88-Key Physical Piano & Dual-Hand Posture Simulation */}
       <div data-testid="bottom-piano-pane" className="shrink-0">
-        {guided.studioMode === "guided" && guided.bottomSlotView === "feedback" ? (
+        {guided.studioMode === "guided" &&
+        guided.sessionPhase !== "micro-rest" &&
+        guided.bottomSlotView === "feedback" ? (
           <GuidedBottomSlot
             sessionPhase={guided.sessionPhase}
             lastBoutSummary={guided.lastBoutSummary}
@@ -2954,6 +3096,10 @@ export default function App({
             onShowFingerings={() => guided.setBottomSlotView("piano")}
             onContinueNext={() => guided.executeCommandAction("continue-next")}
             onReplayCurrent={() => guided.executeCommandAction("replay-chunk")}
+            onSelectTroubleMeasure={(measureIndex) => {
+              handleSelectMeasure(measureIndex);
+              guided.setBottomSlotView("piano");
+            }}
           />
         ) : (
         <UnifiedPiano88
