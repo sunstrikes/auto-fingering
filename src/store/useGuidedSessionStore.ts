@@ -10,6 +10,16 @@ import {
   type Stage0GraduationReason,
   type Stage0State,
 } from "../guided/stage0Controller";
+import {
+  DEFAULT_MICRO_REST_DURATION_SEC,
+  clampMicroRestDurationSec,
+  createAudiationPrimingState,
+  createMicroRestState,
+  recordMicroRestAccidentalKeystroke,
+  type AudiationPreviewMode,
+  type AudiationPrimingState,
+  type MicroRestState,
+} from "../guided/transitionFlow";
 
 export type StudioMode = "free" | "guided";
 export type GuidedTimeBoxMinutes = 15 | 25 | 40;
@@ -59,11 +69,17 @@ export interface GuidedSessionState {
   stage0State: Stage0State | null;
   bottomSlotView: BottomSlotView;
   cc64CommandEnabled: boolean;
+  microRestDurationSec: number;
+  audiationPreviewMode: AudiationPreviewMode;
+  audiationImageryTimerEnabled: boolean;
   sessionStartedAtMs: number | null;
   pausedFromPhase: "stage0" | "playing" | null;
   microRestStartedAtMs: number | null;
   microRestDurationMs: number;
   microRestReminder: string | null;
+  microRestState: MicroRestState | null;
+  audiationState: AudiationPrimingState | null;
+  chunkPassCountsById: Record<string, number>;
   commandNotice: string | null;
   lastBoutSummary: GuidedBoutSummary | null;
   suspendedSnapshot: SuspendedGuidedSessionSnapshot | null;
@@ -73,17 +89,23 @@ export interface GuidedSessionState {
   setTimeBoxMinutes: (minutes: GuidedTimeBoxMinutes) => void;
   setSelectedMacroSectionId: (sectionId: string | null) => void;
   setCc64CommandEnabled: (enabled: boolean) => void;
+  setMicroRestDurationSec: (sec: number) => void;
+  setAudiationPreviewMode: (mode: AudiationPreviewMode) => void;
+  setAudiationImageryTimerEnabled: (enabled: boolean) => void;
   setBottomSlotView: (view: BottomSlotView) => void;
   toggleBottomSlotView: () => void;
   setCommandNotice: (notice: string | null) => void;
   setMicroRestReminder: (reminder: string | null) => void;
+  recordMicroRestAccidentalKey: (nowMs: number) => void;
+  setAudiationState: (next: AudiationPrimingState | null) => void;
+  seedChunkPassCounts: (counts: Record<string, number>) => void;
 
   startSession: (payload: StartGuidedSessionPayload) => void;
   setStage0State: (next: Stage0State | null) => void;
   graduateStage0ToPlaying: (nowMs: number) => void;
   completePlayingBout: (nowMs: number) => void;
-  skipMicroRest: () => void;
-  finishMicroRest: () => void;
+  skipMicroRest: (nowMs?: number) => void;
+  finishMicroRest: (nowMs?: number) => void;
   pauseActivePlay: (nowMs: number) => void;
   resumePausedPlay: (nowMs: number) => void;
   advanceToNextChunk: (stepsForNextChunk: PracticeStep[], speedMultiplier: number, nowMs: number) => void;
@@ -94,7 +116,7 @@ export interface GuidedSessionState {
   reset: () => void;
 }
 
-export const DEFAULT_MICRO_REST_DURATION_MS = 12_000;
+export const DEFAULT_MICRO_REST_DURATION_MS = DEFAULT_MICRO_REST_DURATION_SEC * 1000;
 
 const initialGuidedState = {
   studioMode: "free" as StudioMode,
@@ -106,11 +128,17 @@ const initialGuidedState = {
   stage0State: null as Stage0State | null,
   bottomSlotView: "piano" as BottomSlotView,
   cc64CommandEnabled: false,
+  microRestDurationSec: DEFAULT_MICRO_REST_DURATION_SEC,
+  audiationPreviewMode: "auto-unfamiliar" as AudiationPreviewMode,
+  audiationImageryTimerEnabled: false,
   sessionStartedAtMs: null as number | null,
   pausedFromPhase: null as "stage0" | "playing" | null,
   microRestStartedAtMs: null as number | null,
   microRestDurationMs: DEFAULT_MICRO_REST_DURATION_MS,
   microRestReminder: null as string | null,
+  microRestState: null as MicroRestState | null,
+  audiationState: null as AudiationPrimingState | null,
+  chunkPassCountsById: {} as Record<string, number>,
   commandNotice: null as string | null,
   lastBoutSummary: null as GuidedBoutSummary | null,
   suspendedSnapshot: null as SuspendedGuidedSessionSnapshot | null,
@@ -162,6 +190,8 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       pausedFromPhase: null,
       microRestStartedAtMs: null,
       microRestReminder: null,
+      microRestState: null,
+      audiationState: null,
       commandNotice: null,
       bottomSlotView: "piano",
     }),
@@ -171,6 +201,22 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
   setSelectedMacroSectionId: (selectedMacroSectionId) => set({ selectedMacroSectionId }),
 
   setCc64CommandEnabled: (cc64CommandEnabled) => set({ cc64CommandEnabled }),
+
+  setMicroRestDurationSec: (sec) => {
+    const clamped = clampMicroRestDurationSec(sec);
+    set((state) => ({
+      microRestDurationSec: clamped,
+      microRestDurationMs: clamped * 1000,
+      microRestState: state.microRestState
+        ? { ...state.microRestState, durationMs: clamped * 1000 }
+        : null,
+    }));
+  },
+
+  setAudiationPreviewMode: (audiationPreviewMode) => set({ audiationPreviewMode }),
+
+  setAudiationImageryTimerEnabled: (audiationImageryTimerEnabled) =>
+    set({ audiationImageryTimerEnabled }),
 
   setBottomSlotView: (bottomSlotView) => set({ bottomSlotView }),
 
@@ -182,6 +228,25 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
   setCommandNotice: (commandNotice) => set({ commandNotice }),
 
   setMicroRestReminder: (microRestReminder) => set({ microRestReminder }),
+
+  recordMicroRestAccidentalKey: (nowMs) =>
+    set((state) => {
+      const base =
+        state.microRestState ??
+        createMicroRestState({
+          startedAtMs: state.microRestStartedAtMs ?? nowMs,
+          durationSec: state.microRestDurationSec,
+        });
+      const next = recordMicroRestAccidentalKeystroke(base, nowMs);
+      return {
+        microRestState: next,
+        microRestReminder: next.reminderMessage,
+      };
+    }),
+
+  setAudiationState: (audiationState) => set({ audiationState }),
+
+  seedChunkPassCounts: (counts) => set({ chunkPassCountsById: { ...counts } }),
 
   startSession: ({ chunks, firstChunkSteps, speedMultiplier, nowMs, startInStage0 = true }) => {
     if (chunks.length === 0) return;
@@ -207,6 +272,8 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       pausedFromPhase: null,
       microRestStartedAtMs: null,
       microRestReminder: null,
+      microRestState: null,
+      audiationState: null,
       commandNotice: null,
       lastBoutSummary: null,
       suspendedSnapshot: null,
@@ -250,11 +317,23 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
     const state = get();
     const chunk = state.chunkQueue[state.currentQueueIndex];
     if (!chunk) return;
+    const microRestState = createMicroRestState({
+      startedAtMs: nowMs,
+      durationSec: state.microRestDurationSec,
+    });
+    const prevPasses = state.chunkPassCountsById[chunk.chunkId] ?? 0;
     set({
       sessionPhase: "micro-rest",
       pausedFromPhase: null,
       microRestStartedAtMs: nowMs,
+      microRestDurationMs: microRestState.durationMs,
       microRestReminder: null,
+      microRestState,
+      audiationState: null,
+      chunkPassCountsById: {
+        ...state.chunkPassCountsById,
+        [chunk.chunkId]: prevPasses + 1,
+      },
       commandNotice: null,
       lastBoutSummary: {
         chunkId: chunk.chunkId,
@@ -271,23 +350,61 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
     });
   },
 
-  skipMicroRest: () =>
+  skipMicroRest: (nowMs = Date.now()) =>
     set((state) => {
-      const hasNext = state.currentQueueIndex + 1 < state.chunkQueue.length;
+      const nextChunk = state.chunkQueue[state.currentQueueIndex + 1] ?? null;
+      if (!nextChunk) {
+        return {
+          sessionPhase: "summary",
+          bottomSlotView: "feedback",
+          microRestStartedAtMs: null,
+          microRestReminder: null,
+          microRestState: null,
+          audiationState: null,
+        };
+      }
       return {
-        sessionPhase: hasNext ? "audiation" : "summary",
+        sessionPhase: "audiation",
+        bottomSlotView: "feedback",
         microRestStartedAtMs: null,
         microRestReminder: null,
+        microRestState: null,
+        audiationState: createAudiationPrimingState({
+          enteredAtMs: nowMs,
+          chunkId: nextChunk.chunkId,
+          historicalPassCount: state.chunkPassCountsById[nextChunk.chunkId] ?? 0,
+          previewMode: state.audiationPreviewMode,
+          imageryTimerEnabled: state.audiationImageryTimerEnabled,
+        }),
       };
     }),
 
-  finishMicroRest: () =>
+  finishMicroRest: (nowMs = Date.now()) =>
     set((state) => {
-      const hasNext = state.currentQueueIndex + 1 < state.chunkQueue.length;
+      const nextChunk = state.chunkQueue[state.currentQueueIndex + 1] ?? null;
+      if (!nextChunk) {
+        return {
+          sessionPhase: "summary",
+          bottomSlotView: "feedback",
+          microRestStartedAtMs: null,
+          microRestReminder: null,
+          microRestState: null,
+          audiationState: null,
+        };
+      }
       return {
-        sessionPhase: hasNext ? "audiation" : "summary",
+        sessionPhase: "audiation",
+        bottomSlotView: "feedback",
         microRestStartedAtMs: null,
         microRestReminder: null,
+        microRestState: null,
+        audiationState: createAudiationPrimingState({
+          enteredAtMs: nowMs,
+          chunkId: nextChunk.chunkId,
+          historicalPassCount: state.chunkPassCountsById[nextChunk.chunkId] ?? 0,
+          previewMode: state.audiationPreviewMode,
+          imageryTimerEnabled: state.audiationImageryTimerEnabled,
+        }),
       };
     }),
 
@@ -326,9 +443,12 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
     if (nextIdx >= state.chunkQueue.length) {
       set({
         sessionPhase: "summary",
+        bottomSlotView: "feedback",
         pausedFromPhase: null,
         microRestStartedAtMs: null,
         microRestReminder: null,
+        microRestState: null,
+        audiationState: null,
         commandNotice: "本轮队列已完成",
       });
       return;
@@ -341,6 +461,8 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       pausedFromPhase: null,
       microRestStartedAtMs: null,
       microRestReminder: null,
+      microRestState: null,
+      audiationState: null,
       bottomSlotView: "piano",
       commandNotice: null,
       stage0State: shouldStage0
@@ -364,6 +486,8 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       pausedFromPhase: null,
       microRestStartedAtMs: null,
       microRestReminder: null,
+      microRestState: null,
+      audiationState: null,
       bottomSlotView: "piano",
       commandNotice: null,
       stage0State: shouldStage0
@@ -451,6 +575,11 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
     set((state) => ({
       ...initialGuidedState,
       cc64CommandEnabled: state.cc64CommandEnabled,
+      microRestDurationSec: state.microRestDurationSec,
+      microRestDurationMs: state.microRestDurationSec * 1000,
+      audiationPreviewMode: state.audiationPreviewMode,
+      audiationImageryTimerEnabled: state.audiationImageryTimerEnabled,
+      chunkPassCountsById: state.chunkPassCountsById,
       studioMode: "free",
       sessionPhase: "idle",
     })),

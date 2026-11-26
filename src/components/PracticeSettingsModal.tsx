@@ -31,6 +31,9 @@ export interface PracticeSettingsModalProps {
   absoluteStrictnessEnabled?: boolean;
   strictHoldDurationEnabled?: boolean;
   cc64CommandEnabled?: boolean;
+  microRestDurationSec?: number;
+  audiationPreviewMode?: "auto-unfamiliar" | "manual";
+  audiationImageryTimerEnabled?: boolean;
   showStatusBar?: boolean;
   showPianoOverhead?: boolean;
   showFullPalm?: boolean;
@@ -52,6 +55,9 @@ export interface PracticeSettingsModalProps {
   onToggleAbsoluteStrictness?: () => void;
   onToggleStrictHoldDuration?: () => void;
   onToggleCc64Command?: () => void;
+  onChangeMicroRestDurationSec?: (sec: number) => void;
+  onChangeAudiationPreviewMode?: (mode: "auto-unfamiliar" | "manual") => void;
+  onToggleAudiationImageryTimer?: () => void;
   onToggleShowStatusBar?: () => void;
   onToggleShowPianoOverhead?: () => void;
   onToggleShowFullPalm?: () => void;
@@ -111,6 +117,9 @@ export function PracticeSettingsModal({
   absoluteStrictnessEnabled = false,
   strictHoldDurationEnabled = false,
   cc64CommandEnabled = false,
+  microRestDurationSec = 12,
+  audiationPreviewMode = "auto-unfamiliar",
+  audiationImageryTimerEnabled = false,
   showStatusBar = true,
   showPianoOverhead = true,
   showFullPalm = true,
@@ -132,6 +141,9 @@ export function PracticeSettingsModal({
   onToggleAbsoluteStrictness,
   onToggleStrictHoldDuration,
   onToggleCc64Command,
+  onChangeMicroRestDurationSec,
+  onChangeAudiationPreviewMode,
+  onToggleAudiationImageryTimer,
   onToggleShowStatusBar,
   onToggleShowPianoOverhead,
   onToggleShowFullPalm,
@@ -419,6 +431,75 @@ export function PracticeSettingsModal({
               className="h-4 w-4 accent-teal-600"
             />
           </label>
+
+          {/* Guided Session Transition Gap (Micro-Rest + Audiation Priming) */}
+          <div className="space-y-2.5 rounded-lg border border-teal-200/80 bg-teal-50/40 p-2.5">
+            <div className="font-semibold text-teal-950">科学练琴过渡间隙（Micro-Rest &amp; Audiation）</div>
+
+            <div>
+              <div className="mb-1 flex items-center justify-between">
+                <label htmlFor="micro-rest-duration-slider" className="font-medium text-slate-900">
+                  清醒微休息（Micro-Rest）时长
+                </label>
+                <span
+                  data-testid="micro-rest-duration-value"
+                  className="text-[11px] font-semibold text-teal-800"
+                >
+                  {microRestDurationSec} s
+                </span>
+              </div>
+              <input
+                id="micro-rest-duration-slider"
+                data-testid="micro-rest-duration-slider"
+                type="range"
+                min={10}
+                max={15}
+                step={1}
+                value={microRestDurationSec}
+                onChange={(e) => onChangeMicroRestDurationSec?.(Number.parseInt(e.target.value, 10))}
+                className="w-full accent-teal-600"
+              />
+              <div className="mt-0.5 text-[11px] text-slate-500">
+                默认 12 s（可调 10–15 s），休息期间严格零数据，按 C8 可随时跳过。
+              </div>
+            </div>
+
+            <div className="space-y-1 border-t border-teal-200/60 pt-2">
+              <label htmlFor="audiation-preview-mode-select" className="block font-medium text-slate-900">
+                Audiation Priming 音频范奏触发
+              </label>
+              <select
+                id="audiation-preview-mode-select"
+                data-testid="audiation-preview-mode-select"
+                aria-label="Audiation Priming 音频范奏触发"
+                value={audiationPreviewMode}
+                onChange={(e) =>
+                  onChangeAudiationPreviewMode?.(e.target.value as "auto-unfamiliar" | "manual")
+                }
+                className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+              >
+                <option value="auto-unfamiliar">生疏块（&lt; 2 遍）自动轻声范奏（击键即停）</option>
+                <option value="manual">仅手动点击试听</option>
+              </select>
+            </div>
+
+            <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-teal-200/60 pt-2">
+              <div>
+                <div className="font-medium text-slate-900">开启 10 s 进阶意象引导计时（非阻塞）</div>
+                <div className="text-[11px] text-slate-500">
+                  默认关闭。开启后在就绪窗显示 10 s 默听与手位意象计时参考，随时可按 C8 或首音打断开始。
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                data-testid="audiation-imagery-timer-toggle"
+                aria-label="开启 10 s 进阶意象引导计时"
+                checked={audiationImageryTimerEnabled}
+                onChange={() => onToggleAudiationImageryTimer?.()}
+                className="h-4 w-4 shrink-0 accent-teal-600"
+              />
+            </label>
+          </div>
 
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
             <div className="mb-1.5 flex items-center justify-between">

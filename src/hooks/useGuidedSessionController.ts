@@ -1,7 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PianoAudioEngine } from "../audio/pianoAudio";
 import type { PlaybackEngine } from "../audio/playbackEngine";
 import type { MacroSection, MotorChunk } from "../chunking/types";
-import type { PracticeMode, PracticeStep, ScoreCoord, ScoreDocument } from "../domain/types";
+import type {
+  PracticeMode,
+  PracticeStep,
+  ScoreCoord,
+  ScoreDocument,
+  SolveResult,
+} from "../domain/types";
 import {
   createPianoCommandRouter,
   hasDualPitchConflict,
@@ -14,18 +21,32 @@ import {
   recordStage0StepCompleted,
   recordStage0WrongNote,
 } from "../guided/stage0Controller";
+import {
+  completeAudiationPreview,
+  createMicroRestState,
+  deriveAudiationCue,
+  evaluateAudiationImageryTick,
+  evaluateMicroRestTick,
+  interruptAudiationPreview,
+  markAudiationPreviewPlaying,
+  shouldAutoTriggerAudiationPreview,
+  type AudiationInterruptReason,
+  type AudiationPreviewMode,
+} from "../guided/transitionFlow";
 import type { MidiInputEvent } from "../midi/webMidi";
 import { useGuidedSessionStore } from "../store/useGuidedSessionStore";
 import type { PianoCommandBadge } from "../components/UnifiedPiano88";
 
 export interface UseGuidedSessionControllerOptions {
   scoreDoc: ScoreDocument | null;
+  solveResult: SolveResult | null;
   practiceSteps: PracticeStep[];
   motorChunks: MotorChunk[];
   macroSections: MacroSection[];
   effectivePracticeMode: PracticeMode;
   playbackSpeed: number;
   playbackEngineRef: React.RefObject<PlaybackEngine | null>;
+  audioEngineRef: React.RefObject<PianoAudioEngine | null>;
   countInEnabled: boolean;
   setMidiCaptureMode: (mode: "waiting" | "continuous") => void;
   resetMidiCapture: () => void;
@@ -102,11 +123,13 @@ export function getMidisForChunk(
  */
 export function useGuidedSessionController({
   scoreDoc,
+  solveResult,
   practiceSteps,
   motorChunks,
   effectivePracticeMode,
   playbackSpeed,
   playbackEngineRef,
+  audioEngineRef,
   countInEnabled,
   setMidiCaptureMode,
   resetMidiCapture,
@@ -123,22 +146,41 @@ export function useGuidedSessionController({
   const stage0State = useGuidedSessionStore((s) => s.stage0State);
   const bottomSlotView = useGuidedSessionStore((s) => s.bottomSlotView);
   const cc64CommandEnabled = useGuidedSessionStore((s) => s.cc64CommandEnabled);
+  const microRestDurationSec = useGuidedSessionStore((s) => s.microRestDurationSec);
+  const audiationPreviewMode = useGuidedSessionStore((s) => s.audiationPreviewMode);
+  const audiationImageryTimerEnabled = useGuidedSessionStore((s) => s.audiationImageryTimerEnabled);
   const sessionStartedAtMs = useGuidedSessionStore((s) => s.sessionStartedAtMs);
   const microRestStartedAtMs = useGuidedSessionStore((s) => s.microRestStartedAtMs);
   const microRestDurationMs = useGuidedSessionStore((s) => s.microRestDurationMs);
   const microRestReminder = useGuidedSessionStore((s) => s.microRestReminder);
+  const microRestState = useGuidedSessionStore((s) => s.microRestState);
+  const audiationState = useGuidedSessionStore((s) => s.audiationState);
+  const chunkPassCountsById = useGuidedSessionStore((s) => s.chunkPassCountsById);
   const commandNotice = useGuidedSessionStore((s) => s.commandNotice);
   const lastBoutSummary = useGuidedSessionStore((s) => s.lastBoutSummary);
   const suspendedSnapshot = useGuidedSessionStore((s) => s.suspendedSnapshot);
 
   const routerRef = useRef(createPianoCommandRouter());
+  const previewTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+  const previewTokenRef = useRef(0);
+  const autoPreviewFiredKeyRef = useRef<string | null>(null);
+  const [, setTransitionTickMs] = useState<number>(() => nowMs());
 
-  // Reset Guided Session store on unmount to avoid leaking across test renders
+  const clearPreviewTimer = useCallback(() => {
+    if (previewTimerRef.current !== null) {
+      globalThis.clearTimeout(previewTimerRef.current);
+      previewTimerRef.current = null;
+    }
+  }, []);
+
+  // Reset Guided Session store & audio preview timers on unmount to avoid leaking across test renders
   useEffect(() => {
     return () => {
+      previewTokenRef.current += 1;
+      clearPreviewTimer();
       useGuidedSessionStore.getState().reset();
     };
-  }, []);
+  }, [clearPreviewTimer]);
 
   const launchFilteredChunks = useMemo(() => {
     if (selectedMacroSectionId === null) return motorChunks;
@@ -179,6 +221,103 @@ export function useGuidedSessionController({
     () => hasDualPitchConflict(activeChunkMidis),
     [activeChunkMidis],
   );
+
+  const stopAudiationPreview = useCallback(
+    (reason: AudiationInterruptReason = "manual-stop") => {
+      previewTokenRef.current += 1;
+      clearPreviewTimer();
+      audioEngineRef.current?.stopAll();
+      const store = useGuidedSessionStore.getState();
+      if (store.audiationState) {
+        const next = interruptAudiationPreview(store.audiationState, reason);
+        if (next !== store.audiationState) {
+          store.setAudiationState(next);
+        }
+      }
+    },
+    [audioEngineRef, clearPreviewTimer],
+  );
+
+  const triggerAudiationPreview = useCallback(
+    (targetChunk: MotorChunk | null = nextChunk) => {
+      const engine = audioEngineRef.current;
+      if (!scoreDoc || !targetChunk || !engine) return;
+      clearPreviewTimer();
+      engine.stopAll();
+
+      const { startTick, endTick, startScoreSec } = resolveChunkBounds(scoreDoc, targetChunk);
+      const previewNotes = scoreDoc.noteEvents.filter(
+        (ev) =>
+          !ev.isTieStop &&
+          ev.onsetTick >= startTick - 1e-6 &&
+          ev.onsetTick < endTick - 1e-6,
+      );
+      if (previewNotes.length === 0) return;
+
+      const token = ++previewTokenRef.current;
+      const store = useGuidedSessionStore.getState();
+      if (store.audiationState) {
+        store.setAudiationState(markAudiationPreviewPlaying(store.audiationState));
+      }
+
+      const chunkStartSec = Math.min(startScoreSec, previewNotes[0].onsetSec);
+      const scheduleNotes = () => {
+        if (previewTokenRef.current !== token) return;
+        const activeEngine = audioEngineRef.current;
+        if (!activeEngine) return;
+        const ctx = activeEngine.getAudioContext();
+        const baseTime = ctx.currentTime + 0.02;
+        const safeSpeed = Number.isFinite(playbackSpeed) && playbackSpeed > 0 ? playbackSpeed : 1;
+        let maxRelEndSec = 0.2;
+
+        for (const note of previewNotes) {
+          const relStartSec = Math.max(0, (note.onsetSec - chunkStartSec) / safeSpeed);
+          const durSec = Math.max(0.08, Math.min(1.5, note.durationSec / safeSpeed));
+          maxRelEndSec = Math.max(maxRelEndSec, relStartSec + durSec);
+          const isTargetHand =
+            effectivePracticeMode === "both" ||
+            (effectivePracticeMode === "rh-only" && note.hand === "RH") ||
+            (effectivePracticeMode === "lh-only" && note.hand === "LH");
+          activeEngine.triggerNote({
+            midi: note.midi,
+            time: baseTime + relStartSec,
+            duration: durSec,
+            velocity: isTargetHand ? 50 : 36,
+          });
+        }
+
+        previewTimerRef.current = globalThis.setTimeout(() => {
+          if (previewTokenRef.current !== token) return;
+          previewTimerRef.current = null;
+          const curStore = useGuidedSessionStore.getState();
+          if (curStore.audiationState) {
+            curStore.setAudiationState(completeAudiationPreview(curStore.audiationState));
+          }
+        }, Math.ceil(maxRelEndSec * 1000) + 60);
+      };
+
+      const status = engine.getStatus();
+      if (status === "samples" || status === "synth") {
+        scheduleNotes();
+      } else {
+        void engine.prepare().then(scheduleNotes);
+      }
+    },
+    [scoreDoc, nextChunk, audioEngineRef, clearPreviewTimer, playbackSpeed, effectivePracticeMode],
+  );
+
+  useEffect(() => {
+    if (studioMode !== "guided" || sessionPhase !== "audiation" || !audiationState) {
+      autoPreviewFiredKeyRef.current = null;
+      return;
+    }
+    const key = `${audiationState.enteredAtMs}:${audiationState.chunkId ?? ""}`;
+    if (autoPreviewFiredKeyRef.current === key) return;
+    if (shouldAutoTriggerAudiationPreview(audiationState)) {
+      autoPreviewFiredKeyRef.current = key;
+      triggerAudiationPreview(nextChunk);
+    }
+  }, [studioMode, sessionPhase, audiationState, nextChunk, triggerAudiationPreview]);
 
   const startContinuousChunkPlay = useCallback(
     (chunk: MotorChunk) => {
@@ -273,14 +412,7 @@ export function useGuidedSessionController({
       if (action === "none") return;
 
       if (action === "micro-rest-reminder") {
-        const started = store.microRestStartedAtMs ?? nowMs();
-        const remainingSec = Math.max(
-          1,
-          Math.ceil((store.microRestDurationMs - Math.max(0, nowMs() - started)) / 1000),
-        );
-        store.setMicroRestReminder(
-          `请再静放双手 ${remainingSec} 秒巩固记忆（按 C8 可跳过）`,
-        );
+        store.recordMicroRestAccidentalKey(nowMs());
         return;
       }
 
@@ -298,6 +430,9 @@ export function useGuidedSessionController({
       }
 
       if (action === "replay-chunk") {
+        if (store.sessionPhase === "audiation") {
+          stopAudiationPreview("a0");
+        }
         const chunk = store.chunkQueue[store.currentQueueIndex];
         if (!chunk) return;
         const steps = getStepsForChunk(scoreDoc, practiceSteps, chunk);
@@ -326,10 +461,13 @@ export function useGuidedSessionController({
           return;
         }
         if (store.sessionPhase === "micro-rest") {
-          store.skipMicroRest();
+          store.skipMicroRest(nowMs());
           return;
         }
         if (store.sessionPhase === "audiation" || store.sessionPhase === "summary") {
+          if (store.sessionPhase === "audiation") {
+            stopAudiationPreview(action === "start-first-note" ? "first-note" : "c8");
+          }
           const nextIdx = store.currentQueueIndex + 1;
           if (nextIdx >= store.chunkQueue.length) {
             // Loop back or stay at summary; C8 on summary restarts from chunk 0
@@ -348,6 +486,7 @@ export function useGuidedSessionController({
     [
       nowMs,
       playbackEngineRef,
+      stopAudiationPreview,
       scoreDoc,
       practiceSteps,
       playbackSpeed,
@@ -453,10 +592,11 @@ export function useGuidedSessionController({
     [nowMs, graduateToPlaying],
   );
 
-  // Periodic Stage 0 2-minute cap & Micro-Rest timer watcher
+  // Periodic Stage 0 2-minute cap, Micro-Rest countdown, and optional Audiation imagery timer watcher
   useEffect(() => {
     if (studioMode !== "guided") return;
-    if (sessionPhase !== "stage0" && sessionPhase !== "micro-rest") return;
+    const watchAudiationTimer = sessionPhase === "audiation" && audiationImageryTimerEnabled;
+    if (sessionPhase !== "stage0" && sessionPhase !== "micro-rest" && !watchAudiationTimer) return;
 
     const timer = globalThis.setInterval(() => {
       const store = useGuidedSessionStore.getState();
@@ -469,24 +609,36 @@ export function useGuidedSessionController({
         } else if (next !== store.stage0State) {
           store.setStage0State(next);
         }
-      } else if (store.sessionPhase === "micro-rest" && store.microRestStartedAtMs !== null) {
-        if (t - store.microRestStartedAtMs >= store.microRestDurationMs) {
-          store.finishMicroRest();
+      } else if (store.sessionPhase === "micro-rest") {
+        const mrState =
+          store.microRestState ??
+          createMicroRestState({
+            startedAtMs: store.microRestStartedAtMs ?? t,
+            durationSec: store.microRestDurationSec,
+          });
+        const tick = evaluateMicroRestTick(mrState, t);
+        if (tick.completed) {
+          store.finishMicroRest(t);
+        } else {
+          setTransitionTickMs(t);
         }
+      } else if (store.sessionPhase === "audiation" && store.audiationImageryTimerEnabled) {
+        setTransitionTickMs(t);
       }
     }, 250);
 
     return () => {
       globalThis.clearInterval(timer);
     };
-  }, [studioMode, sessionPhase, nowMs, graduateToPlaying]);
+  }, [studioMode, sessionPhase, audiationImageryTimerEnabled, nowMs, graduateToPlaying]);
 
   const handleSuspendForFingering = useCallback(() => {
+    stopAudiationPreview("manual-stop");
     playbackEngineRef.current?.stop();
     resetMidiCapture();
     syncWaitingToStep(null, "stopped");
     useGuidedSessionStore.getState().suspendForFingering(nowMs());
-  }, [playbackEngineRef, resetMidiCapture, syncWaitingToStep, nowMs]);
+  }, [stopAudiationPreview, playbackEngineRef, resetMidiCapture, syncWaitingToStep, nowMs]);
 
   const handleResumeSuspendedSession = useCallback(() => {
     const store = useGuidedSessionStore.getState();
@@ -512,11 +664,12 @@ export function useGuidedSessionController({
   ]);
 
   const handleEndSession = useCallback(() => {
+    stopAudiationPreview("manual-stop");
     playbackEngineRef.current?.stop();
     resetMidiCapture();
     syncWaitingToStep(null, "stopped");
     useGuidedSessionStore.getState().endSession();
-  }, [playbackEngineRef, resetMidiCapture, syncWaitingToStep]);
+  }, [stopAudiationPreview, playbackEngineRef, resetMidiCapture, syncWaitingToStep]);
 
   const commandKeyBadges = useMemo<
     Partial<Record<21 | 22 | 23 | 108, PianoCommandBadge>> | undefined
@@ -579,6 +732,42 @@ export function useGuidedSessionController({
     return Math.max(0, timeBoxMinutes - elapsedMin);
   }, [sessionStartedAtMs, timeBoxMinutes, nowMs, sessionPhase, currentQueueIndex]);
 
+  const microRestTick = evaluateMicroRestTick(
+    microRestState ??
+      createMicroRestState({
+        startedAtMs: microRestStartedAtMs ?? nowMs(),
+        durationSec: microRestDurationSec,
+      }),
+    nowMs(),
+  );
+
+  const audiationCue = useMemo(
+    () =>
+      deriveAudiationCue({
+        nextChunk: sessionPhase === "audiation" ? nextChunk : null,
+        nextChunkSteps: readyChunkSteps,
+        solveResult,
+        practiceMode: effectivePracticeMode,
+        onsetSlices: scoreDoc?.onsetSlices,
+        historicalPassCount: nextChunk ? (chunkPassCountsById[nextChunk.chunkId] ?? 0) : 0,
+        previewMode: audiationPreviewMode,
+      }),
+    [
+      sessionPhase,
+      nextChunk,
+      readyChunkSteps,
+      solveResult,
+      effectivePracticeMode,
+      scoreDoc?.onsetSlices,
+      chunkPassCountsById,
+      audiationPreviewMode,
+    ],
+  );
+
+  const audiationImageryTick = audiationState
+    ? evaluateAudiationImageryTick(audiationState, nowMs())
+    : { active: false, remainingMs: 0, remainingSec: 0, completed: false };
+
   return {
     studioMode,
     sessionPhase,
@@ -594,9 +783,17 @@ export function useGuidedSessionController({
     stage0State,
     bottomSlotView,
     cc64CommandEnabled,
+    microRestDurationSec,
+    audiationPreviewMode,
+    audiationImageryTimerEnabled,
     microRestStartedAtMs,
     microRestDurationMs,
     microRestReminder,
+    microRestState,
+    microRestTick,
+    audiationState,
+    audiationCue,
+    audiationImageryTick,
     commandNotice,
     lastBoutSummary,
     suspendedSnapshot,
@@ -605,13 +802,22 @@ export function useGuidedSessionController({
     remainingMinutes,
 
     enterGuidedLaunch: () => useGuidedSessionStore.getState().enterGuidedLaunch(),
-    returnToFreeStudio: () => useGuidedSessionStore.getState().returnToFreeStudio(),
+    returnToFreeStudio: () => {
+      stopAudiationPreview("manual-stop");
+      useGuidedSessionStore.getState().returnToFreeStudio();
+    },
     setTimeBoxMinutes: (m: 15 | 25 | 40) =>
       useGuidedSessionStore.getState().setTimeBoxMinutes(m),
     setSelectedMacroSectionId: (id: string | null) =>
       useGuidedSessionStore.getState().setSelectedMacroSectionId(id),
     setCc64CommandEnabled: (enabled: boolean) =>
       useGuidedSessionStore.getState().setCc64CommandEnabled(enabled),
+    setMicroRestDurationSec: (sec: number) =>
+      useGuidedSessionStore.getState().setMicroRestDurationSec(sec),
+    setAudiationPreviewMode: (mode: AudiationPreviewMode) =>
+      useGuidedSessionStore.getState().setAudiationPreviewMode(mode),
+    setAudiationImageryTimerEnabled: (enabled: boolean) =>
+      useGuidedSessionStore.getState().setAudiationImageryTimerEnabled(enabled),
     setBottomSlotView: (v: "piano" | "feedback") =>
       useGuidedSessionStore.getState().setBottomSlotView(v),
 
@@ -624,5 +830,7 @@ export function useGuidedSessionController({
     handleSuspendForFingering,
     handleResumeSuspendedSession,
     handleEndSession,
+    triggerAudiationPreview: () => triggerAudiationPreview(nextChunk),
+    stopAudiationPreview,
   };
 }
