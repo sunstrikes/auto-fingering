@@ -1,9 +1,19 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { OpenSheetMusicDisplay, PointF2D, type Cursor } from "opensheetmusicdisplay";
 import type { CursorSyncTarget, PlaybackFrame } from "../audio/playbackEngine";
-import type { Finger, Hand, NoteEvent, ScoreDocument } from "../domain/types";
+import type { Finger, Hand, NoteEvent, ScoreCoord, ScoreDocument } from "../domain/types";
+import type {
+  ChunkJunction,
+  MotorChunk,
+  PassageInstance,
+  PerformanceCue,
+  PerformanceCueKind,
+  PerformanceCueOverrideEntry,
+  VariantDiffCoord,
+} from "../chunking/types";
 import type { NoteDiffEntry } from "../store/useStudioStore";
 import { midiToPitchLabel } from "../solver/keyboard";
+import { ChunkCueEditorStrip } from "./ChunkCueEditorStrip";
 import {
   MarginRiskGutter,
   type MeasureGeometry,
@@ -53,6 +63,7 @@ export interface ScoreRendererHandle {
   highlightAbLoop?(range: AbLoopHighlightRange | null): void;
   markAnchoredNotes(anchors: AnchorMarkerInfo[]): void;
   markDiffNotes?(diffs: NoteDiffEntry[]): void;
+  highlightVariantDiffs?(diffs: VariantDiffCoord[] | null): void;
   highlightSelectedNote?(note: NoteEvent | null): void;
   hitTestNoteAtClientPoint?(clientX: number, clientY: number): OsmdNoteHit | null;
   hitTestMeasureAtClientPoint?(clientX: number, clientY: number): number | null;
@@ -598,6 +609,39 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       });
     },
 
+    highlightVariantDiffs(diffs: VariantDiffCoord[] | null) {
+      clearElementsByAttr("data-studio-variant-diff", "data-variant-diff-measure");
+      if (!diffs || diffs.length === 0) return;
+      const seenMeasures = new Set<number>();
+      for (const diff of diffs) {
+        if (seenMeasures.has(diff.measureIndex)) continue;
+        seenMeasures.add(diff.measureIndex);
+        const els = getMeasureSvgElements(diff.measureIndex);
+        for (const g of els) {
+          g.setAttribute("data-variant-diff-measure", "true");
+          if (typeof g.getBBox === "function") {
+            try {
+              const box = g.getBBox();
+              const svgNs = "http://www.w3.org/2000/svg";
+              const rect = container.ownerDocument.createElementNS(svgNs, "rect");
+              rect.setAttribute("data-studio-variant-diff", "true");
+              rect.setAttribute("x", String(box.x - 2));
+              rect.setAttribute("y", String(box.y - 4));
+              rect.setAttribute("width", String(Math.max(10, box.width + 4)));
+              rect.setAttribute("height", String(Math.max(20, box.height + 8)));
+              rect.setAttribute("rx", "4");
+              rect.setAttribute("fill", "rgba(13, 148, 136, 0.14)");
+              rect.setAttribute("stroke", "rgba(13, 148, 136, 0.65)");
+              rect.setAttribute("stroke-width", "1.4");
+              g.insertBefore(rect, g.firstChild);
+            } catch {
+              // SVG getBBox unavailable in non-layout environments
+            }
+          }
+        }
+      }
+    },
+
     highlightSelectedNote(note: NoteEvent | null) {
       clearElementsByAttr("data-studio-selected-note", "data-selected-note");
       if (!note) return;
@@ -797,6 +841,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       clearElementsByAttr("data-studio-ab-loop", "data-ab-loop-measure");
       clearElementsByAttr("data-studio-anchor-marker", "data-anchor-note");
       clearElementsByAttr("data-studio-diff-marker", "data-diff-note");
+      clearElementsByAttr("data-studio-variant-diff", "data-variant-diff-measure");
       clearElementsByAttr("data-studio-selected-note", "data-selected-note");
       container.innerHTML = "";
     },
@@ -818,11 +863,26 @@ export interface ScoreViewerProps {
   layoutMode?: ScoreLayoutMode;
   abLoopRange?: AbLoopHighlightRange | null;
   abPickStep?: AbPickStep;
+  motorChunks?: MotorChunk[];
+  chunkJunctions?: ChunkJunction[];
+  performanceCues?: PerformanceCue[];
+  chunkEditingEnabled?: boolean;
+  hasChunkOverrides?: boolean;
+  hasCueOverrides?: boolean;
+  inspectedClusterInstance?: PassageInstance | null;
+  inspectedClusterLabel?: string | null;
   onLayoutModeChange?: (mode: ScoreLayoutMode) => void;
   onSelectMeasure?: (measureIndex: number) => void;
   onSelectNote?: (noteUid: string, anchorRect?: PopoverAnchorRect) => void;
   onPickAbMeasure?: (measureIndex: number) => void;
   onMeasureGeometryChange?: (geometry: MeasureGeometry[]) => void;
+  onSplitChunkAtMeasure?: (measureIndex: number) => void;
+  onMergeChunkBoundary?: (boundaryCoord: ScoreCoord) => void;
+  onResetChunkOverrides?: () => void;
+  onUpsertCueOverride?: (entry: PerformanceCueOverrideEntry) => void;
+  onRemoveCueOverride?: (coord: ScoreCoord, kind?: PerformanceCueKind) => void;
+  onResetCueOverrides?: () => void;
+  onCloseInspectCluster?: () => void;
   rendererFactory?: ScoreRendererFactory;
 }
 
@@ -845,11 +905,26 @@ export function ScoreViewer({
   layoutMode = "page",
   abLoopRange = null,
   abPickStep = "idle",
+  motorChunks = [],
+  chunkJunctions = [],
+  performanceCues = [],
+  chunkEditingEnabled = false,
+  hasChunkOverrides = false,
+  hasCueOverrides = false,
+  inspectedClusterInstance = null,
+  inspectedClusterLabel = null,
   onLayoutModeChange,
   onSelectMeasure,
   onSelectNote,
   onPickAbMeasure,
   onMeasureGeometryChange,
+  onSplitChunkAtMeasure,
+  onMergeChunkBoundary,
+  onResetChunkOverrides,
+  onUpsertCueOverride,
+  onRemoveCueOverride,
+  onResetCueOverrides,
+  onCloseInspectCluster,
   rendererFactory = createOsmdScoreRenderer,
 }: ScoreViewerProps) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -980,6 +1055,15 @@ export function ScoreViewer({
     if (!isRendered || !rendererRef.current) return;
     rendererRef.current.highlightAbLoop?.(abLoopRange ?? null);
   }, [isRendered, abLoopRange]);
+
+  useEffect(() => {
+    if (!isRendered || !rendererRef.current) return;
+    const diffs =
+      inspectedClusterInstance && inspectedClusterInstance.diffCoords.length > 0
+        ? inspectedClusterInstance.diffCoords
+        : null;
+    rendererRef.current.highlightVariantDiffs?.(diffs);
+  }, [isRendered, inspectedClusterInstance]);
 
   const handleSurfaceClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (abPickStep !== "idle" && onPickAbMeasure) {
@@ -1239,6 +1323,26 @@ export function ScoreViewer({
           ))}
         </div>
       )}
+
+      <ChunkCueEditorStrip
+        motorChunks={motorChunks}
+        chunkJunctions={chunkJunctions}
+        performanceCues={performanceCues}
+        selectedMeasureIndex={selectedMeasureIndex}
+        measureCount={scoreDoc?.measureCount ?? measureRisks.length}
+        chunkEditingEnabled={chunkEditingEnabled}
+        hasChunkOverrides={hasChunkOverrides}
+        hasCueOverrides={hasCueOverrides}
+        inspectedClusterInstance={inspectedClusterInstance}
+        inspectedClusterLabel={inspectedClusterLabel}
+        onSplitChunkAtMeasure={onSplitChunkAtMeasure}
+        onMergeChunkBoundary={onMergeChunkBoundary}
+        onResetChunkOverrides={onResetChunkOverrides}
+        onUpsertCueOverride={onUpsertCueOverride}
+        onRemoveCueOverride={onRemoveCueOverride}
+        onResetCueOverrides={onResetCueOverrides}
+        onCloseInspectCluster={onCloseInspectCluster}
+      />
 
       {renderError && (
         <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

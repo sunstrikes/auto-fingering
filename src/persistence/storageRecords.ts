@@ -4,7 +4,17 @@ import type { PracticeStorageRecords, PracticeStore } from "./storagePort";
 // JS callers and untrusted backup fields inside the durable record contract.
 const fields: { [K in PracticeStore]: readonly (keyof PracticeStorageRecords[K])[] } = {
   meta: ["key", "value"],
-  pieceProfiles: ["pieceId", "title", "fingerprints", "measureHashesByFingerprint", "lastPracticedAtMs", "archivedAtMs", "bestStableSpeed", "chunkOverrides"],
+  pieceProfiles: [
+    "pieceId",
+    "title",
+    "fingerprints",
+    "measureHashesByFingerprint",
+    "lastPracticedAtMs",
+    "archivedAtMs",
+    "bestStableSpeed",
+    "chunkOverrides",
+    "performanceCueOverrides",
+  ],
   practiceEvents: ["eventId", "pieceId", "scoreFingerprint", "timestampMs", "localDateKey", "timezoneOffsetMin",
     "sessionId", "boutKind", "startCoord", "endCoord", "junctionBoundaryCoord", "cueCoord", "practiceMode", "speedMultiplier",
     "durationSec", "passCount", "wasColdFirstPass", "scaffoldingLevel", "ehsLookaheadPreset", "autoGrade",

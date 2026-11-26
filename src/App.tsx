@@ -110,6 +110,8 @@ import {
   type PlaybackState,
   type SpeedMultiplier,
 } from "./audio/playbackEngine";
+import type { ChunkingClient } from "./workers/chunkingClient";
+import { useChunkingAnalysis } from "./hooks/useChunkingAnalysis";
 
 const PIANO_TIMBRE_STORAGE_KEY = "auto-fingering:piano-timbre";
 
@@ -142,6 +144,7 @@ export interface AppMidiDeps {
 
 export interface AppProps {
   solverClientFactory?: () => SolverClient;
+  chunkingClientFactory?: () => ChunkingClient;
   scoreRendererFactory?: ScoreRendererFactory;
   audioDeps?: AppAudioDeps;
   midiDeps?: AppMidiDeps;
@@ -150,6 +153,7 @@ export interface AppProps {
 
 export default function App({
   solverClientFactory = createSolverClient,
+  chunkingClientFactory,
   scoreRendererFactory,
   audioDeps,
   midiDeps,
@@ -287,6 +291,18 @@ export default function App({
   }), [handSpanProfile, playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
     absoluteStrictnessEnabled, strictHoldDurationEnabled]);
   const persistence = usePracticePersistence(practiceStorage, durablePrefs, playbackState === "playing");
+  const effectivePracticeMode: PracticeMode = isSingleStaff
+    ? singleStaffHand === "LH"
+      ? "lh-only"
+      : "rh-only"
+    : practiceMode;
+  const chunking = useChunkingAnalysis({
+    chunkingClientFactory,
+    scoreDoc,
+    solveResult,
+    practiceMode: effectivePracticeMode,
+    updatePieceProfileOverrides: persistence.updatePieceProfileOverrides,
+  });
   const [backupOpen, setBackupOpen] = useState(false);
 
   const [library, setLibrary] = useState<string[]>([]);
@@ -500,10 +516,11 @@ export default function App({
     setPracticeAnalytics(createPracticeAnalyticsState());
     setHandsRejoinSpeed(null);
     setPracticeReportOpen(false);
+    chunking.resetAllOverrides();
   };
   const workspaceScores = useWorkspaceScoreLifecycle({
     persistence, durablePrefs, solveScore, resetPracticeProgress,
-    restorePreferences(score, saved) {
+    restorePreferences(score, saved, profile) {
       const loop = saved?.abLoop ? normalizeAbLoopBounds(saved.abLoop, score.measureCount)
         : createDefaultAbLoopBounds(score.measureCount);
       if (saved?.speedMultiplier !== undefined) {
@@ -518,6 +535,7 @@ export default function App({
       setAbPickStep("idle");
       setAbPickStartMeasure(null);
       resetPracticeProgress();
+      chunking.restoreProfileOverrides(profile);
       playbackEngineRef.current?.setAbLoop(loop);
     },
     stopPlayback() {
@@ -839,12 +857,6 @@ export default function App({
     if (!selectedNoteUid) return null;
     return noteEvents.find((n) => n.noteUid === selectedNoteUid) ?? null;
   }, [selectedNoteUid, noteEvents]);
-
-  const effectivePracticeMode: PracticeMode = isSingleStaff
-    ? singleStaffHand === "LH"
-      ? "lh-only"
-      : "rh-only"
-    : practiceMode;
 
   const practiceSteps = useMemo(
     () =>
@@ -2553,11 +2565,28 @@ export default function App({
                 : null
             }
             abPickStep={abPickStep}
+            motorChunks={chunking.motorChunks}
+            chunkJunctions={chunking.chunkJunctions}
+            performanceCues={chunking.performanceCues}
+            chunkEditingEnabled={playbackState !== "playing"}
+            hasChunkOverrides={chunking.hasChunkOverrides}
+            hasCueOverrides={chunking.hasCueOverrides}
+            inspectedClusterInstance={
+              playbackState === "playing" ? null : chunking.inspectedClusterInstance
+            }
+            inspectedClusterLabel={chunking.inspectedClusterLabel}
             onLayoutModeChange={setLayoutMode}
             onSelectMeasure={handleSelectMeasure}
             onSelectNote={handleSelectNote}
             onPickAbMeasure={handlePickAbMeasure}
             onMeasureGeometryChange={setMeasureGeometry}
+            onSplitChunkAtMeasure={chunking.handleSplitChunkAtMeasure}
+            onMergeChunkBoundary={chunking.handleMergeChunkBoundary}
+            onResetChunkOverrides={chunking.handleResetChunkOverrides}
+            onUpsertCueOverride={chunking.handleUpsertCueOverride}
+            onRemoveCueOverride={chunking.handleRemoveCueOverride}
+            onResetCueOverrides={chunking.handleResetCueOverrides}
+            onCloseInspectCluster={chunking.closeInspectCluster}
             rendererFactory={scoreRendererFactory}
           />
 
@@ -2605,6 +2634,9 @@ export default function App({
         abLoop={abLoop}
         abPickStep={abPickStep}
         abPickStartMeasure={abPickStartMeasure}
+        passageClusters={chunking.passageClusters}
+        inspectedClusterInstanceId={chunking.inspectedClusterInstanceId}
+        onToggleInspectClusterInstance={chunking.toggleInspectClusterInstance}
         onPlay={handlePlay}
         onPlayFromSlice={handlePlayFromSlice}
         onPause={handlePause}

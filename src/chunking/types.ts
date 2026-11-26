@@ -219,6 +219,25 @@ export interface MotorOverlayResult {
   overlayTimeMs: number;
 }
 
+export interface ChunkOverrides {
+  addedBoundaries: ScoreCoord[];
+  removedBoundaries: ScoreCoord[];
+  updatedAtMs: number;
+}
+
+export interface PerformanceCueOverrideEntry {
+  coord: ScoreCoord;
+  kind?: PerformanceCueKind;
+  pinned?: boolean;
+  hidden?: boolean;
+  customLabel?: string;
+}
+
+export interface PerformanceCueOverrides {
+  entries: PerformanceCueOverrideEntry[];
+  updatedAtMs: number;
+}
+
 export interface ChunkAnalysisResult {
   staticResult: StaticChunkingResult;
   motorOverlay: MotorOverlayResult;

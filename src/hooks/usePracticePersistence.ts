@@ -190,8 +190,46 @@ export function usePracticePersistence(injected: PracticeStoragePort | null | un
     };
   }, [storage, active, playing]);
 
+  function updatePieceProfileOverrides(patch: {
+    chunkOverrides?: PieceProfile["chunkOverrides"];
+    performanceCueOverrides?: PieceProfile["performanceCueOverrides"];
+  }) {
+    const binding = activeRef.current;
+    if (!binding) return queue.current;
+    const applyPatch = (profile: PieceProfile): PieceProfile => ({
+      ...profile,
+      ...(patch.chunkOverrides !== undefined &&
+      (!profile.chunkOverrides ||
+        patch.chunkOverrides.updatedAtMs >= profile.chunkOverrides.updatedAtMs)
+        ? { chunkOverrides: patch.chunkOverrides }
+        : {}),
+      ...(patch.performanceCueOverrides !== undefined &&
+      (!profile.performanceCueOverrides ||
+        patch.performanceCueOverrides.updatedAtMs >=
+          profile.performanceCueOverrides.updatedAtMs)
+        ? { performanceCueOverrides: patch.performanceCueOverrides }
+        : {}),
+    });
+    binding.profile = applyPatch(binding.profile);
+    if (!storage || importing.current) return queue.current;
+    const snap = snapshotCurrent();
+    if (!snap) return queue.current;
+    const { mxlContainer: container, ...workspace } = snap.source;
+    return enqueue(async () => {
+      binding.profile = applyPatch(binding.profile);
+      binding.profile = await saveWorkspace(
+        storage,
+        binding.profile,
+        { ...workspace, prefs: { ...snap.prefs, freePracticeMinutes: binding.freePracticeMinutes } },
+        { profile: true },
+        (xml) => exportMxlContainer(xml, container),
+      );
+      if (mounted.current) setSaveError(false);
+    });
+  }
+
   return {
-    storage, activate, persistCurrent, importBackup, saveError, backupReminder, dismissReminder: () => setBackupReminder(false),
+    storage, activate, persistCurrent, updatePieceProfileOverrides, importBackup, saveError, backupReminder, dismissReminder: () => setBackupReminder(false),
     getActive: () => activeRef.current,
   };
 }

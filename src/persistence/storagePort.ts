@@ -1,4 +1,5 @@
 import type { AbLoopBounds, AnchorOverride, ExportFormat, Hand, HandSpanProfile, NoteCoordKey, PracticeMode, ScoreCoord } from "../domain/types";
+import type { ChunkOverrides, PerformanceCueOverrides } from "../chunking/types";
 
 export const DATABASE_NAME = "auto-fingering-studio";
 export const SCHEMA_VERSION = 1;
@@ -12,11 +13,8 @@ export interface PieceProfile {
   lastPracticedAtMs?: number;
   archivedAtMs?: number;
   bestStableSpeed?: number;
-  chunkOverrides?: {
-    addedBoundaries: ScoreCoord[];
-    removedBoundaries: ScoreCoord[];
-    updatedAtMs: number;
-  };
+  chunkOverrides?: ChunkOverrides;
+  performanceCueOverrides?: PerformanceCueOverrides;
 }
 
 export interface PracticeEvent {

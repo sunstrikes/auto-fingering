@@ -210,6 +210,18 @@ function hasValidPrefs(row: ObjectRecord) {
         optional(alternateCacheKey, (key) => isString(key) && otherFingerprint === row.scoreFingerprint) && isDraft(asObject(otherDraft));
     });
 }
+function isCueOverrideEntry(value: unknown) {
+  const entry = asObject(value);
+  return isScoreCoord(entry.coord) &&
+    optional(entry.kind, (k) => k === "switch" || k === "structural" || k === "technical" || k === "expressive") &&
+    optional(entry.pinned, isBoolean) &&
+    optional(entry.hidden, isBoolean) &&
+    optional(entry.customLabel, (label) => typeof label === "string");
+}
+function isPerformanceCueOverrides(value: unknown) {
+  const row = asObject(value);
+  return Array.isArray(row.entries) && row.entries.every(isCueOverrideEntry) && isNonnegative(row.updatedAtMs);
+}
 function parseRecords<K extends BackupStore>(data: ObjectRecord, store: K): PracticeStorageRecords[K][] {
   const records = data[store];
   if (!Array.isArray(records)) throw new Error("备份格式无效");
@@ -221,7 +233,8 @@ function parseRecords<K extends BackupStore>(data: ObjectRecord, store: K): Prac
         optional(row.lastPracticedAtMs, isNumber) &&
         optional(row.archivedAtMs, isNumber) &&
         optional(row.bestStableSpeed, isNonnegative) &&
-        optional(row.chunkOverrides, isChunkOverrides) :
+        optional(row.chunkOverrides, isChunkOverrides) &&
+        optional(row.performanceCueOverrides, isPerformanceCueOverrides) :
       store === "practiceEvents" ? isPracticeEvent(row) :
       store === "fingerAnchorDrafts" ? isDraft(row) : hasValidPrefs(row)
     );
@@ -745,6 +758,21 @@ export async function importPracticeBackup(
       resolvedOverrides = latestLocalOv ?? latestImpOv;
     }
 
+    const latestLocalCueOv = comp.locals
+      .map((l) => l.performanceCueOverrides)
+      .filter((o): o is NonNullable<PieceProfile["performanceCueOverrides"]> => Boolean(o))
+      .sort((a, b) => b.updatedAtMs - a.updatedAtMs)[0];
+    const latestImpCueOv = comp.imported
+      .map((i) => i.performanceCueOverrides)
+      .filter((o): o is NonNullable<PieceProfile["performanceCueOverrides"]> => Boolean(o))
+      .sort((a, b) => b.updatedAtMs - a.updatedAtMs)[0];
+    const resolvedCueOverrides =
+      latestLocalCueOv && latestImpCueOv
+        ? latestImpCueOv.updatedAtMs > latestLocalCueOv.updatedAtMs
+          ? latestImpCueOv
+          : latestLocalCueOv
+        : latestLocalCueOv ?? latestImpCueOv;
+
     const pieceEvents = sortPracticeEventsChronologically(eventsByPiece.get(canonicalPieceId) ?? []);
     let bestStableSpeed = primary.bestStableSpeed;
     if (pieceEvents.length > 0) {
@@ -769,6 +797,7 @@ export async function importPracticeBackup(
       ...(lastPracticedAtMs !== undefined ? { lastPracticedAtMs } : {}),
       ...(bestStableSpeed !== undefined ? { bestStableSpeed } : {}),
       ...(resolvedOverrides ? { chunkOverrides: resolvedOverrides } : {}),
+      ...(resolvedCueOverrides ? { performanceCueOverrides: resolvedCueOverrides } : {}),
     });
 
     // Archive any absorbed duplicate local profiles so queries return only canonicalPieceId
