@@ -95,11 +95,6 @@ function dotSlice(arr: Float32Array, offA: number, offB: number, length: number)
   return sum;
 }
 
-function toSignedSemitoneShift(shiftMod12: number): number {
-  const norm = ((shiftMod12 % 12) + 12) % 12;
-  return norm <= 6 ? norm : norm - 12;
-}
-
 function getMeasureQuarterLength(tl: MeasureTimeline | undefined): number {
   if (!tl) return 4;
   return (tl.timeBeats * 4) / Math.max(1, tl.timeBeatType);
@@ -116,33 +111,47 @@ function getActualMeasureQuarterLength(
   return getMeasureQuarterLength(tl);
 }
 
+const SIGNED_SHIFT_TABLE = [0, 1, 2, 3, 4, 5, 6, -5, -4, -3, -2, -1] as const;
+
 function buildCrossHandSteps(noteEvents: NoteEvent[]): StepBucket[] {
-  const buckets = new Map<string, StepBucket>();
+  const active: NoteEvent[] = [];
   for (let i = 0; i < noteEvents.length; i++) {
-    const ev = noteEvents[i];
-    if (ev.isTieStop) continue;
-    const graceOrder = ev.isGrace ? (ev.graceOrder ?? 0) : 0;
-    const key = `${ev.onsetTick}|${ev.isGrace ? 1 : 0}|${graceOrder}`;
-    let b = buckets.get(key);
-    if (!b) {
-      b = {
+    if (!noteEvents[i].isTieStop) active.push(noteEvents[i]);
+  }
+  if (active.length === 0) return [];
+  active.sort((a, b) => {
+    if (a.onsetTick !== b.onsetTick) return a.onsetTick - b.onsetTick;
+    if (a.isGrace !== b.isGrace) return a.isGrace ? -1 : 1;
+    return (a.graceOrder ?? 0) - (b.graceOrder ?? 0);
+  });
+
+  const list: StepBucket[] = [];
+  let curr: StepBucket | null = null;
+  for (let i = 0; i < active.length; i++) {
+    const ev = active[i];
+    const gOrder = ev.isGrace ? (ev.graceOrder ?? 0) : 0;
+    if (
+      !curr ||
+      curr.onsetTick !== ev.onsetTick ||
+      curr.isGrace !== ev.isGrace ||
+      curr.graceOrder !== gOrder
+    ) {
+      curr = {
         onsetTick: ev.onsetTick,
         measureIndex: ev.measureIndex,
         isGrace: ev.isGrace,
-        graceOrder,
-        midis: [],
+        graceOrder: gOrder,
+        midis: [ev.midi],
       };
-      buckets.set(key, b);
+      list.push(curr);
+    } else {
+      curr.midis.push(ev.midi);
     }
-    b.midis.push(ev.midi);
   }
-  const list = Array.from(buckets.values()).sort((a, b) => {
-    if (a.onsetTick !== b.onsetTick) return a.onsetTick - b.onsetTick;
-    if (a.isGrace !== b.isGrace) return a.isGrace ? -1 : 1;
-    return a.graceOrder - b.graceOrder;
-  });
   for (let i = 0; i < list.length; i++) {
-    list[i].midis.sort((a, b) => a - b);
+    if (list[i].midis.length > 1) {
+      list[i].midis.sort((a, b) => a - b);
+    }
   }
   return list;
 }
@@ -399,49 +408,87 @@ function computeSsmAndNovelty(
     const ci = i * CHROMA_SIZE;
     const ii = i * INTERVAL_BINS;
     const ri = i * RHYTHM_SIZE;
+    const a0 = chroma[ci];
+    const a1 = chroma[ci + 1];
+    const a2 = chroma[ci + 2];
+    const a3 = chroma[ci + 3];
+    const a4 = chroma[ci + 4];
+    const a5 = chroma[ci + 5];
+    const a6 = chroma[ci + 6];
+    const a7 = chroma[ci + 7];
+    const a8 = chroma[ci + 8];
+    const a9 = chroma[ci + 9];
+    const a10 = chroma[ci + 10];
+    const a11 = chroma[ci + 11];
+    const rowI = i * T;
+    const iHasInterval = intervalHasEnergy[i];
 
     for (let j = i + 1; j < T; j++) {
       if (!hasNotes[j]) continue;
       const cj = j * CHROMA_SIZE;
+      const b0 = chroma[cj];
+      const b1 = chroma[cj + 1];
+      const b2 = chroma[cj + 2];
+      const b3 = chroma[cj + 3];
+      const b4 = chroma[cj + 4];
+      const b5 = chroma[cj + 5];
+      const b6 = chroma[cj + 6];
+      const b7 = chroma[cj + 7];
+      const b8 = chroma[cj + 8];
+      const b9 = chroma[cj + 9];
+      const b10 = chroma[cj + 10];
+      const b11 = chroma[cj + 11];
 
-      // Best circular transposition over 12 pitch classes
-      let bestChroma = -1;
+      // Unrolled 12-shift circular dot product (zero modulo / bounds-check overhead)
+      let bestChroma = a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3 + a4 * b4 + a5 * b5 + a6 * b6 + a7 * b7 + a8 * b8 + a9 * b9 + a10 * b10 + a11 * b11;
       let bestShift = 0;
-      for (let shift = 0; shift < 12; shift++) {
-        let dot = 0;
-        for (let pc = 0; pc < 12; pc++) {
-          dot += chroma[ci + ((pc + shift) % 12)] * chroma[cj + pc];
-        }
-        if (dot > bestChroma) {
-          bestChroma = dot;
-          bestShift = shift;
-        }
-      }
+      let d: number;
+      d = a1 * b0 + a2 * b1 + a3 * b2 + a4 * b3 + a5 * b4 + a6 * b5 + a7 * b6 + a8 * b7 + a9 * b8 + a10 * b9 + a11 * b10 + a0 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 1; }
+      d = a2 * b0 + a3 * b1 + a4 * b2 + a5 * b3 + a6 * b4 + a7 * b5 + a8 * b6 + a9 * b7 + a10 * b8 + a11 * b9 + a0 * b10 + a1 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 2; }
+      d = a3 * b0 + a4 * b1 + a5 * b2 + a6 * b3 + a7 * b4 + a8 * b5 + a9 * b6 + a10 * b7 + a11 * b8 + a0 * b9 + a1 * b10 + a2 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 3; }
+      d = a4 * b0 + a5 * b1 + a6 * b2 + a7 * b3 + a8 * b4 + a9 * b5 + a10 * b6 + a11 * b7 + a0 * b8 + a1 * b9 + a2 * b10 + a3 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 4; }
+      d = a5 * b0 + a6 * b1 + a7 * b2 + a8 * b3 + a9 * b4 + a10 * b5 + a11 * b6 + a0 * b7 + a1 * b8 + a2 * b9 + a3 * b10 + a4 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 5; }
+      d = a6 * b0 + a7 * b1 + a8 * b2 + a9 * b3 + a10 * b4 + a11 * b5 + a0 * b6 + a1 * b7 + a2 * b8 + a3 * b9 + a4 * b10 + a5 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 6; }
+      d = a7 * b0 + a8 * b1 + a9 * b2 + a10 * b3 + a11 * b4 + a0 * b5 + a1 * b6 + a2 * b7 + a3 * b8 + a4 * b9 + a5 * b10 + a6 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 7; }
+      d = a8 * b0 + a9 * b1 + a10 * b2 + a11 * b3 + a0 * b4 + a1 * b5 + a2 * b6 + a3 * b7 + a4 * b8 + a5 * b9 + a6 * b10 + a7 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 8; }
+      d = a9 * b0 + a10 * b1 + a11 * b2 + a0 * b3 + a1 * b4 + a2 * b5 + a3 * b6 + a4 * b7 + a5 * b8 + a6 * b9 + a7 * b10 + a8 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 9; }
+      d = a10 * b0 + a11 * b1 + a0 * b2 + a1 * b3 + a2 * b4 + a3 * b5 + a4 * b6 + a5 * b7 + a6 * b8 + a7 * b9 + a8 * b10 + a9 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 10; }
+      d = a11 * b0 + a0 * b1 + a1 * b2 + a2 * b3 + a3 * b4 + a4 * b5 + a5 * b6 + a6 * b7 + a7 * b8 + a8 * b9 + a9 * b10 + a10 * b11;
+      if (d > bestChroma) { bestChroma = d; bestShift = 11; }
 
-      // Skip full multi-view work far from diagonal when chroma alone cannot reach threshold
+      const signed = SIGNED_SHIFT_TABLE[bestShift];
       const nearDiag = j - i <= noveltyRadius * 2;
       if (!nearDiag && bestChroma < 0.45) {
-        ssmSim[i * T + j] = bestChroma * 0.5;
-        ssmSim[j * T + i] = bestChroma * 0.5;
-        const signed = toSignedSemitoneShift(bestShift);
-        ssmDelta[i * T + j] = signed;
+        const approx = bestChroma * 0.5;
+        ssmSim[rowI + j] = approx;
+        ssmSim[j * T + i] = approx;
+        ssmDelta[rowI + j] = signed;
         ssmDelta[j * T + i] = -signed;
         continue;
       }
 
       const simRhythm = dotSlice(rhythm, ri, j * RHYTHM_SIZE, RHYTHM_SIZE);
       let simTotal: number;
-      if (intervalHasEnergy[i] && intervalHasEnergy[j]) {
+      if (iHasInterval && intervalHasEnergy[j]) {
         const simInterval = dotSlice(intervalHist, ii, j * INTERVAL_BINS, INTERVAL_BINS);
         simTotal = 0.5 * bestChroma + 0.25 * simInterval + 0.25 * simRhythm;
       } else {
         simTotal = 0.65 * bestChroma + 0.35 * simRhythm;
       }
 
-      const signed = toSignedSemitoneShift(bestShift);
-      ssmSim[i * T + j] = simTotal;
+      ssmSim[rowI + j] = simTotal;
       ssmSim[j * T + i] = simTotal;
-      ssmDelta[i * T + j] = signed;
+      ssmDelta[rowI + j] = signed;
       ssmDelta[j * T + i] = -signed;
     }
   }
