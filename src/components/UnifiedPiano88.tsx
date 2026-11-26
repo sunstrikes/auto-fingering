@@ -55,6 +55,8 @@ export interface UnifiedPiano88Props {
   practiceMode?: PracticeMode;
   showOverhead?: boolean;
   showFullPalm?: boolean;
+  /** When true (L2/L3 or hide-keyboard-early), hides target highlights, hand skeleton, and overhead lanes, keeping calm key-press echo only. */
+  scaffoldingHideTargets?: boolean;
   wrongMidis?: ReadonlySet<number>;
   hitMidis?: ReadonlySet<number>;
   pressedMidis?: ReadonlySet<number>;
@@ -602,6 +604,7 @@ export function UnifiedPiano88({
   practiceMode = "both",
   showOverhead = true,
   showFullPalm = true,
+  scaffoldingHideTargets = false,
   wrongMidis,
   hitMidis,
   pressedMidis,
@@ -763,41 +766,53 @@ export function UnifiedPiano88({
     onVirtualNoteOff?.(midi);
   };
 
-  const viewBoxTop = showOverhead ? 0 : FALLBOARD_Y;
-  const viewBoxBottom = showFullPalm ? PIANO_SVG_H : SVG_BOTTOM_Y;
+  const viewBoxTop = showOverhead && !scaffoldingHideTargets ? 0 : FALLBOARD_Y;
+  const viewBoxBottom = showFullPalm && !scaffoldingHideTargets ? PIANO_SVG_H : SVG_BOTTOM_Y;
   const viewBoxHeight = viewBoxBottom - viewBoxTop;
-  const showUpcomingPreview = !playbackFrame;
+  const showUpcomingPreview = !playbackFrame && !scaffoldingHideTargets;
 
   return (
     <section
       data-testid="unified-piano-88"
+      data-scaffolding-hidden={scaffoldingHideTargets ? "true" : "false"}
       aria-label="88键双手钢琴键盘"
       className={`border-t border-slate-300 bg-white px-3 pt-1.5 shadow-[0_-4px_12px_rgba(15,23,42,0.05)] sm:px-4 ${
-        showFullPalm ? "pb-1.5" : "pb-0"
+        showFullPalm && !scaffoldingHideTargets ? "pb-1.5" : "pb-0"
       }`}
     >
       <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-semibold text-slate-900">88 键钢琴与双手实时模拟</span>
-          <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 font-medium text-indigo-700">
-            <span className="h-2 w-2 rounded-full bg-indigo-600" />
-            左手{" "}
-            {lhHandPos
-              ? `${midiToPitchLabel(whiteKeyIndexToMidi(Math.min(lhHandPos.thumbKey, lhHandPos.pinkyKey)))}–${midiToPitchLabel(whiteKeyIndexToMidi(Math.max(lhHandPos.thumbKey, lhHandPos.pinkyKey)))}`
-              : "休止"}
-          </span>
-          <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-2 py-0.5 font-medium text-teal-800">
-            <span className="h-2 w-2 rounded-full bg-teal-600" />
-            右手{" "}
-            {rhHandPos
-              ? `${midiToPitchLabel(whiteKeyIndexToMidi(Math.min(rhHandPos.thumbKey, rhHandPos.pinkyKey)))}–${midiToPitchLabel(whiteKeyIndexToMidi(Math.max(rhHandPos.thumbKey, rhHandPos.pinkyKey)))}`
-              : "休止"}
-          </span>
-          {selectedSlice && (
-            <span data-testid="piano-slice-summary" className="text-slate-500">
-              第{selectedSlice.measureIndex + 1}小节 · {selectedSlice.hand === "RH" ? "右手" : "左手"} ·{" "}
-              {selectedSlice.notes.map((n) => midiToPitchLabel(n.midi)).join("+")}
+          {scaffoldingHideTargets ? (
+            <span
+              data-testid="piano-scaffolding-hidden-badge"
+              className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600"
+            >
+              撤拐态 · 仅保留平静按键回显（按 B0 / F 瞬时查看指法）
             </span>
+          ) : (
+            <>
+              <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 font-medium text-indigo-700">
+                <span className="h-2 w-2 rounded-full bg-indigo-600" />
+                左手{" "}
+                {lhHandPos
+                  ? `${midiToPitchLabel(whiteKeyIndexToMidi(Math.min(lhHandPos.thumbKey, lhHandPos.pinkyKey)))}–${midiToPitchLabel(whiteKeyIndexToMidi(Math.max(lhHandPos.thumbKey, lhHandPos.pinkyKey)))}`
+                  : "休止"}
+              </span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-2 py-0.5 font-medium text-teal-800">
+                <span className="h-2 w-2 rounded-full bg-teal-600" />
+                右手{" "}
+                {rhHandPos
+                  ? `${midiToPitchLabel(whiteKeyIndexToMidi(Math.min(rhHandPos.thumbKey, rhHandPos.pinkyKey)))}–${midiToPitchLabel(whiteKeyIndexToMidi(Math.max(rhHandPos.thumbKey, rhHandPos.pinkyKey)))}`
+                  : "休止"}
+              </span>
+              {selectedSlice && (
+                <span data-testid="piano-slice-summary" className="text-slate-500">
+                  第{selectedSlice.measureIndex + 1}小节 · {selectedSlice.hand === "RH" ? "右手" : "左手"} ·{" "}
+                  {selectedSlice.notes.map((n) => midiToPitchLabel(n.midi)).join("+")}
+                </span>
+              )}
+            </>
           )}
         </div>
 
@@ -976,7 +991,7 @@ export function UnifiedPiano88({
           </defs>
 
           {/* Overhead Dual Lanes: RH Top, LH Bottom */}
-          {showOverhead && (
+          {showOverhead && !scaffoldingHideTargets && (
             <>
               <OverheadHandLane
                 posture={displayFrame.rh}
@@ -1006,11 +1021,11 @@ export function UnifiedPiano88({
           {/* 52 White Keys */}
           <g data-layer="white-keys">
             {keysLayout.whites.map(({ midi, x, label }) => {
-              const info = displayFrame.activeKeyHighlights.get(midi);
+              const info = scaffoldingHideTargets ? undefined : displayFrame.activeKeyHighlights.get(midi);
               const isPressed = Boolean(pressedMidis?.has(midi));
               const isAudition = auditionMidi === midi || isPressed;
               const isWrong = wrongMidis?.has(midi) ?? false;
-              const isHit = hitMidis?.has(midi) ?? false;
+              const isHit = scaffoldingHideTargets ? false : (hitMidis?.has(midi) ?? false);
               const isAccompanimentOnly = Boolean(
                 (dimLh && info?.lh && !info?.rh) || (dimRh && info?.rh && !info?.lh)
               );
@@ -1027,7 +1042,7 @@ export function UnifiedPiano88({
               } else if (isHit) {
                 fill = "#86efac";
               } else if (isPressed) {
-                fill = "#fde68a";
+                fill = scaffoldingHideTargets ? "#cbd5e1" : "#fde68a";
               } else if (isBoth) {
                 fill = "url(#piano-dual-overlap)";
               } else if (info?.rh === "active") {
@@ -1155,11 +1170,11 @@ export function UnifiedPiano88({
           {/* 36 Black Keys */}
           <g data-layer="black-keys">
             {keysLayout.blacks.map(({ midi, x }) => {
-              const info = displayFrame.activeKeyHighlights.get(midi);
+              const info = scaffoldingHideTargets ? undefined : displayFrame.activeKeyHighlights.get(midi);
               const isPressed = Boolean(pressedMidis?.has(midi));
               const isAudition = auditionMidi === midi || isPressed;
               const isWrong = wrongMidis?.has(midi) ?? false;
-              const isHit = hitMidis?.has(midi) ?? false;
+              const isHit = scaffoldingHideTargets ? false : (hitMidis?.has(midi) ?? false);
               const isAccompanimentOnly = Boolean(
                 (dimLh && info?.lh && !info?.rh) || (dimRh && info?.rh && !info?.lh)
               );
@@ -1176,7 +1191,7 @@ export function UnifiedPiano88({
               } else if (isHit) {
                 fill = "#16a34a";
               } else if (isPressed) {
-                fill = "#f59e0b";
+                fill = scaffoldingHideTargets ? "#475569" : "#f59e0b";
               } else if (isBoth) {
                 fill = "url(#piano-dual-overlap)";
               } else if (info?.rh === "active") {
@@ -1260,10 +1275,12 @@ export function UnifiedPiano88({
           </g>
 
           {/* 2D Translucent Dual-Hand Posture Simulation Layer */}
-          <g data-layer="hand-posture-simulation">
-            <HandVectorOverlay posture={displayFrame.lh} dimmed={dimLh} />
-            <HandVectorOverlay posture={displayFrame.rh} dimmed={dimRh} />
-          </g>
+          {!scaffoldingHideTargets && (
+            <g data-layer="hand-posture-simulation">
+              <HandVectorOverlay posture={displayFrame.lh} dimmed={dimLh} />
+              <HandVectorOverlay posture={displayFrame.rh} dimmed={dimRh} />
+            </g>
+          )}
 
           {/* Upcoming Non-Trivial Movement Target Markers (Static / Waiting Mode Only) */}
           {showUpcomingPreview && (

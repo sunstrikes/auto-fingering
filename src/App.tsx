@@ -124,6 +124,7 @@ import {
 } from "./audio/playbackEngine";
 import type { ChunkingClient } from "./workers/chunkingClient";
 import { useChunkingAnalysis } from "./hooks/useChunkingAnalysis";
+import { useExternalFocusCoach } from "./hooks/useExternalFocusCoach";
 
 const PIANO_TIMBRE_STORAGE_KEY = "auto-fingering:piano-timbre";
 
@@ -167,6 +168,7 @@ export interface AppProps {
   midiDeps?: AppMidiDeps;
   practiceStorage?: PracticeStoragePort | null;
   clockDeps?: AppClockDeps;
+  coachFetch?: typeof fetch;
 }
 
 export default function App({
@@ -177,6 +179,7 @@ export default function App({
   midiDeps,
   practiceStorage,
   clockDeps,
+  coachFetch,
 }: AppProps) {
   const nowMs = useCallback(() => clockDeps?.nowMs?.() ?? Date.now(), [clockDeps]);
   const solverClientRef = useRef<SolverClient | null>(null);
@@ -328,13 +331,17 @@ export default function App({
     (s) => s.audiationImageryTimerEnabled,
   );
   const overspeedProbeEnabled = useGuidedSessionStore((s) => s.overspeedProbeEnabled);
+  const scaffoldingPreference = useGuidedSessionStore((s) => s.scaffoldingPreference);
+  const l3SilentBeatEnabled = useGuidedSessionStore((s) => s.l3SilentBeatEnabled);
   const durablePrefs = useMemo(() => ({
     handSpanProfile, speedMultiplier: playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
     absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
     microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled,
+    scaffoldingPreference, l3SilentBeatEnabled,
   }), [handSpanProfile, playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
     absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
-    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled]);
+    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled,
+    scaffoldingPreference, l3SilentBeatEnabled]);
   const persistence = usePracticePersistence(practiceStorage, durablePrefs, playbackState === "playing");
   const effectivePracticeMode: PracticeMode = isSingleStaff
     ? singleStaffHand === "LH"
@@ -478,7 +485,8 @@ export default function App({
     const guidedState = guidedControllerRef.current;
     const isGuidedStage0 =
       guidedState?.studioMode === "guided" && guidedState.sessionPhase === "stage0";
-    const waitingActive = isGuidedStage0 || waitingModeEnabled;
+    const waitingActive =
+      guidedState?.studioMode === "guided" ? isGuidedStage0 : waitingModeEnabled;
 
     if (event.type === "noteon") {
       setPressedMidis((prev) => {
@@ -663,6 +671,12 @@ export default function App({
       }
       if (saved?.overspeedProbeEnabled !== undefined) {
         useGuidedSessionStore.getState().setOverspeedProbeEnabled(saved.overspeedProbeEnabled);
+      }
+      if (saved?.scaffoldingPreference !== undefined) {
+        useGuidedSessionStore.getState().setScaffoldingPreference(saved.scaffoldingPreference);
+      }
+      if (saved?.l3SilentBeatEnabled !== undefined) {
+        useGuidedSessionStore.getState().setL3SilentBeatEnabled(saved.l3SilentBeatEnabled);
       }
       setAbLoop(loop);
       setAbPickStep("idle");
@@ -1282,6 +1296,8 @@ export default function App({
   const guided = useGuidedSessionController({
     scoreDoc,
     solveResult,
+    anchors,
+    removedRawAnchorUids,
     practiceSteps,
     motorChunks: chunking.motorChunks,
     macroSections: chunking.macroSections,
@@ -1306,6 +1322,43 @@ export default function App({
     nowMs,
   });
   guidedControllerRef.current = guided;
+
+  const coach = useExternalFocusCoach({
+    coachFetch,
+    scoreDoc,
+    solveResult,
+    scoreTitle,
+    effectivePracticeMode,
+    studioMode: guided.studioMode,
+    sessionPhase: guided.sessionPhase,
+    lastBoutSummary: guided.lastBoutSummary,
+    onUpsertCueOverride: chunking.handleUpsertCueOverride,
+  });
+  const triggerCoachActionRef = useRef<() => boolean>(() => false);
+  triggerCoachActionRef.current = () => {
+    const g = useGuidedSessionStore.getState();
+    if (
+      g.studioMode !== "guided" ||
+      g.sessionPhase === "idle" ||
+      g.sessionPhase === "suspended" ||
+      g.sessionPhase === "stage0" ||
+      g.sessionPhase === "playing" ||
+      g.sessionPhase === "micro-rest" ||
+      g.sessionPhase === "macro-rest" ||
+      !g.lastBoutSummary?.acousticProfile
+    ) {
+      return false;
+    }
+    if (g.bottomSlotView !== "feedback") {
+      g.setBottomSlotView("feedback");
+    }
+    coach.triggerCoach();
+    return true;
+  };
+  const freeAcousticCoachTip = useMemo(
+    () => coach.buildFreeOfflineTip(freeAcousticState),
+    [coach.buildFreeOfflineTip, freeAcousticState],
+  );
 
   const playAccompanimentNotes = (step: PracticeStep) => {
     if (effectivePracticeMode === "both" || step.accompanimentNotes.length === 0) return;
@@ -1817,6 +1870,16 @@ export default function App({
         if (e.code === "Space" || e.key === " ") {
           e.preventDefault();
         }
+        return;
+      }
+      if (
+        e.key.toLowerCase() === "g" &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.repeat &&
+        triggerCoachActionRef.current()
+      ) {
         return;
       }
       if (
@@ -2402,12 +2465,39 @@ export default function App({
                       : `Bridge Window 接缝桥接 · 顺畅 ${guided.bridgeWindowState.smoothPassesDone}/${guided.bridgeWindowState.requiredSmoothPasses} · ${guided.bridgeWindowState.activeSpeed.toFixed(2)}×`}
                   </span>
                 )}
+                <span
+                  data-testid="guided-scaffolding-badge"
+                  className="rounded-full border border-teal-300 bg-teal-50 px-2 py-0.5 text-[11px] font-semibold text-teal-900"
+                >
+                  L{guided.scaffoldingLevel}
+                  {guided.scaffoldingPolicy.steppedDown ? " · 已自动退降1级" : ""}
+                </span>
+                {guided.scaffoldingLevel === 3 && (
+                  <label className="inline-flex cursor-pointer items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
+                    <input
+                      type="checkbox"
+                      data-testid="guided-l3-silent-beat-toggle"
+                      checked={guided.l3SilentBeatEnabled}
+                      onChange={(e) => guided.setL3SilentBeatEnabled(e.target.checked)}
+                      className="h-3 w-3 accent-teal-600"
+                    />
+                    <span>L3 静音跟拍 (仅Count-In)</span>
+                  </label>
+                )}
                 {guided.dualPitchDisabled && (
                   <span
                     data-testid="guided-dual-pitch-notice"
                     className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900"
                   >
                     当前块包含 A0+A#0，已自动禁用双键紧急暂停，请使用触控暂停或空格键
+                  </span>
+                )}
+                {guided.b0PeekDisabled && (
+                  <span
+                    data-testid="guided-b0-conflict-notice"
+                    className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900"
+                  >
+                    当前块包含 B0，已自动禁用演奏态 B0 偷看，请按 F 键或触控「偷看指法」
                   </span>
                 )}
                 {guided.commandNotice && (
@@ -2439,6 +2529,16 @@ export default function App({
                     className="min-h-[44px] min-w-[44px] rounded-lg border border-amber-400 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-950 hover:bg-amber-100"
                   >
                     跳过接缝桥接 (C8)
+                  </button>
+                )}
+                {guided.sessionPhase === "playing" && guided.scaffoldingPolicy.cuesObscured && (
+                  <button
+                    type="button"
+                    data-testid="guided-peek-fingerings-btn"
+                    onClick={() => guided.triggerScaffoldingPeek()}
+                    className="min-h-[44px] min-w-[44px] rounded-lg border border-teal-400 bg-teal-50 px-3 py-1.5 text-xs font-semibold text-teal-900 hover:bg-teal-100"
+                  >
+                    {guided.peekActive ? "指法闪现中…" : "偷看指法 1.5s (B0 / F)"}
                   </button>
                 )}
                 {guided.sessionPhase === "stage0" || guided.sessionPhase === "playing" ? (
@@ -2678,6 +2778,15 @@ export default function App({
                         setFreeAcousticOpen(false);
                       }}
                     />
+                    {freeAcousticCoachTip && (
+                      <div
+                        data-testid="free-acoustic-coach-tip"
+                        className="mt-2 rounded-lg border border-teal-200 bg-teal-50/70 px-2.5 py-1.5 text-[11px] text-teal-950"
+                      >
+                        <span className="font-semibold">外部注意提示（0 ms）：</span>
+                        <span>{freeAcousticCoachTip}</span>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -3022,6 +3131,7 @@ export default function App({
             }
             abPickStep={abPickStep}
             spotlightChunk={guided.spotlightChunk}
+            fadingScaffolding={guided.fadingScaffoldingVisual}
             motorChunks={chunking.motorChunks}
             chunkJunctions={chunking.chunkJunctions}
             performanceCues={chunking.performanceCues}
@@ -3050,6 +3160,8 @@ export default function App({
             onUpsertCueOverride={chunking.handleUpsertCueOverride}
             onRemoveCueOverride={chunking.handleRemoveCueOverride}
             onResetCueOverrides={chunking.handleResetCueOverrides}
+            onPolishCueLabel={coach.polishCueLabel}
+            polishingCueId={coach.polishingCueId}
             onCloseInspectCluster={chunking.closeInspectCluster}
             rendererFactory={scoreRendererFactory}
           />
@@ -3152,6 +3264,10 @@ export default function App({
                 ? guided.audiationImageryTick.remainingSec
                 : null
             }
+            coachResult={coach.coachResult}
+            coachLoading={coach.coachLoading}
+            coachRemoteConfigured={coach.remoteConfigured}
+            onTriggerCoach={coach.triggerCoach}
             onTriggerPreview={guided.triggerAudiationPreview}
             onStopPreview={() => guided.stopAudiationPreview("manual-stop")}
             onShowFingerings={() => guided.setBottomSlotView("piano")}
@@ -3173,21 +3289,44 @@ export default function App({
           practiceMode={effectivePracticeMode}
           showOverhead={showPianoOverhead}
           showFullPalm={showFullPalm}
+          scaffoldingHideTargets={guided.hideKeyboardTargets}
           wrongMidis={
-            (guided.studioMode === "guided" && guided.sessionPhase === "stage0") ||
-            (waitingModeEnabled && !absoluteStrictnessEnabled)
-              ? flashedWrongMidis.size > 0
-                ? new Set([...waitingState.wrongMidis, ...flashedWrongMidis])
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? undefined
+              : (guided.studioMode === "guided" && guided.sessionPhase === "stage0") ||
+                  (waitingModeEnabled && !absoluteStrictnessEnabled)
+                ? flashedWrongMidis.size > 0
+                  ? new Set([...waitingState.wrongMidis, ...flashedWrongMidis])
+                  : waitingState.wrongMidis
                 : waitingState.wrongMidis
-              : waitingState.wrongMidis
           }
-          hitMidis={waitingState.hitMidis}
+          hitMidis={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? undefined
+              : waitingState.hitMidis
+          }
           pressedMidis={pressedMidis}
           sustainPedalPressed={sustainPedalPressed}
-          waitingTainted={waitingState.tainted}
-          waitingResetReason={waitingState.lastResetReason}
-          waitingIsHolding={waitingState.isHolding}
-          waitingHoldProgress={waitingState.holdProgress}
+          waitingTainted={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? false
+              : waitingState.tainted
+          }
+          waitingResetReason={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? null
+              : waitingState.lastResetReason
+          }
+          waitingIsHolding={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? false
+              : waitingState.isHolding
+          }
+          waitingHoldProgress={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? 0
+              : waitingState.holdProgress
+          }
           commandKeyBadges={guided.commandKeyBadges}
           bridgeHandPreview={guided.bridgeHandPreview}
           onSelectSlice={handleSelectSlice}
@@ -3220,6 +3359,8 @@ export default function App({
         audiationPreviewMode={guided.audiationPreviewMode}
         audiationImageryTimerEnabled={guided.audiationImageryTimerEnabled}
         overspeedProbeEnabled={guided.overspeedProbeEnabled}
+        scaffoldingPreference={guided.scaffoldingPreference}
+        l3SilentBeatEnabled={guided.l3SilentBeatEnabled}
         showStatusBar={showStatusBar}
         showPianoOverhead={showPianoOverhead}
         showFullPalm={showFullPalm}
@@ -3280,6 +3421,10 @@ export default function App({
         onToggleOverspeedProbe={() =>
           guided.setOverspeedProbeEnabled(!guided.overspeedProbeEnabled)
         }
+        onChangeScaffoldingPreference={guided.setScaffoldingPreference}
+        onToggleL3SilentBeat={() =>
+          guided.setL3SilentBeatEnabled(!guided.l3SilentBeatEnabled)
+        }
         onToggleShowStatusBar={() => setShowStatusBar((v) => !v)}
         onToggleShowPianoOverhead={() => setShowPianoOverhead((v) => !v)}
         onToggleShowFullPalm={() => setShowFullPalm((v) => !v)}
@@ -3287,6 +3432,7 @@ export default function App({
         onChangePriorMode={handlePriorModeChange}
         onChangePriorLambda={handlePriorLambdaChange}
         onChangeCustomModelBaseUrl={handleCustomModelBaseUrlChange}
+        coachSettingsProps={coach.coachSettingsProps}
         onClose={() => setSettingsOpen(false)}
       />
     </div>

@@ -24,7 +24,7 @@ const fields: { [K in PracticeStore]: readonly (keyof PracticeStorageRecords[K])
   workspacePrefs: ["scopeKey", "lastOpenedPieceId", "scoreFingerprint", "handSpanProfile", "speedMultiplier", "abLoop",
     "practiceMode", "singleStaffHand", "ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled",
     "cc64CommandEnabled", "microRestDurationSec", "audiationPreviewMode", "audiationImageryTimerEnabled",
-    "overspeedProbeEnabled", "freePracticeMinutes", "repairEdge", "updatedAtMs"],
+    "overspeedProbeEnabled", "scaffoldingPreference", "l3SilentBeatEnabled", "freePracticeMinutes", "repairEdge", "updatedAtMs"],
   scoreBlobs: ["fingerprint", "bytes", "fileName", "byteLength", "lastAccessedAtMs", "sourceFormat", "repairAlternate"],
 };
 

@@ -29,7 +29,8 @@ export type PianoCommandAction =
   | "start-first-note"
   | "emergency-pause"
   | "micro-rest-reminder"
-  | "peek-reveal";
+  | "peek-reveal"
+  | "peek-fingerings";
 
 export interface PianoCommandRouteContext {
   phase: GuidedSessionPhase;
@@ -38,12 +39,15 @@ export interface PianoCommandRouteContext {
   cc64CommandEnabled: boolean;
   allowActivePeek?: boolean;
   allowActiveBridgeSkip?: boolean;
+  /** True when cues are obscured during active play (L2, L3, hide-keyboard-early, or blind/EHS). */
+  cuesObscured?: boolean;
 }
 
 export interface PianoCommandRouteResult {
   action: PianoCommandAction;
   emergencyPauseDisabled?: boolean;
   peekDisabled?: boolean;
+  b0PeekDisabled?: boolean;
 }
 
 export interface KeyboardCommandEventLike {
@@ -76,6 +80,17 @@ export function hasDualPitchConflict(chunkMidis: Iterable<number>): boolean {
     if (midi === PIANO_COMMAND_MIDI.A0) hasA0 = true;
     else if (midi === PIANO_COMMAND_MIDI.A_SHARP_0) hasASharp0 = true;
     if (hasA0 && hasASharp0) return true;
+  }
+  return false;
+}
+
+/**
+ * Returns true when the active MotorChunk legitimately contains B0 (MIDI 23),
+ * requiring the active-play B0 flash-peek shortcut to be auto-disabled (ADR-0004 §3 amendment).
+ */
+export function hasB0Collision(chunkMidis: Iterable<number>): boolean {
+  for (const midi of chunkMidis) {
+    if (midi === PIANO_COMMAND_MIDI.B0) return true;
   }
   return false;
 }
@@ -117,19 +132,27 @@ export function createPianoCommandRouter(options?: { chordWindowMs?: number }) {
       return { action: "none" };
     }
 
-    // Active play: single-key A0/B0/C8 ignored except blind-curtain/L2+ B0 peek (with collision guard) and optional bridge C8 skip
+    // Active play: single-key A0/C8 ignored except Bridge C8 skip; B0 triggers 1.5s peek when blind/cuesObscured (with B0 collision guard);
+    // A0+A#0 within chordWindowMs triggers pause
     if (ACTIVE_PLAY_PHASES.has(context.phase)) {
-      if (context.phase === "playing" && context.allowActivePeek && event.midi === PIANO_COMMAND_MIDI.B0) {
-        let hasB0 = false;
-        for (const m of context.chunkMidis) {
-          if (m === PIANO_COMMAND_MIDI.B0) {
-            hasB0 = true;
-            break;
-          }
+      const b0Blocked =
+        context.phase === "playing" &&
+        Boolean(context.cuesObscured) &&
+        hasB0Collision(context.chunkMidis);
+      if (
+        context.phase === "playing" &&
+        (context.allowActivePeek || context.cuesObscured) &&
+        event.midi === PIANO_COMMAND_MIDI.B0
+      ) {
+        if (hasB0Collision(context.chunkMidis)) {
+          return {
+            action: "none",
+            ...(dualPitchDisabled ? { emergencyPauseDisabled: true } : {}),
+            ...(context.allowActivePeek ? { peekDisabled: true } : {}),
+            ...(b0Blocked ? { b0PeekDisabled: true } : {}),
+          };
         }
-        return hasB0
-          ? { action: "none", peekDisabled: true }
-          : { action: "peek-reveal" };
+        return { action: context.allowActivePeek ? "peek-reveal" : "peek-fingerings" };
       }
       if (context.phase === "playing" && context.allowActiveBridgeSkip && event.midi === PIANO_COMMAND_MIDI.C8) {
         let hasC8 = false;
@@ -164,7 +187,14 @@ export function createPianoCommandRouter(options?: { chordWindowMs?: number }) {
           return { action: "emergency-pause" };
         }
       }
-      return dualPitchDisabled ? { action: "none", emergencyPauseDisabled: true } : { action: "none" };
+      if (dualPitchDisabled || b0Blocked) {
+        return {
+          action: "none",
+          ...(dualPitchDisabled ? { emergencyPauseDisabled: true } : {}),
+          ...(b0Blocked ? { b0PeekDisabled: true } : {}),
+        };
+      }
+      return { action: "none" };
     }
 
     resetChordState();
@@ -209,7 +239,7 @@ export function createPianoCommandRouter(options?: { chordWindowMs?: number }) {
 export function routeKeyboardCommand(
   event: KeyboardCommandEventLike,
   phase: GuidedSessionPhase,
-  options?: { allowActivePeek?: boolean },
+  options?: { allowActivePeek?: boolean; cuesObscured?: boolean },
 ): PianoCommandAction {
   if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
     return "none";
@@ -217,10 +247,14 @@ export function routeKeyboardCommand(
 
   const isSpace = event.code === "Space" || event.key === " ";
   if (ACTIVE_PLAY_PHASES.has(phase)) {
+    if (isSpace) return "emergency-pause";
     if (phase === "playing" && options?.allowActivePeek && event.key.toLowerCase() === "f") {
       return "peek-reveal";
     }
-    return isSpace ? "emergency-pause" : "none";
+    if (phase === "playing" && options?.cuesObscured && event.key.toLowerCase() === "f") {
+      return "peek-fingerings";
+    }
+    return "none";
   }
 
   if (!NON_PLAYING_COMMAND_PHASES.has(phase)) {

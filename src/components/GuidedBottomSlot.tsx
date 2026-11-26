@@ -1,9 +1,11 @@
+import type { CoachResult } from "../coach/types";
 import type { ColdStartProbeEvaluation } from "../guided/coldStartProbe";
 import type { GuidedSessionPhase } from "../guided/pianoCommandKeys";
 import type { AudiationCueSummary, AudiationPrimingState } from "../guided/transitionFlow";
 import type { GuidedBoutSummary } from "../store/useGuidedSessionStore";
 import { AcousticProfileSlot } from "./AcousticProfileSlot";
 import { AudiationPrimingBar } from "./AudiationPrimingBar";
+import { ExternalFocusCoachCard } from "./ExternalFocusCoachCard";
 
 export interface GuidedBottomSlotProps {
   sessionPhase: GuidedSessionPhase;
@@ -12,6 +14,10 @@ export interface GuidedBottomSlotProps {
   audiationCue: AudiationCueSummary;
   audiationState: AudiationPrimingState | null;
   imageryRemainingSec: number | null;
+  coachResult?: CoachResult | null;
+  coachLoading?: boolean;
+  coachRemoteConfigured?: boolean;
+  onTriggerCoach?: () => void;
   onTriggerPreview: () => void;
   onStopPreview: () => void;
   onShowFingerings: () => void;
@@ -33,6 +39,10 @@ export function GuidedBottomSlot({
   audiationCue,
   audiationState,
   imageryRemainingSec,
+  coachResult = null,
+  coachLoading = false,
+  coachRemoteConfigured = false,
+  onTriggerCoach,
   onTriggerPreview,
   onStopPreview,
   onShowFingerings,
@@ -124,6 +134,15 @@ export function GuidedBottomSlot({
             </button>
           </div>
         </div>
+      )}
+
+      {showAcousticSlot && coachResult && (
+        <ExternalFocusCoachCard
+          coachResult={coachResult}
+          loading={coachLoading}
+          remoteConfigured={coachRemoteConfigured}
+          onTriggerCoach={onTriggerCoach}
+        />
       )}
 
       {sessionPhase === "audiation" ? (
