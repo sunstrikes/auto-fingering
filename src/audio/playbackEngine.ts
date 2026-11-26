@@ -108,6 +108,16 @@ export interface PlaybackEngineDeps {
   onCursorSync?: (target: CursorSyncTarget | null) => void;
   onFrame?: (frame: PlaybackFrame | null) => void;
   onMetronomeBeat?: (beat: MetronomeBeatEvent | null) => void;
+  onLoopClockAnchor?: (
+    anchor: PlaybackClockAnchor,
+    bounds: { startMeasureIndex: number; endMeasureIndex: number }
+  ) => void;
+  onAbLoopIterationComplete?: (info: {
+    anchor: PlaybackClockAnchor;
+    startMeasureIndex: number;
+    endMeasureIndex: number;
+    completedAtPerfMs: number;
+  }) => void;
 }
 
 export interface PlaybackEngine {
@@ -666,12 +676,31 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       }
     }
 
+    let currentLoopAnchor: PlaybackClockAnchor | null = null;
+    let loopAnchorEmitted = false;
+    const emitLoopAnchorOnce = () => {
+      if (!loopRange || loopAnchorEmitted) return;
+      loopAnchorEmitted = true;
+      currentLoopAnchor = {
+        t0PerfMs: calibrateAnchorPerfMs(deps.audioEngine.getAudioContext(), anchorAudioTime),
+        audioStartTimeSec: anchorAudioTime,
+        startScoreSec,
+        endScoreSec: loopRange.endSec,
+        speedMultiplier: speed,
+      };
+      deps.onLoopClockAnchor?.(currentLoopAnchor, {
+        startMeasureIndex: loopRange.startMeasureIndex,
+        endMeasureIndex: loopRange.endMeasureIndex,
+      });
+    };
+
     setState("playing");
     scheduleUpcomingNotes();
     scheduleUpcomingBeats();
     emitActiveMetronomeBeat();
 
     if (ctx.currentTime >= anchorAudioTime - 1e-6) {
+      emitLoopAnchorOnce();
       emitSyncForScoreSec(startScoreSec);
     } else {
       emitFrameForState(startScoreSec, "playing");
@@ -690,9 +719,19 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
         return true;
       }
 
+      emitLoopAnchorOnce();
+
       const scoreSec = getCurrentScoreSec();
       const activeLoop = resolveLoopRange(activeDoc);
       if (activeLoop && scoreSec >= activeLoop.endSec - 1e-6) {
+        if (currentLoopAnchor && currentLoopAnchor.startScoreSec <= activeLoop.startSec + 1e-4) {
+          deps.onAbLoopIterationComplete?.({
+            anchor: currentLoopAnchor,
+            startMeasureIndex: activeLoop.startMeasureIndex,
+            endMeasureIndex: activeLoop.endMeasureIndex,
+            completedAtPerfMs: performance.now(),
+          });
+        }
         const loopEndAudioTime =
           anchorAudioTime + Math.max(0, activeLoop.endSec - anchorScoreSec) / speed;
         startPlaybackLoop(
@@ -1109,11 +1148,14 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
           activeSegmentMetronomeMode = null;
           pausedScoreSec = null;
           lastEmittedBeatKey = null;
-          setState("stopped");
+          state = "stopped";
           deps.onCursorSync?.(null);
           deps.onFrame?.(null);
           deps.onMetronomeBeat?.(null);
           options.onSegmentComplete?.();
+          if (state === "stopped") {
+            deps.onStateChange?.("stopped");
+          }
           return false;
         }
 

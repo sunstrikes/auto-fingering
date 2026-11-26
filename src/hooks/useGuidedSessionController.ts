@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PianoAudioEngine } from "../audio/pianoAudio";
-import type { PlaybackEngine } from "../audio/playbackEngine";
+import type { PlaybackClockAnchor, PlaybackEngine } from "../audio/playbackEngine";
 import type { MacroSection, MotorChunk } from "../chunking/types";
 import type {
   PracticeMode,
@@ -9,6 +9,7 @@ import type {
   ScoreDocument,
   SolveResult,
 } from "../domain/types";
+import { analyzeContinuousPerformanceWindow } from "../guided/acousticProfile";
 import {
   createPianoCommandRouter,
   hasDualPitchConflict,
@@ -50,6 +51,8 @@ export interface UseGuidedSessionControllerOptions {
   countInEnabled: boolean;
   setMidiCaptureMode: (mode: "waiting" | "continuous") => void;
   resetMidiCapture: () => void;
+  sliceContinuousMidiWindow?: (fromMs: number, toMs: number) => MidiInputEvent[];
+  deviceNames?: readonly string[];
   syncWaitingToStep: (step: PracticeStep | null, state: "playing" | "paused" | "stopped") => void;
   resetWaitingCursor: (stepIndex?: number) => void;
   nowMs: () => number;
@@ -133,6 +136,8 @@ export function useGuidedSessionController({
   countInEnabled,
   setMidiCaptureMode,
   resetMidiCapture,
+  sliceContinuousMidiWindow,
+  deviceNames,
   syncWaitingToStep,
   resetWaitingCursor,
   nowMs,
@@ -327,6 +332,7 @@ export function useGuidedSessionController({
       const playStartSec = firstStep ? Math.min(startScoreSec, firstStep.onsetSec) : startScoreSec;
       const safeEndSec = Math.max(playStartSec + 0.05, endScoreSec);
       setMidiCaptureMode("continuous");
+      let activeAnchor: PlaybackClockAnchor | null = null;
       void playbackEngineRef.current.playSegment(scoreDoc, {
         startScoreSec: playStartSec,
         endScoreSec: safeEndSec,
@@ -334,9 +340,32 @@ export function useGuidedSessionController({
         muteTargetHand: false,
         practiceMode: effectivePracticeMode,
         metronomeMode: "full",
+        onClockAnchor: (anchor) => {
+          activeAnchor = anchor;
+        },
         onSegmentComplete: () => {
           const cur = useGuidedSessionStore.getState();
           if (cur.studioMode === "guided" && cur.sessionPhase === "playing") {
+            const chunkSteps = getStepsForChunk(scoreDoc, practiceSteps, chunk);
+            const analyzed =
+              activeAnchor && sliceContinuousMidiWindow
+                ? analyzeContinuousPerformanceWindow({
+                    clockAnchor: activeAnchor,
+                    expectedSteps: chunkSteps,
+                    scoreDoc,
+                    practiceMode: effectivePracticeMode,
+                    sliceContinuousMidiWindow,
+                    endClockMs: Math.max(performance.now(), nowMs()),
+                    deviceNames,
+                  })
+                : null;
+            if (analyzed) {
+              cur.completePlayingBout(nowMs(), {
+                accuracy: analyzed.attribution.fluency.pitchAccuracy,
+                acousticProfile: analyzed.acousticProfile,
+              });
+              return;
+            }
             cur.completePlayingBout(nowMs());
           }
         },
@@ -349,6 +378,8 @@ export function useGuidedSessionController({
       countInEnabled,
       effectivePracticeMode,
       setMidiCaptureMode,
+      sliceContinuousMidiWindow,
+      deviceNames,
       nowMs,
     ],
   );
