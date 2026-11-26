@@ -23,6 +23,7 @@ export interface DeriveScaffoldingOptions {
   circuitBreakerTriggered?: boolean;
   l3SilentBeatEnabled?: boolean;
   blindOverlayActive?: boolean;
+  ehsOverlayActive?: boolean;
 }
 
 export interface ScaffoldingPolicy {
@@ -124,7 +125,10 @@ export function deriveScaffoldingPolicy(
   const suppressLiveWrongFlash = level >= 1;
   const hideLiveErrorCounters = level >= 1;
   const cuesObscured =
-    level >= 2 || hideKeyboardTargets || Boolean(options.blindOverlayActive);
+    level >= 2 ||
+    hideKeyboardTargets ||
+    Boolean(options.blindOverlayActive) ||
+    (level >= 1 && Boolean(options.ehsOverlayActive));
   const l3Silent = level === 3 && (options.l3SilentBeatEnabled ?? true);
 
   return {
