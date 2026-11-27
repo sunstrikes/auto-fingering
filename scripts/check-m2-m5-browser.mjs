@@ -133,7 +133,7 @@ async function checkM2ChunkingAndSession() {
     // Wait for static chunking worker + OSMD render
     await page.getByTestId("chunk-cue-editor-toggle").waitFor();
     await page.getByTestId("motor-chunk-strip").waitFor({ state: "attached" });
-    await page.getByTestId("passage-cluster-ribbon").waitFor();
+    await page.getByTestId("passage-cluster-toggle").waitFor();
     await page.getByTestId("guided-launch-strip").waitFor();
 
     // Open chunk/cue editor dialog, perform manual Split or Merge, and verify persistence across reload
@@ -159,13 +159,17 @@ async function checkM2ChunkingAndSession() {
     await page.getByTestId("chunk-cue-editor-close").click();
     await page.getByTestId("chunk-cue-editor-panel").waitFor({ state: "hidden" });
 
-    // Click Passage Cluster instance for on-demand Variant Diff banner
+    // Expand Passage Cluster ribbon and click instance for on-demand Variant Diff banner
+    await page.getByTestId("passage-cluster-toggle").click();
+    await page.getByTestId("passage-cluster-ribbon").waitFor();
     const clusterInstances = page.locator('[data-testid^="passage-cluster-instance-"]');
     if (await clusterInstances.count() > 0) {
       await clusterInstances.first().click();
       await page.getByTestId("variant-diff-banner").waitFor();
       await page.getByTestId("variant-diff-close-btn").click();
     }
+    await page.getByTestId("passage-cluster-toggle").click();
+    await page.getByTestId("passage-cluster-ribbon").waitFor({ state: "hidden" });
 
     // Enter Guided Session launch card and check orthogonal PracticeMode & non-playing command badges
     await page.getByTestId("enter-guided-session-btn").click();

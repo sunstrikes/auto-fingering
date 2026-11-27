@@ -238,7 +238,7 @@ describe("Guided Session App.tsx review fixes", () => {
 
     await uploadScore(container, TWO_CHUNK_XML);
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[data-testid="guided-strip-start-btn"]')!.click();
+      container.querySelector<HTMLButtonElement>('[data-testid="enter-guided-session-btn"]')!.click();
     });
 
     const editBtn = container.querySelector<HTMLButtonElement>(
@@ -294,7 +294,7 @@ describe("Guided Session App.tsx review fixes", () => {
     });
 
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[data-testid="guided-strip-start-btn"]')!.click();
+      container.querySelector<HTMLButtonElement>('[data-testid="enter-guided-session-btn"]')!.click();
     });
     await act(async () => {
       container.querySelector<HTMLButtonElement>('[data-testid="guided-start-session-btn"]')!.click();
@@ -355,7 +355,7 @@ describe("Guided Session App.tsx review fixes", () => {
 
     await uploadScore(container, TWO_CHUNK_XML);
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[data-testid="guided-strip-start-btn"]')!.click();
+      container.querySelector<HTMLButtonElement>('[data-testid="enter-guided-session-btn"]')!.click();
     });
 
     // Split at measure 3 so chunk 1 is mm.1-2 ([60,48], [62,50]) and chunk 2 is mm.3-4 ([64,52], [65,53])

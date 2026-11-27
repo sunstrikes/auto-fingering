@@ -324,7 +324,7 @@ describe("Ticket #37 UI: ExternalFocusCoachCard, CoachSettingsSection, Free Stud
 
     // Start Guided Session with split chunks
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
     const splitBtn = container.querySelector('[data-testid="chunk-barline-split-2"]') as HTMLButtonElement | null;
     if (splitBtn) {
@@ -655,7 +655,7 @@ describe("Ticket #37 UI: ExternalFocusCoachCard, CoachSettingsSection, Free Stud
 
     // Launch Guided Session (no split -> single 4-measure chunk)
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
     await act(async () => {
       (container.querySelector('[data-testid="guided-start-session-btn"]') as HTMLButtonElement).click();

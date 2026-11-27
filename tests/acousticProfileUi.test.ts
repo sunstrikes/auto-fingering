@@ -281,7 +281,7 @@ describe("Ticket #36 UI: Acoustic Profile capsules, hotspot strip & Free Studio 
 
     await uploadXml(container, FOUR_MEASURE_GRAND_STAFF_XML);
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
     const splitBtn = container.querySelector('[data-testid="chunk-barline-split-2"]') as HTMLButtonElement | null;
     if (splitBtn) {

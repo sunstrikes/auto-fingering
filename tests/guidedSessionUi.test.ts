@@ -285,7 +285,7 @@ describe("<App /> Guided Session end-to-end (Simulated MIDI + DI seams)", () => 
 
     // 2. Open Guided Session Launch Card (single-piece, 15/25/40, leverage, MacroSection, queue preview)
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
 
     const launchCard = container.querySelector('[data-testid="guided-launch-card"]');
@@ -492,7 +492,7 @@ describe("<App /> Guided Session end-to-end (Simulated MIDI + DI seams)", () => 
     });
 
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
 
     // CC64 does NOT start session when cc64CommandEnabled is false (default)
@@ -579,7 +579,7 @@ describe("<App /> Guided Session end-to-end (Simulated MIDI + DI seams)", () => 
     await uploadXml(container, FOUR_MEASURE_GRAND_STAFF_XML);
 
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
     const splitBtn = container.querySelector('[data-testid="chunk-barline-split-2"]') as HTMLButtonElement | null;
     if (splitBtn) {

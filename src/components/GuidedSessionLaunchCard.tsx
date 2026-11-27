@@ -74,7 +74,7 @@ export function GuidedSessionLaunchCard({
     <section
       data-testid="guided-launch-card"
       aria-label="科学练琴启动卡"
-      className="shrink-0 rounded-xl border border-teal-200 bg-white p-3 shadow-sm"
+      className="max-h-[44dvh] shrink-0 overflow-y-auto rounded-xl border border-teal-200 bg-white p-2.5 shadow-sm"
     >
       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-slate-100 pb-2">
         <div>

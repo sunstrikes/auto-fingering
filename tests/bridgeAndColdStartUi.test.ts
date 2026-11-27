@@ -305,7 +305,7 @@ describe("Ticket #34 Bridge Window & Chaffin Cold-Start Probe UI E2E (Simulated 
 
     // 2. Open Guided Session launch card & split at barline 2 so junction (m.2->m.3) exists
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
       await vi.advanceTimersByTimeAsync(30);
     });
     const splitBtn = container.querySelector('[data-testid="chunk-barline-split-2"]') as HTMLButtonElement | null;
@@ -484,7 +484,7 @@ describe("Ticket #34 Bridge Window & Chaffin Cold-Start Probe UI E2E (Simulated 
 
     // Open Guided Session Launch Card -> verify always-available Cold-Start Drill + Blind Toggle
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
       await vi.advanceTimersByTimeAsync(40);
     });
     const coldBtn = container.querySelector('[data-testid="guided-cold-probe-btn"]') as HTMLButtonElement;
@@ -638,7 +638,7 @@ describe("Ticket #34 Bridge Window & Chaffin Cold-Start Probe UI E2E (Simulated 
     await uploadScore(container, lowRiskXml, "empirical-bridge.musicxml");
 
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
       await vi.advanceTimersByTimeAsync(30);
     });
     const splitBtn = container.querySelector('[data-testid="chunk-barline-split-2"]') as HTMLButtonElement | null;
@@ -657,7 +657,7 @@ describe("Ticket #34 Bridge Window & Chaffin Cold-Start Probe UI E2E (Simulated 
     });
     await act(async () => {
       (container.querySelector('[data-testid="speed-preset-0.75"]') as HTMLButtonElement).click();
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
     await act(async () => {
       (container.querySelector('[data-testid="guided-start-session-btn"]') as HTMLButtonElement).click();

@@ -2285,18 +2285,15 @@ export default function App({
           onOpenSettings={() => setSettingsOpen(true)}
         />
       ) : (
-        <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-1.5 sm:px-4">
-          <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 lg:flex-nowrap">
+        <header className="shrink-0 border-b border-slate-200 bg-white px-2.5 py-1 sm:px-3.5">
+          <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-1.5 xl:flex-nowrap">
             <div className="shrink-0">
-              <h1 className="whitespace-nowrap text-sm font-semibold tracking-tight text-slate-900 sm:text-base">
-                MusicXML 钢琴自动指法
+              <h1 className="whitespace-nowrap text-sm font-semibold tracking-tight text-slate-900">
+                <span className="hidden xl:inline">MusicXML </span>钢琴自动指法
               </h1>
-              <p className="hidden text-[11px] text-slate-500 2xl:block">
-                纯浏览器端 Beam Search DP 钢琴指法推导与双轨实时演练
-              </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-1.5 lg:flex-nowrap">
+            <div className="flex flex-wrap items-center gap-1 xl:flex-nowrap xl:gap-1.5">
               {guided.sessionPhase === "suspended" && guided.suspendedSnapshot ? (
                 <GuidedResumePill
                   remainingMinutes={guided.remainingMinutes}
@@ -2306,18 +2303,29 @@ export default function App({
                   onEndSession={guided.handleEndSession}
                 />
               ) : scoreDoc ? (
-                <button
-                  type="button"
-                  data-testid="enter-guided-session-btn"
-                  onClick={guided.enterGuidedLaunch}
-                  className="shrink-0 whitespace-nowrap rounded-lg border border-teal-500 bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-900 hover:bg-teal-100"
+                <div
+                  data-testid="guided-launch-strip"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-teal-200 bg-teal-50/80 p-0.5 text-xs"
                 >
-                  科学练琴 (Guided)
-                </button>
+                  <span
+                    data-testid="free-studio-mode-label"
+                    className="hidden rounded bg-white px-1.5 py-0.5 text-[11px] font-medium text-slate-600 shadow-2xs 2xl:inline"
+                  >
+                    Free Studio
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="enter-guided-session-btn"
+                    onClick={guided.enterGuidedLaunch}
+                    className="shrink-0 whitespace-nowrap rounded-md bg-teal-600 px-2 py-0.5 text-xs font-semibold text-white hover:bg-teal-700"
+                  >
+                    科学练琴<span className="hidden 2xl:inline"> (Guided)</span>
+                  </button>
+                </div>
               ) : null}
 
-              <label className="shrink-0 cursor-pointer whitespace-nowrap rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-800">
-              上传<span className="hidden xl:inline"> .musicxml / .mxl</span>
+              <label className="shrink-0 cursor-pointer whitespace-nowrap rounded-lg bg-slate-900 px-2 py-0.5 text-xs font-medium text-white hover:bg-slate-800 xl:px-2.5 xl:py-1">
+              上传<span className="hidden 2xl:inline"> .musicxml / .mxl</span>
               <input
                 type="file"
                 accept=".musicxml,.xml,.mxl"
@@ -2328,14 +2336,14 @@ export default function App({
 
             {persistence.storage && (
               <button type="button" data-testid="practice-backup-open"
-                className="shrink-0 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-50"
-                onClick={() => { setBackupOpen(true); persistence.dismissReminder(); }}>练习备份</button>
+                className="shrink-0 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-700 hover:bg-slate-50 xl:px-2.5 xl:py-1"
+                onClick={() => { setBackupOpen(true); persistence.dismissReminder(); }}><span className="hidden xl:inline">练习</span>备份</button>
             )}
 
             {library.length > 0 && (
               <select
                 aria-label="已上传乐谱"
-                className="max-w-[10rem] shrink-0 rounded-lg border border-slate-300 bg-white px-1.5 py-1 text-xs"
+                className="max-w-[6.5rem] shrink-0 rounded-lg border border-slate-300 bg-white px-1.5 py-0.5 text-xs lg:max-w-[7.5rem] xl:max-w-[10rem] xl:py-1"
                 value=""
                 onChange={(e) => void handleLibrarySelect(e.target.value)}
               >
@@ -2356,11 +2364,11 @@ export default function App({
             >
               {(
                 [
-                  { mode: "both" as const, label: "双手" },
-                  { mode: "rh-only" as const, label: "仅右手" },
-                  { mode: "lh-only" as const, label: "仅左手" },
+                  { mode: "both" as const, prefix: "", label: "双手" },
+                  { mode: "rh-only" as const, prefix: "仅", label: "右手" },
+                  { mode: "lh-only" as const, prefix: "仅", label: "左手" },
                 ] as const
-              ).map(({ mode, label }) => {
+              ).map(({ mode, prefix, label }) => {
                 const isActive = effectivePracticeMode === mode;
                 const isLockedOut = isSingleStaff && !isActive;
                 return (
@@ -2371,12 +2379,13 @@ export default function App({
                     aria-pressed={isActive}
                     disabled={isLockedOut}
                     onClick={() => handlePracticeModeChange(mode)}
-                    className={`whitespace-nowrap rounded-md px-2 py-1 transition ${
+                    className={`whitespace-nowrap rounded-md px-1.5 py-0.5 transition xl:px-2 xl:py-1 ${
                       isActive
                         ? "bg-white text-slate-900 shadow-xs"
                         : "text-slate-600 hover:text-slate-900"
                     } disabled:cursor-not-allowed disabled:opacity-40`}
                   >
+                    {prefix && <span className="hidden lg:inline">{prefix}</span>}
                     {label}
                   </button>
                 );
@@ -2392,7 +2401,7 @@ export default function App({
                 <button
                   type="button"
                   onClick={() => void handleSingleStaffHandToggle("RH")}
-                  className={`whitespace-nowrap rounded-md px-2 py-1 transition ${
+                  className={`whitespace-nowrap rounded-md px-1.5 py-0.5 transition xl:px-2 xl:py-1 ${
                     singleStaffHand === "RH"
                       ? "bg-white text-slate-900 shadow-xs"
                       : "text-slate-600 hover:text-slate-900"
@@ -2403,7 +2412,7 @@ export default function App({
                 <button
                   type="button"
                   onClick={() => void handleSingleStaffHandToggle("LH")}
-                  className={`whitespace-nowrap rounded-md px-2 py-1 transition ${
+                  className={`whitespace-nowrap rounded-md px-1.5 py-0.5 transition xl:px-2 xl:py-1 ${
                     singleStaffHand === "LH"
                       ? "bg-white text-slate-900 shadow-xs"
                       : "text-slate-600 hover:text-slate-900"
@@ -2414,14 +2423,20 @@ export default function App({
               </div>
             )}
 
-            <label className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50">
+            <label
+              title="忽略原谱已有指法"
+              className="inline-flex shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-50 xl:gap-1.5 xl:px-2.5 xl:py-1"
+            >
               <input
                 type="checkbox"
+                aria-label="忽略原谱已有指法"
                 checked={ignoreExistingFingerings}
                 onChange={(e) => handleIgnoreExistingToggle(e.target.checked)}
                 className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900"
               />
-              忽略原谱已有指法
+              <span>
+                忽略原<span className="hidden xl:inline">谱已有</span>指法
+              </span>
             </label>
 
             <div className="inline-flex shrink-0 items-center gap-1">
@@ -2430,7 +2445,7 @@ export default function App({
                 data-testid="undo-btn"
                 disabled={!canUndo}
                 onClick={() => useStudioStore.getState().undo()}
-                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-1.5 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45 xl:px-2.5 xl:py-1"
               >
                 撤销
               </button>
@@ -2439,7 +2454,7 @@ export default function App({
                 data-testid="redo-btn"
                 disabled={!canRedo}
                 onClick={() => useStudioStore.getState().redo()}
-                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-1.5 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45 xl:px-2.5 xl:py-1"
               >
                 重做
               </button>
@@ -2451,7 +2466,7 @@ export default function App({
                 value={exportFormat}
                 onChange={(e) => useStudioStore.getState().setExportFormat(e.target.value as ExportFormat)}
                 disabled={!renderedXml}
-                className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-lg border border-slate-300 bg-white px-1.5 py-0.5 text-xs text-slate-700 disabled:cursor-not-allowed disabled:opacity-50 xl:px-2 xl:py-1"
               >
                 <option value="musicxml">.musicxml</option>
                 <option value="mxl">.mxl</option>
@@ -2462,7 +2477,7 @@ export default function App({
                 disabled={!renderedXml}
                 title={`下载 .${exportFormat}`}
                 onClick={() => void handleDownload()}
-                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 xl:px-2.5 xl:py-1"
               >
                 下载
               </button>
@@ -2470,10 +2485,24 @@ export default function App({
               <button
                 type="button"
                 data-testid="header-midi-status-btn"
+                title={`${formatMidiStatusLabel(midiState)} · 设置`}
                 onClick={() => setSettingsOpen(true)}
-                className={`whitespace-nowrap rounded-lg border px-2.5 py-1 text-xs font-medium transition hover:opacity-90 ${getMidiStatusBadgeClass(midiState)}`}
+                className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border px-2 py-0.5 text-xs font-medium transition hover:opacity-90 xl:px-2.5 xl:py-1 ${getMidiStatusBadgeClass(midiState)}`}
               >
-                {formatMidiStatusLabel(midiState)} · 设置
+                <span
+                  aria-hidden="true"
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    midiState.status === "connected"
+                      ? "bg-emerald-500"
+                      : midiState.status === "no-devices" || midiState.status === "requesting"
+                        ? "bg-amber-500"
+                        : midiState.status === "denied" || midiState.status === "error"
+                          ? "bg-red-500"
+                          : "bg-slate-400"
+                  }`}
+                />
+                <span className="hidden xl:inline">{formatMidiStatusLabel(midiState)} · </span>
+                <span>设置</span>
               </button>
             </div>
           </div>
@@ -2481,25 +2510,7 @@ export default function App({
       </header>
       )}
 
-      <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-1.5 overflow-hidden px-2.5 pt-1.5 pb-1 sm:px-4">
-        {scoreDoc && guided.studioMode === "free" && guided.sessionPhase === "idle" && (
-          <div
-            data-testid="guided-launch-strip"
-            className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-teal-50/70 px-3 py-1 text-xs text-teal-950"
-          >
-            <span>
-              当前处于 <strong data-testid="free-studio-mode-label">Free Studio</strong> · 可自由修改指法或随时进入科学练琴。
-            </span>
-            <button
-              type="button"
-              data-testid="guided-strip-start-btn"
-              onClick={guided.enterGuidedLaunch}
-              className="rounded-md bg-teal-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-teal-700"
-            >
-              开启 Guided Session
-            </button>
-          </div>
-        )}
+      <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-1 overflow-hidden px-2 pt-1 pb-1 sm:px-3.5">
 
         {guided.studioMode === "guided" && guided.sessionPhase === "launch" && (
           <GuidedSessionLaunchCard
@@ -2705,31 +2716,35 @@ export default function App({
         {showStatusBar && (guided.studioMode === "free" || guided.sessionPhase === "launch") && (
           <div
             data-testid="top-status-warning-bar"
-            className="relative flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
+            className="relative flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 overflow-visible rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600"
           >
-          <div className="flex flex-wrap items-center gap-3">
-            <span>
-              <strong>状态:</strong> {status}
-            </span>
+          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
             {scoreTitle && (
-              <span>
-                <strong>乐谱:</strong> {scoreTitle}
+              <span
+                title={scoreTitle}
+                className="max-w-[130px] truncate font-medium text-slate-800 sm:max-w-[200px]"
+              >
+                {scoreTitle}
               </span>
             )}
-            {noteEvents.length > 0 && (
-              <span>
-                <strong>音符:</strong> {noteEvents.length}
+            {isResolving || status.startsWith("正在") || status === "错误" ? (
+              <span className="truncate text-slate-600" title={status}>
+                {status}
+              </span>
+            ) : (
+              <span className="hidden truncate text-slate-500 xl:inline" title={status}>
+                {status}
               </span>
             )}
             {solveResult && (
-              <span>
+              <span className="hidden shrink-0 2xl:inline">
                 <strong>换指提示:</strong> {solveResult.transitionCues.length}
               </span>
             )}
             {solveResult?.priorUsed && (
               <span
                 data-testid="prior-used-badge"
-                className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700"
+                className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700"
               >
                 模型辅助 (λ={priorLambda.toFixed(2)})
               </span>
@@ -2737,14 +2752,14 @@ export default function App({
             {priorFallbackReason && (
               <span
                 data-testid="status-prior-fallback-badge"
-                className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800"
+                className="shrink-0 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800"
               >
                 模型先验已回退经典求解
               </span>
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
             {solveResult && (
               <div
                 data-testid="compact-warning-bar"
@@ -3193,7 +3208,6 @@ export default function App({
               </div>
             )}
 
-            <span className="hidden text-slate-400 xl:inline">纯本地运算 · Web Worker DP</span>
           </div>
           </div>
         )}

@@ -205,6 +205,52 @@ describe("Slice 3: TransportPracticeBar 4px Passage Cluster ribbon", () => {
     expect(onToggleInspectClusterInstance).toHaveBeenNthCalledWith(2, "inst-0");
   });
 
+  it("collapses Passage Cluster ribbon by default and toggles it open/closed via passage-cluster-toggle", () => {
+    const onToggleInspectClusterInstance = vi.fn();
+    const clusters = makeSampleClusters();
+    const container = mount(
+      createElement(TransportPracticeBar, {
+        hasScore: true,
+        hasSelectedSlice: false,
+        playbackState: "stopped",
+        speedMultiplier: 1,
+        baseBpm: 120,
+        audioStatus: "idle",
+        measureCount: 6,
+        measureTimelines: makeTimelines(6),
+        activeMeasureIndex: 0,
+        passageClusters: clusters,
+        inspectedClusterInstanceId: null,
+        onToggleInspectClusterInstance,
+        onPlay: vi.fn(),
+        onPlayFromSlice: vi.fn(),
+        onPause: vi.fn(),
+        onStop: vi.fn(),
+        onJumpToStart: vi.fn(),
+        onJumpToMeasure: vi.fn(),
+        onChangeSpeed: vi.fn(),
+      }),
+    );
+
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="passage-cluster-toggle"]')!;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.textContent).toContain("重复簇 (1)");
+    expect(container.querySelector('[data-testid="passage-cluster-ribbon"]')).toBeNull();
+
+    act(() => {
+      toggle.click();
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('[data-testid="passage-cluster-ribbon"]')).not.toBeNull();
+
+    act(() => {
+      toggle.click();
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('[data-testid="passage-cluster-ribbon"]')).toBeNull();
+  });
+
   it("omits Passage Cluster ribbon when there are no clusters", () => {
     const container = mount(
       createElement(TransportPracticeBar, {
@@ -226,6 +272,7 @@ describe("Slice 3: TransportPracticeBar 4px Passage Cluster ribbon", () => {
         onChangeSpeed: vi.fn(),
       }),
     );
+    expect(container.querySelector('[data-testid="passage-cluster-toggle"]')).toBeNull();
     expect(container.querySelector('[data-testid="passage-cluster-ribbon"]')).toBeNull();
   });
 });
@@ -344,8 +391,12 @@ describe("Slice 4: ScoreViewer barline Split/Merge, PerformanceCue editor, and o
 
     const viewer = container.querySelector('[data-testid="score-viewer"]')!;
     expect(viewer.className).toContain("overflow-hidden");
+    const viewerHeader = container.querySelector('[data-testid="score-viewer-header"]')!;
     const toggle = container.querySelector<HTMLButtonElement>('[data-testid="chunk-cue-editor-toggle"]')!;
     expect(toggle).not.toBeNull();
+    expect(viewerHeader.contains(toggle)).toBe(true);
+    expect(viewerHeader.textContent).toContain("乐谱画布");
+    expect(viewer.textContent).not.toContain("展开后编辑，不占用乐谱空间");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(toggle.textContent).toContain("84");
     expect(toggle.textContent).toContain("34");
@@ -722,8 +773,9 @@ describe("Slice 5: App root chunking integration (worker + persistence + cross-m
     await vi.waitFor(() => {
       expect(analyzeSpy).toHaveBeenCalledWith(11);
       expect(container.querySelector('[data-testid="motor-chunk-strip"]')).not.toBeNull();
-      expect(container.querySelector('[data-testid="passage-cluster-ribbon"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="passage-cluster-toggle"]')).not.toBeNull();
     });
+    expect(container.querySelector('[data-testid="passage-cluster-ribbon"]')).toBeNull();
 
     // Normal state must NOT lay down Variant Diff tint
     expect(container.querySelector('[data-testid="variant-diff-banner"]')).toBeNull();
@@ -799,7 +851,10 @@ describe("Slice 5: App root chunking integration (worker + persistence + cross-m
     ).toBeGreaterThanOrEqual(1);
     expect(container.querySelector('[data-testid="performance-cue-bar"]')?.textContent).toContain("呼吸落键");
 
-    // 4. Inspect cluster instance -> on-demand Variant Diff appears; edit FingerAnchor on one instance -> updates MotorReuse without overwriting sibling instance fingering
+    // 4. Inspect cluster instance -> expand cluster toggle -> on-demand Variant Diff appears; edit FingerAnchor on one instance -> updates MotorReuse without overwriting sibling instance fingering
+    act(() => {
+      container.querySelector<HTMLButtonElement>('[data-testid="passage-cluster-toggle"]')!.click();
+    });
     const instanceChips = Array.from(
       container.querySelectorAll<HTMLButtonElement>('[data-testid^="passage-cluster-instance-"]'),
     );
@@ -883,6 +938,9 @@ describe("Slice 5: App root chunking integration (worker + persistence + cross-m
     });
 
     // 7. Normal playback suppresses Variant Diff tint & chunk editing UI
+    act(() => {
+      reloaded.querySelector<HTMLButtonElement>('[data-testid="passage-cluster-toggle"]')!.click();
+    });
     const instanceChip = reloaded.querySelector<HTMLButtonElement>('[data-testid^="passage-cluster-instance-"]')!;
     act(() => {
       instanceChip.click();

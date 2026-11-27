@@ -155,10 +155,24 @@ export function GuidedSessionHeader({
           <button
             type="button"
             data-testid="header-midi-status-btn"
+            title={`${formatMidiStatusLabel(midiState)} · 设置`}
             onClick={onOpenSettings}
-            className={`whitespace-nowrap rounded-lg border px-2.5 py-1 text-xs font-medium transition hover:opacity-90 ${getMidiStatusBadgeClass(midiState)}`}
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border px-2.5 py-1 text-xs font-medium transition hover:opacity-90 ${getMidiStatusBadgeClass(midiState)}`}
           >
-            {formatMidiStatusLabel(midiState)} · 设置
+            <span
+              aria-hidden="true"
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                midiState.status === "connected"
+                  ? "bg-emerald-500"
+                  : midiState.status === "no-devices" || midiState.status === "requesting"
+                    ? "bg-amber-500"
+                    : midiState.status === "denied" || midiState.status === "error"
+                      ? "bg-red-500"
+                      : "bg-slate-400"
+              }`}
+            />
+            <span className="hidden xl:inline">{formatMidiStatusLabel(midiState)} · </span>
+            <span>设置</span>
           </button>
         </div>
       </div>

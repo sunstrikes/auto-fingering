@@ -216,7 +216,7 @@ async function uploadAndSplitTwoChunks(container: HTMLElement) {
   });
 
   await act(async () => {
-    (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     await vi.advanceTimersByTimeAsync(30);
   });
 
@@ -261,7 +261,7 @@ describe("Ticket #33 Guided Session MVP E2E (Simulated MIDI + clockDeps cross-da
       (container.querySelector('[data-testid="speed-preset-0.75"]') as HTMLButtonElement).click();
     });
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
 
     // Start Guided Session
@@ -354,7 +354,7 @@ describe("Ticket #33 Guided Session MVP E2E (Simulated MIDI + clockDeps cross-da
     });
 
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
       await vi.advanceTimersByTimeAsync(50);
     });
 
@@ -465,7 +465,7 @@ describe("Ticket #33 Guided Session MVP E2E (Simulated MIDI + clockDeps cross-da
       resetAudio();
     });
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
     await act(async () => {
       (container.querySelector('[data-testid="guided-timebox-25"]') as HTMLButtonElement).click();
@@ -503,7 +503,7 @@ describe("Ticket #33 Guided Session MVP E2E (Simulated MIDI + clockDeps cross-da
       resetAudio();
     });
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
     await act(async () => {
       (container.querySelector('[data-testid="guided-timebox-40"]') as HTMLButtonElement).click();
@@ -536,7 +536,7 @@ describe("Ticket #33 Guided Session MVP E2E (Simulated MIDI + clockDeps cross-da
       resetAudio();
     });
     await act(async () => {
-      (container.querySelector('[data-testid="guided-strip-start-btn"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="enter-guided-session-btn"]') as HTMLButtonElement).click();
     });
     await act(async () => {
       (container.querySelector('[data-testid="guided-quick-triage-btn"]') as HTMLButtonElement).click();

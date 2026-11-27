@@ -26,7 +26,7 @@ import type {
 } from "../chunking/types";
 import type { NoteDiffEntry } from "../store/useStudioStore";
 import { midiToPitchLabel } from "../solver/keyboard";
-import { ChunkCueEditorStrip } from "./ChunkCueEditorStrip";
+import { ChunkCueEditorTrigger, VariantDiffBanner } from "./ChunkCueEditorStrip";
 import {
   MarginRiskGutter,
   type MeasureGeometry,
@@ -447,6 +447,10 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       followCursor: false, // OSMD scrollIntoView jitters on iPad; scrolling handled by ScoreViewer
       renderSingleHorizontalStaffline: mode === "horizontal",
       drawTitle: mode === "page",
+      drawSubtitle: mode === "page",
+      drawComposer: mode === "page",
+      drawLyricist: mode === "page",
+      drawCredits: mode === "page",
     });
 
   let osmd = buildOsmd(activeLayoutMode);
@@ -642,6 +646,8 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       const nextMode = options?.layoutMode ?? activeLayoutMode;
       if (nextMode !== activeLayoutMode) {
         activeLayoutMode = nextMode;
+        osmd.AutoResizeEnabled = false;
+        (osmd as unknown as { dispose?: () => void }).dispose?.();
         container.innerHTML = "";
         osmd = buildOsmd(nextMode);
       }
@@ -1000,6 +1006,64 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     scrollToMeasure(measureIndex: number, scrollContainer: HTMLElement | null) {
       const els = getMeasureSvgElements(measureIndex);
       const target = els[0];
+      if (els.length > 0 && scrollContainer && scrollContainer.clientHeight > 0) {
+        const containerRect = scrollContainer.getBoundingClientRect();
+        if (containerRect.height > 0) {
+          let minTop = Infinity;
+          let maxBottom = -Infinity;
+          let minLeft = Infinity;
+          let maxRight = -Infinity;
+          for (const el of els) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 && rect.height <= 0) continue;
+            minTop = Math.min(minTop, rect.top);
+            maxBottom = Math.max(maxBottom, rect.bottom);
+            minLeft = Math.min(minLeft, rect.left);
+            maxRight = Math.max(maxRight, rect.right);
+          }
+          if (Number.isFinite(minTop) && maxBottom > minTop) {
+            const contentTop = minTop - containerRect.top + scrollContainer.scrollTop;
+            const contentBottom = maxBottom - containerRect.top + scrollContainer.scrollTop;
+            const contentLeft = minLeft - containerRect.left + scrollContainer.scrollLeft;
+            const contentRight = maxRight - containerRect.left + scrollContainer.scrollLeft;
+            const topClearance = activeLayoutMode === "horizontal" ? 28 : 8;
+            const bottomClearance = 8;
+            const visibleTop = scrollContainer.scrollTop + topClearance;
+            const visibleBottom =
+              scrollContainer.scrollTop + scrollContainer.clientHeight - bottomClearance;
+
+            let nextTop = scrollContainer.scrollTop;
+            const measureHeight = contentBottom - contentTop;
+            if (measureHeight > scrollContainer.clientHeight - topClearance - bottomClearance) {
+              nextTop = Math.max(0, contentTop - topClearance);
+            } else if (contentTop < visibleTop) {
+              nextTop = Math.max(0, contentTop - topClearance);
+            } else if (contentBottom > visibleBottom) {
+              nextTop = Math.max(0, contentBottom - scrollContainer.clientHeight + bottomClearance);
+            }
+
+            let nextLeft = scrollContainer.scrollLeft;
+            if (scrollContainer.scrollWidth > scrollContainer.clientWidth) {
+              const measureCenterX = (contentLeft + contentRight) / 2;
+              nextLeft = Math.max(
+                0,
+                Math.min(
+                  scrollContainer.scrollWidth - scrollContainer.clientWidth,
+                  measureCenterX - scrollContainer.clientWidth / 2
+                )
+              );
+            }
+
+            if (typeof scrollContainer.scrollTo === "function") {
+              scrollContainer.scrollTo({ left: nextLeft, top: nextTop, behavior: "smooth" });
+            } else {
+              scrollContainer.scrollLeft = nextLeft;
+              scrollContainer.scrollTop = nextTop;
+            }
+            return;
+          }
+        }
+      }
       if (target && typeof target.scrollIntoView === "function") {
         target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
         return;
@@ -1108,6 +1172,8 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     },
 
     dispose() {
+      osmd.AutoResizeEnabled = false;
+      (osmd as unknown as { dispose?: () => void }).dispose?.();
       osmd.cursor?.hide();
       lastCursorKey = null;
       cachedFingeringNodes = null;
@@ -1621,40 +1687,63 @@ export function ScoreViewer({
       }
       data-scaffolding-level={fadingScaffolding ? `L${fadingScaffolding.level}` : undefined}
       data-scaffolding-peek={fadingScaffolding?.peekActive ? "true" : undefined}
-      className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white p-2 shadow-sm sm:p-2.5"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-sm sm:p-2"
     >
-      <div className="mb-1.5 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1 text-xs">
-        <div className="flex flex-wrap items-center gap-2 text-slate-600">
-          <span className="font-semibold text-slate-800">乐谱画布</span>
-          <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800">
+      <div
+        data-testid="score-viewer-header"
+        className="mb-1 flex shrink-0 flex-nowrap items-center justify-between gap-1.5 border-b border-slate-100 pb-1 text-xs"
+      >
+        <div className="flex min-w-0 items-center gap-1.5 text-slate-600">
+          <span className="shrink-0 whitespace-nowrap font-semibold text-slate-800">乐谱画布</span>
+          <ChunkCueEditorTrigger
+            motorChunks={motorChunks}
+            chunkJunctions={chunkJunctions}
+            performanceCues={performanceCues}
+            selectedMeasureIndex={selectedMeasureIndex}
+            measureCount={scoreDoc?.measureCount ?? measureRisks.length}
+            chunkEditingEnabled={chunkEditingEnabled}
+            hasChunkOverrides={hasChunkOverrides}
+            hasCueOverrides={hasCueOverrides}
+            onSplitChunkAtMeasure={onSplitChunkAtMeasure}
+            onMergeChunkBoundary={onMergeChunkBoundary}
+            onResetChunkOverrides={onResetChunkOverrides}
+            onUpsertCueOverride={onUpsertCueOverride}
+            onRemoveCueOverride={onRemoveCueOverride}
+            onResetCueOverrides={onResetCueOverrides}
+            onPolishCueLabel={onPolishCueLabel}
+            polishingCueId={polishingCueId}
+          />
+          <span className="hidden shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800 xl:inline-flex">
             <span className="h-2 w-2 rounded-full bg-amber-400" />
             警告
           </span>
-          <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] text-red-700">
+          <span className="hidden shrink-0 items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] text-red-700 xl:inline-flex">
             <span className="h-2 w-2 rounded-full bg-red-500" />
             高风险
           </span>
-          <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[11px] text-violet-700">
+          <span className="hidden shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[11px] text-violet-700 xl:inline-flex">
             <span className="h-2 w-2 rounded-full bg-violet-600" />
             变更
           </span>
-          <span className="text-[11px] text-slate-400">点击任意音符可编辑指法</span>
+          <span className="hidden shrink-0 truncate text-[11px] text-slate-400 2xl:inline">
+            点击任意音符可编辑指法
+          </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1.5">
           {manualScrollPaused && playbackFrame?.state === "playing" && (
             <button
               type="button"
               data-testid="recenter-cursor-btn"
               onClick={() => setManualScrollPaused(false)}
-              className="rounded-full border border-blue-300 bg-blue-600 px-2.5 py-0.5 text-[11px] font-semibold text-white shadow-xs hover:bg-blue-700"
+              className="shrink-0 whitespace-nowrap rounded-full border border-blue-300 bg-blue-600 px-2.5 py-0.5 text-[11px] font-semibold text-white shadow-xs hover:bg-blue-700"
             >
               回到游标
             </button>
           )}
 
           <div
-            className="inline-flex items-center rounded-md border border-slate-300 bg-slate-100 p-0.5 text-[11px] font-medium"
+            className="inline-flex shrink-0 items-center rounded-md border border-slate-300 bg-slate-100 p-0.5 text-[11px] font-medium"
             role="group"
             aria-label="乐谱缩放"
           >
@@ -1672,7 +1761,7 @@ export function ScoreViewer({
             </button>
             <span
               data-testid="score-zoom-label"
-              className="min-w-[36px] text-center text-[11px] text-slate-700"
+              className="min-w-[34px] text-center text-[11px] text-slate-700"
             >
               {Math.round(scoreZoom * 100)}%
             </span>
@@ -1692,7 +1781,7 @@ export function ScoreViewer({
 
           {onLayoutModeChange && (
             <div
-              className="inline-flex rounded-md border border-slate-300 bg-slate-100 p-0.5 text-[11px] font-medium"
+              className="inline-flex shrink-0 rounded-md border border-slate-300 bg-slate-100 p-0.5 text-[11px] font-medium"
               role="group"
               aria-label="乐谱排版模式"
             >
@@ -1701,7 +1790,7 @@ export function ScoreViewer({
                 data-testid="layout-horizontal-btn"
                 aria-pressed={layoutMode === "horizontal"}
                 onClick={() => onLayoutModeChange("horizontal")}
-                className={`rounded px-2 py-0.5 transition ${
+                className={`whitespace-nowrap rounded px-1.5 py-0.5 transition ${
                   layoutMode === "horizontal"
                     ? "bg-white text-slate-900 shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
@@ -1714,7 +1803,7 @@ export function ScoreViewer({
                 data-testid="layout-page-btn"
                 aria-pressed={layoutMode === "page"}
                 onClick={() => onLayoutModeChange("page")}
-                className={`rounded px-2 py-0.5 transition ${
+                className={`whitespace-nowrap rounded px-1.5 py-0.5 transition ${
                   layoutMode === "page"
                     ? "bg-white text-slate-900 shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
@@ -1728,18 +1817,24 @@ export function ScoreViewer({
           {selectedMeasureIndex !== null && (
             <span
               data-testid="active-measure-badge"
-              className="rounded-full border border-blue-200 bg-blue-50 px-2.5 py-0.5 font-semibold text-blue-700"
+              className="shrink-0 whitespace-nowrap rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 font-semibold text-blue-700"
             >
-              当前: 第 {selectedMeasureIndex + 1} 小节
+              <span className="hidden lg:inline">当前: </span>第 {selectedMeasureIndex + 1} 小节
             </span>
           )}
         </div>
       </div>
 
+      <VariantDiffBanner
+        inspectedClusterInstance={inspectedClusterInstance}
+        inspectedClusterLabel={inspectedClusterLabel}
+        onCloseInspectCluster={onCloseInspectCluster}
+      />
+
       {anchoredNotes.length > 0 && (
         <div
           data-testid="anchor-indicators"
-          className="mb-2 flex shrink-0 items-center gap-1.5 overflow-x-auto rounded-lg border border-red-100 bg-red-50/50 px-2.5 py-1 text-xs"
+          className="mb-1 flex shrink-0 items-center gap-1.5 overflow-x-auto rounded-lg border border-red-100 bg-red-50/50 px-2.5 py-0.5 text-xs"
         >
           <span className="shrink-0 font-semibold text-red-700">
             锚点 ({anchoredNotes.length}):
@@ -1771,28 +1866,6 @@ export function ScoreViewer({
           ))}
         </div>
       )}
-
-      <ChunkCueEditorStrip
-        motorChunks={motorChunks}
-        chunkJunctions={chunkJunctions}
-        performanceCues={performanceCues}
-        selectedMeasureIndex={selectedMeasureIndex}
-        measureCount={scoreDoc?.measureCount ?? measureRisks.length}
-        chunkEditingEnabled={chunkEditingEnabled}
-        hasChunkOverrides={hasChunkOverrides}
-        hasCueOverrides={hasCueOverrides}
-        inspectedClusterInstance={inspectedClusterInstance}
-        inspectedClusterLabel={inspectedClusterLabel}
-        onSplitChunkAtMeasure={onSplitChunkAtMeasure}
-        onMergeChunkBoundary={onMergeChunkBoundary}
-        onResetChunkOverrides={onResetChunkOverrides}
-        onUpsertCueOverride={onUpsertCueOverride}
-        onRemoveCueOverride={onRemoveCueOverride}
-        onResetCueOverrides={onResetCueOverrides}
-        onPolishCueLabel={onPolishCueLabel}
-        polishingCueId={polishingCueId}
-        onCloseInspectCluster={onCloseInspectCluster}
-      />
 
       {renderError && (
         <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -1829,7 +1902,7 @@ export function ScoreViewer({
           style={{ overscrollBehavior: "contain" }}
         >
           {layoutMode === "horizontal" && measureRisks.length > 0 && (
-            <div className="sticky top-0 z-10 border-b border-slate-100 bg-white/90 px-2 py-1 backdrop-blur-xs">
+            <div className="sticky top-0 z-10 border-b border-slate-100 bg-white/90 px-1.5 py-0.5 backdrop-blur-xs">
               <MarginRiskGutter
                 measures={measureRisks}
                 selectedMeasureIndex={selectedMeasureIndex}

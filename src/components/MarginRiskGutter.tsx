@@ -325,16 +325,16 @@ export function MarginRiskGutter({
         title={titleParts.join(" · ")}
         onClick={() => onSelectMeasure(summary.measureIndex)}
         style={posStyle}
-        className={`flex items-center justify-center rounded text-[10px] font-bold transition focus:outline-none ${
+        className={`flex items-center justify-center rounded font-bold transition focus:outline-none ${
           BAR_STYLE[summary.highestSeverity]
         } ${
           isHorizontal
             ? style
-              ? "h-5"
-              : "h-5 min-w-6 flex-1 px-1"
+              ? "h-4 text-[9px]"
+              : "h-4 min-w-6 flex-1 px-1 text-[9px]"
             : style
-              ? "w-5"
-              : "min-h-6 w-5 flex-1 py-1"
+              ? "w-5 text-[10px]"
+              : "min-h-6 w-5 flex-1 py-1 text-[10px]"
         } ${isSelected ? "ring-2 ring-blue-600 ring-offset-1" : ""}`}
       >
         {summary.measureIndex + 1}
@@ -362,7 +362,7 @@ export function MarginRiskGutter({
           data-testid="margin-risk-gutter"
           data-orientation="horizontal"
           aria-label="小节风险导航条"
-          className="relative h-5 shrink-0 select-none"
+          className="relative h-4 shrink-0 select-none"
           style={{ width: `${Math.ceil(totalWidth)}px` }}
         >
           {measures.map((summary) => {
@@ -382,7 +382,7 @@ export function MarginRiskGutter({
         data-testid="margin-risk-gutter"
         data-orientation="horizontal"
         aria-label="小节风险导航条"
-        className="flex h-5 w-full items-center gap-1 select-none"
+        className="flex h-4 w-full items-center gap-1 select-none"
       >
         {measures.map((summary) => renderBarButton(summary, undefined, true))}
       </nav>

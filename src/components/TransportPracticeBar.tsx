@@ -120,6 +120,7 @@ export function formatClusterInstanceLabel(clusterIndex: number, instanceIndex: 
 }
 
 const SPEED_STEP = 0.05;
+const SECONDARY_SPEED_PRESETS = new Set<number>([0.25, 0.6, 0.9, 1.25]);
 
 const AUDIO_STATUS_LABELS: Record<AudioEngineStatus, { text: string; badgeClass: string }> = {
   idle: {
@@ -192,6 +193,7 @@ export function TransportPracticeBar({
 }: TransportPracticeBarProps) {
   const [editingBpm, setEditingBpm] = useState(false);
   const [bpmDraft, setBpmDraft] = useState("");
+  const [clustersExpanded, setClustersExpanded] = useState(false);
 
   const safeBaseBpm = baseBpm > 0 ? baseBpm : 100;
   const effectiveBpm = Math.max(1, Math.round(safeBaseBpm * speedMultiplier));
@@ -285,19 +287,24 @@ export function TransportPracticeBar({
     setEditingBpm(false);
   };
 
+  const hasClusters = clusterInstancesFlat.length > 0 && systemGroups.length > 0;
+  const showClusterRibbon =
+    hasClusters && (clustersExpanded || inspectedClusterInstanceId !== null);
+
   return (
     <section
       data-testid="transport-practice-bar"
       aria-label="播放与练习控制栏"
-      className="shrink-0 border-y border-slate-200 bg-white px-3 py-1.5 sm:px-4"
+      className="shrink-0 border-y border-slate-200 bg-white px-2.5 py-1 sm:px-3.5"
     >
-      <div className="mx-auto flex max-w-[1600px] flex-col gap-1.5">
-        {/* Top Row: Full-Width System-Segmented Measure Ruler */}
-        <div
-          data-testid="measure-ruler"
-          aria-label="谱行与小节进度条"
-          className="flex w-full items-center gap-1.5 overflow-x-auto py-0.5"
-        >
+      <div className="mx-auto flex max-w-[1600px] flex-col gap-1">
+        {/* Top Row: Full-Width System-Segmented Measure Ruler + Collapsible Cluster Toggle */}
+        <div className="flex w-full items-center gap-1.5">
+          <div
+            data-testid="measure-ruler"
+            aria-label="谱行与小节进度条"
+            className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-0.5"
+          >
           {systemGroups.length === 0 ? (
             <div className="flex h-6 w-full items-center rounded-md border border-slate-200 bg-slate-50 px-2.5 text-[11px] text-slate-400">
               加载乐谱后显示谱行与小节进度
@@ -451,10 +458,37 @@ export function TransportPracticeBar({
               );
             })
           )}
+          </div>
+
+          {hasClusters && (
+            <button
+              type="button"
+              data-testid="passage-cluster-toggle"
+              aria-expanded={showClusterRibbon}
+              title={showClusterRibbon ? "收起重复簇视图" : "展开重复簇视图与变奏对照"}
+              onClick={() => {
+                if (showClusterRibbon) {
+                  setClustersExpanded(false);
+                  if (inspectedClusterInstanceId) {
+                    onToggleInspectClusterInstance?.(inspectedClusterInstanceId);
+                  }
+                } else {
+                  setClustersExpanded(true);
+                }
+              }}
+              className={`h-6 shrink-0 whitespace-nowrap rounded-md border px-2 text-[11px] font-medium transition ${
+                showClusterRibbon
+                  ? "border-teal-500 bg-teal-50 text-teal-800 hover:bg-teal-100"
+                  : "border-slate-300 bg-white text-slate-600 hover:border-teal-400 hover:bg-teal-50 hover:text-teal-800"
+              }`}
+            >
+              重复簇 ({passageClusters.length})
+            </button>
+          )}
         </div>
 
         {/* Independent 4px Passage Cluster Ribbon Track beside the Measure Ruler */}
-        {clusterInstancesFlat.length > 0 && systemGroups.length > 0 && (
+        {showClusterRibbon && (
           <div
             data-testid="passage-cluster-ribbon"
             aria-label="Passage Cluster 重复乐段轨"
@@ -537,16 +571,16 @@ export function TransportPracticeBar({
         )}
 
         {/* Bottom Row: Transport, Speed, Metronome, Waiting Mode, Two-Step A-B Loop & Settings */}
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-1.5">
           {/* Left: Transport Buttons */}
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1">
             <button
               type="button"
               data-testid="transport-jump-start-btn"
               disabled={!hasScore}
               onClick={onJumpToStart}
               title="跳回乐谱开头"
-              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+              className="whitespace-nowrap rounded-md border border-slate-300 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
             >
               ⏮ 开头
             </button>
@@ -557,7 +591,7 @@ export function TransportPracticeBar({
               data-playback-state={playbackState}
               disabled={!hasScore}
               onClick={playbackState === "playing" ? onPause : onPlay}
-              className={`rounded-md px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
+              className={`whitespace-nowrap rounded-md px-2.5 py-0.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
                 playbackState === "playing"
                   ? "border border-amber-500 bg-amber-500 text-white hover:bg-amber-600"
                   : "bg-emerald-600 text-white hover:bg-emerald-700"
@@ -576,7 +610,7 @@ export function TransportPracticeBar({
               disabled={!hasScore || !hasSelectedSlice}
               onClick={onPlayFromSlice}
               title="从当前选中的音符切片开始播放"
-              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+              className="whitespace-nowrap rounded-md border border-slate-300 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
             >
               从当前
             </button>
@@ -586,14 +620,14 @@ export function TransportPracticeBar({
               data-testid="audio-stop-btn"
               disabled={playbackState === "stopped"}
               onClick={onStop}
-              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+              className="whitespace-nowrap rounded-md border border-slate-300 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
             >
               停止
             </button>
           </div>
 
           {/* Right: Speed Multiplier Presets + Steppers + BPM Editor + Audio Status + Practice Modes + A-B Loop */}
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1">
           <div className="flex items-center gap-0.5 rounded-md border border-slate-200 bg-slate-50 p-0.5">
             <button
               type="button"
@@ -608,6 +642,7 @@ export function TransportPracticeBar({
 
             {SPEED_PRESETS.map((spd) => {
               const isSelected = Math.abs(speedMultiplier - spd) < 1e-4;
+              const compactHidden = SECONDARY_SPEED_PRESETS.has(spd) && !isSelected;
               return (
                 <button
                   key={spd}
@@ -615,7 +650,7 @@ export function TransportPracticeBar({
                   data-testid={`speed-preset-${spd}`}
                   aria-pressed={isSelected}
                   onClick={() => onChangeSpeed(spd)}
-                  className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
+                  className={`${compactHidden ? "hidden xl:inline-flex" : "inline-flex"} rounded px-1.5 py-0.5 text-[11px] font-medium ${
                     isSelected
                       ? "bg-slate-900 text-white"
                       : "text-slate-600 hover:bg-white hover:text-slate-900"
@@ -666,7 +701,7 @@ export function TransportPracticeBar({
               data-testid="bpm-readout-btn"
               onClick={beginEditBpm}
               title={`点击输入目标 BPM（原速 ♩=${safeBaseBpm}，当前 ${formatSpeedLabel(speedMultiplier)}）`}
-              className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+              className="whitespace-nowrap rounded-md border border-slate-300 bg-white px-1.5 py-0.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
             >
               ♩={effectiveBpm} ({formatSpeedLabel(speedMultiplier)})
             </button>
@@ -675,7 +710,11 @@ export function TransportPracticeBar({
           <span
             data-testid="audio-engine-status"
             title={`当前音色: ${timbrePreset.label}（可在练习设置中切换）`}
-            className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusInfo.badgeClass}`}
+            className={`${
+              audioStatus === "loading" || audioStatus === "synth"
+                ? "inline-flex"
+                : "hidden xl:inline-flex"
+            } whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusInfo.badgeClass}`}
           >
             {statusBadgeText}
           </span>
@@ -687,7 +726,7 @@ export function TransportPracticeBar({
               aria-pressed={metronomeEnabled}
               onClick={onToggleMetronome}
               title="开关节拍器"
-              className={`rounded-md border px-2.5 py-1 text-xs font-medium transition ${
+              className={`whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium transition ${
                 metronomeEnabled
                   ? "border-blue-600 bg-blue-600 text-white hover:bg-blue-700"
                   : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
@@ -700,7 +739,9 @@ export function TransportPracticeBar({
               data-testid="metronome-beat-indicator"
               data-metronome-paused={metronomeEnabled && metronomePaused ? "true" : "false"}
               aria-live="polite"
-              className={`inline-flex min-w-[44px] items-center justify-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold transition ${
+              className={`${
+                !metronomeEnabled && !activeMetronomeBeat ? "hidden xl:inline-flex" : "inline-flex"
+              } min-w-[40px] items-center justify-center rounded-md border px-1.5 py-0.5 text-[11px] font-semibold transition ${
                 metronomeEnabled && metronomePaused
                   ? "border-amber-300 bg-amber-50 text-amber-700"
                   : activeMetronomeBeat
@@ -735,7 +776,7 @@ export function TransportPracticeBar({
             aria-pressed={waitingModeEnabled}
             onClick={onToggleWaitingMode}
             title="在每个练习步暂停，直到弹奏出匹配的音高"
-            className={`rounded-md border px-2.5 py-1 text-xs font-medium transition ${
+            className={`whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium transition ${
               waitingModeEnabled
                 ? "border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700"
                 : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
@@ -744,7 +785,7 @@ export function TransportPracticeBar({
             等待模式
           </button>
 
-          <div className="flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5">
+          <div className="flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5">
             <button
               type="button"
               data-testid="ab-loop-toggle-btn"
@@ -761,7 +802,7 @@ export function TransportPracticeBar({
                       ? "点击关闭 A-B 循环"
                       : "点击进入两步点选 A-B 循环小节"
               }
-              className={`rounded px-2 py-0.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
+              className={`whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
                 abPickStep !== "idle"
                   ? "bg-amber-500 text-white hover:bg-amber-600"
                   : normalizedLoop.enabled
@@ -779,7 +820,7 @@ export function TransportPracticeBar({
                 disabled={!hasScore}
                 onClick={onClearAbLoop}
                 title="清除并重置 A-B 循环"
-                className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
+                className="whitespace-nowrap rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"
               >
                 清除
               </button>
@@ -789,10 +830,14 @@ export function TransportPracticeBar({
           <button
             type="button"
             data-testid="practice-settings-btn"
+            title={midiStatusLabel ? `练习设置 · ${midiStatusLabel}` : "练习设置"}
             onClick={() => onOpenSettings?.()}
-            className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+            className="whitespace-nowrap rounded-md border border-slate-300 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
           >
-            {midiStatusLabel ? `练习设置 · ${midiStatusLabel}` : "练习设置"}
+            练习设置
+            {midiStatusLabel && (
+              <span className="hidden 2xl:inline"> · {midiStatusLabel}</span>
+            )}
           </button>
           </div>
         </div>

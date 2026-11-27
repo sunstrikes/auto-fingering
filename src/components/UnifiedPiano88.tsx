@@ -776,30 +776,34 @@ export function UnifiedPiano88({
       data-testid="unified-piano-88"
       data-scaffolding-hidden={scaffoldingHideTargets ? "true" : "false"}
       aria-label="88键双手钢琴键盘"
-      className={`border-t border-slate-300 bg-white px-3 pt-1.5 shadow-[0_-4px_12px_rgba(15,23,42,0.05)] sm:px-4 ${
-        showFullPalm && !scaffoldingHideTargets ? "pb-1.5" : "pb-0"
+      className={`border-t border-slate-300 bg-white px-2.5 pt-1 shadow-[0_-4px_12px_rgba(15,23,42,0.05)] sm:px-3.5 ${
+        showFullPalm && !scaffoldingHideTargets ? "pb-1" : "pb-0"
       }`}
     >
-      <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-semibold text-slate-900">88 键钢琴与双手实时模拟</span>
+      <div className="mx-auto max-w-[1600px]">
+      <div className="mb-0.5 flex flex-nowrap items-center justify-between gap-1.5 overflow-x-auto text-xs">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <span className="shrink-0 whitespace-nowrap font-semibold text-slate-900">
+            <span className="hidden xl:inline">88 键钢琴与双手实时模拟</span>
+            <span className="xl:hidden">88 键</span>
+          </span>
           {scaffoldingHideTargets ? (
             <span
               data-testid="piano-scaffolding-hidden-badge"
-              className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600"
+              className="shrink-0 whitespace-nowrap rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600"
             >
               撤拐态 · 仅保留平静按键回显（按 B0 / F 瞬时查看指法）
             </span>
           ) : (
             <>
-              <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 font-medium text-indigo-700">
+              <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-indigo-50 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700">
                 <span className="h-2 w-2 rounded-full bg-indigo-600" />
                 左手{" "}
                 {lhHandPos
                   ? `${midiToPitchLabel(whiteKeyIndexToMidi(Math.min(lhHandPos.thumbKey, lhHandPos.pinkyKey)))}–${midiToPitchLabel(whiteKeyIndexToMidi(Math.max(lhHandPos.thumbKey, lhHandPos.pinkyKey)))}`
                   : "休止"}
               </span>
-              <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-2 py-0.5 font-medium text-teal-800">
+              <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-teal-50 px-1.5 py-0.5 text-[11px] font-medium text-teal-800">
                 <span className="h-2 w-2 rounded-full bg-teal-600" />
                 右手{" "}
                 {rhHandPos
@@ -807,7 +811,10 @@ export function UnifiedPiano88({
                   : "休止"}
               </span>
               {selectedSlice && (
-                <span data-testid="piano-slice-summary" className="text-slate-500">
+                <span
+                  data-testid="piano-slice-summary"
+                  className="hidden truncate text-[11px] text-slate-500 md:inline md:max-w-[180px] lg:max-w-[280px]"
+                >
                   第{selectedSlice.measureIndex + 1}小节 · {selectedSlice.hand === "RH" ? "右手" : "左手"} ·{" "}
                   {selectedSlice.notes.map((n) => midiToPitchLabel(n.midi)).join("+")}
                 </span>
@@ -816,7 +823,7 @@ export function UnifiedPiano88({
           )}
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
           {waitingIsHolding && (
             <span
               data-testid="waiting-hold-progress-badge"
@@ -855,7 +862,9 @@ export function UnifiedPiano88({
               延音踏板
             </span>
           )}
-          <span className="text-[11px] text-slate-400">点击琴键或按 Z–M / Q–I 键试听</span>
+          <span className="hidden whitespace-nowrap text-[11px] text-slate-400 2xl:inline">
+            点击琴键或按 Z–M / Q–I 键试听
+          </span>
           {slices.length > 0 && (
             <>
               <span className="ml-1 text-[11px] text-slate-500">
@@ -892,7 +901,7 @@ export function UnifiedPiano88({
         </div>
       </div>
 
-      <div className="overflow-x-auto lg:overflow-x-visible">
+      <div className="overflow-x-auto md:overflow-x-visible">
         {bridgeHandPreview && (
           <div
             data-testid="bridge-hand-position-preview"
@@ -930,7 +939,13 @@ export function UnifiedPiano88({
           height={viewBoxHeight}
           viewBox={`0 ${viewBoxTop} ${SVG_W} ${viewBoxHeight}`}
           preserveAspectRatio="xMidYMid meet"
-          className="block h-auto w-full min-w-[960px] select-none lg:min-w-0"
+          className={`mx-auto block h-auto w-full min-w-[960px] select-none md:min-w-0 ${
+            showOverhead && !scaffoldingHideTargets
+              ? "max-h-[min(260px,24dvh)] xl:max-h-[min(260px,27dvh)]"
+              : showFullPalm && !scaffoldingHideTargets
+                ? "max-h-[min(248px,22dvh)] xl:max-h-[min(248px,25dvh)]"
+                : "max-h-[min(148px,17dvh)] xl:max-h-[min(148px,18dvh)]"
+          }`}
         >
           <defs>
             <linearGradient id="piano-dual-overlap" x1="0" y1="0" x2="1" y2="1">
@@ -1326,6 +1341,7 @@ export function UnifiedPiano88({
             </g>
           )}
         </svg>
+      </div>
       </div>
     </section>
   );
