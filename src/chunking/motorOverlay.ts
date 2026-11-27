@@ -90,26 +90,34 @@ function findFirstStepAtOrAfterTick(stepTicks: number[], targetTick: number): nu
   return ans;
 }
 
+function buildSlicesByHandMeasure(
+  onsetSlices: OnsetSlice[],
+  measureCount: number,
+): { rhSlicesByMeasure: OnsetSlice[][]; lhSlicesByMeasure: OnsetSlice[][] } {
+  const rhSlicesByMeasure: OnsetSlice[][] = new Array(measureCount);
+  const lhSlicesByMeasure: OnsetSlice[][] = new Array(measureCount);
+  for (let m = 0; m < measureCount; m++) {
+    rhSlicesByMeasure[m] = [];
+    lhSlicesByMeasure[m] = [];
+  }
+  for (let i = 0; i < onsetSlices.length; i++) {
+    const s = onsetSlices[i];
+    if (s.measureIndex < 0 || s.measureIndex >= measureCount) continue;
+    if (s.hand === "RH") rhSlicesByMeasure[s.measureIndex].push(s);
+    else lhSlicesByMeasure[s.measureIndex].push(s);
+  }
+  return { rhSlicesByMeasure, lhSlicesByMeasure };
+}
+
 function recomputeClusterMotorReuse(
   staticClusters: PassageCluster[],
   scoreDoc: StaticScoreInput,
   solveResult: SolveResult,
   practiceMode: PracticeMode,
+  rhSlicesByMeasure: OnsetSlice[][],
+  lhSlicesByMeasure: OnsetSlice[][],
 ): PassageCluster[] {
   if (staticClusters.length === 0) return [];
-
-  const slicesByHandMeasure = new Map<string, OnsetSlice[]>();
-  for (let i = 0; i < scoreDoc.onsetSlices.length; i++) {
-    const s = scoreDoc.onsetSlices[i];
-    if (s.isGrace || !isTargetHand(s.hand, practiceMode)) continue;
-    const key = `${s.hand}:${s.measureIndex}`;
-    let list = slicesByHandMeasure.get(key);
-    if (!list) {
-      list = [];
-      slicesByHandMeasure.set(key, list);
-    }
-    list.push(s);
-  }
 
   const activeHands: Hand[] =
     practiceMode === "both" ? ["RH", "LH"] : practiceMode === "rh-only" ? ["RH"] : ["LH"];
@@ -138,13 +146,19 @@ function recomputeClusterMotorReuse(
       let comparedFingers = 0;
 
       for (const hand of activeHands) {
+        const byMeasure = hand === "RH" ? rhSlicesByMeasure : lhSlicesByMeasure;
         for (let off = 0; off < lenM; off++) {
-          const pSlices = slicesByHandMeasure.get(`${hand}:${proto.startMeasureIndex + off}`) ?? [];
-          const iSlices = slicesByHandMeasure.get(`${hand}:${inst.startMeasureIndex + off}`) ?? [];
-          const pairLen = Math.min(pSlices.length, iSlices.length);
-          for (let sIdx = 0; sIdx < pairLen; sIdx++) {
-            const pNotes = pSlices[sIdx].notes;
-            const iNotes = iSlices[sIdx].notes;
+          const pRaw = byMeasure[proto.startMeasureIndex + off];
+          const iRaw = byMeasure[inst.startMeasureIndex + off];
+          if (!pRaw || !iRaw || pRaw.length === 0 || iRaw.length === 0) continue;
+          let pi = 0;
+          let ii = 0;
+          while (pi < pRaw.length && ii < iRaw.length) {
+            while (pi < pRaw.length && pRaw[pi].isGrace) pi++;
+            while (ii < iRaw.length && iRaw[ii].isGrace) ii++;
+            if (pi >= pRaw.length || ii >= iRaw.length) break;
+            const pNotes = pRaw[pi].notes;
+            const iNotes = iRaw[ii].notes;
             const noteCount = Math.min(pNotes.length, iNotes.length);
             for (let nIdx = 0; nIdx < noteCount; nIdx++) {
               const pNote = pNotes[nIdx];
@@ -176,6 +190,8 @@ function recomputeClusterMotorReuse(
                 });
               }
             }
+            pi++;
+            ii++;
           }
         }
       }
@@ -299,6 +315,8 @@ function computeChunkJunctions(
   solveResult: SolveResult,
   practiceMode: PracticeMode,
   clusters: PassageCluster[],
+  rhSlicesByMeasure: OnsetSlice[][],
+  lhSlicesByMeasure: OnsetSlice[][],
   options?: MotorOverlayOptions,
 ): ChunkJunction[] {
   const chunks = staticResult.motorChunks;
@@ -310,20 +328,6 @@ function computeChunkJunctions(
     scoreDoc.noteEvents,
     practiceMode,
   );
-
-  // Fast O(N + S) pre-indexing by measureIndex
-  const rhSlicesByMeasure: OnsetSlice[][] = new Array(M);
-  const lhSlicesByMeasure: OnsetSlice[][] = new Array(M);
-  for (let m = 0; m < M; m++) {
-    rhSlicesByMeasure[m] = [];
-    lhSlicesByMeasure[m] = [];
-  }
-  for (let i = 0; i < scoreDoc.onsetSlices.length; i++) {
-    const s = scoreDoc.onsetSlices[i];
-    if (s.measureIndex < 0 || s.measureIndex >= M) continue;
-    if (s.hand === "RH") rhSlicesByMeasure[s.measureIndex].push(s);
-    else lhSlicesByMeasure[s.measureIndex].push(s);
-  }
 
   const cuesBySliceId = new Map<string, TransitionCue[]>();
   for (let i = 0; i < solveResult.transitionCues.length; i++) {
@@ -371,7 +375,6 @@ function computeChunkJunctions(
   const junctions: ChunkJunction[] = [];
   const rhWin: OnsetSlice[] = [];
   const lhWin: OnsetSlice[] = [];
-  const scratchPrevF: Finger[] = [];
   const scratchCurrF: Finger[] = [];
   const rhShiftTimes: number[] = [];
   const lhShiftTimes: number[] = [];
@@ -419,11 +422,16 @@ function computeChunkJunctions(
       const shiftTimes = handPass === 0 ? rhShiftTimes : lhShiftTimes;
       const shiftDeltas = handPass === 0 ? rhShiftDeltas : lhShiftDeltas;
       let maxHeld = 0;
+      let prevOnsetSec = 0;
+      let prevHasNotes = false;
+      let prevRoot = 0;
+      let prevMin = 0;
+      let prevMax = 0;
 
       for (let k = 0; k < win.length; k++) {
         const curr = win[k];
-        const prev = k > 0 ? win[k - 1] : null;
-        const dt = prev ? Math.max(0.05, curr.onsetSec - prev.onsetSec) : 0.5;
+        const hasPrev = k > 0;
+        const dt = hasPrev ? Math.max(0.05, curr.onsetSec - prevOnsetSec) : 0.5;
 
         const cues = cuesBySliceId.size > 0 ? cuesBySliceId.get(curr.sliceId) : undefined;
         if (cues) {
@@ -439,28 +447,37 @@ function computeChunkJunctions(
           }
         }
 
-        if (prev && curr.notes.length > 0 && prev.notes.length > 0) {
-          const prevF = fillSliceFingers(prev, solveResult.fingerByNoteUid, scratchPrevF);
+        const currHasNotes = curr.notes.length > 0;
+        if (currHasNotes) {
           const currF = fillSliceFingers(curr, solveResult.fingerByNoteUid, scratchCurrF);
-          const prevRoot = computeHandRoot(prev.notes, prevF, curr.hand);
           const currRoot = computeHandRoot(curr.notes, currF, curr.hand);
-          const signedShift = currRoot - prevRoot;
-          const absShift = Math.abs(signedShift);
-          const vel = absShift / dt;
+          const currMin = getMinMidi(curr);
+          const currMax = getMaxMidi(curr);
 
-          const noOverlap =
-            getMinMidi(curr) > getMaxMidi(prev) || getMaxMidi(curr) < getMinMidi(prev);
-          const isHpBoundary = hpStartSliceIds.has(curr.sliceId);
-          const leapScore = clamp01(
-            vel / 35 + ((noOverlap || isHpBoundary) && absShift >= 2 ? 0.25 : 0),
-          );
-          if (leapScore > d2) d2 = leapScore;
+          if (hasPrev && prevHasNotes) {
+            const signedShift = currRoot - prevRoot;
+            const absShift = Math.abs(signedShift);
+            const vel = absShift / dt;
 
-          if (absShift >= 2.5) {
-            shiftTimes.push(curr.onsetSec);
-            shiftDeltas.push(signedShift);
+            const noOverlap = currMin > prevMax || currMax < prevMin;
+            const isHpBoundary = hpStartSliceIds.has(curr.sliceId);
+            const leapScore = clamp01(
+              vel / 35 + ((noOverlap || isHpBoundary) && absShift >= 2 ? 0.25 : 0),
+            );
+            if (leapScore > d2) d2 = leapScore;
+
+            if (absShift >= 2.5) {
+              shiftTimes.push(curr.onsetSec);
+              shiftDeltas.push(signedShift);
+            }
           }
+
+          prevRoot = currRoot;
+          prevMin = currMin;
+          prevMax = currMax;
         }
+        prevHasNotes = currHasNotes;
+        prevOnsetSec = curr.onsetSec;
 
         let physicalHeld = 0;
         for (let hIdx = 0; hIdx < curr.heldNotes.length; hIdx++) {
@@ -690,11 +707,20 @@ export function analyzeMotorOverlay(
 ): MotorOverlayResult {
   const t0 = performance.now();
 
+  const needMeasureSlices =
+    scoreDoc.measureCount > 0 &&
+    (staticResult.passageClusters.length > 0 || staticResult.motorChunks.length >= 2);
+  const { rhSlicesByMeasure, lhSlicesByMeasure } = needMeasureSlices
+    ? buildSlicesByHandMeasure(scoreDoc.onsetSlices, scoreDoc.measureCount)
+    : { rhSlicesByMeasure: [], lhSlicesByMeasure: [] };
+
   const passageClusters = recomputeClusterMotorReuse(
     staticResult.passageClusters,
     scoreDoc,
     solveResult,
     practiceMode,
+    rhSlicesByMeasure,
+    lhSlicesByMeasure,
   );
   const chunkJunctions = computeChunkJunctions(
     staticResult,
@@ -702,6 +728,8 @@ export function analyzeMotorOverlay(
     solveResult,
     practiceMode,
     passageClusters,
+    rhSlicesByMeasure,
+    lhSlicesByMeasure,
     options,
   );
   const performanceCues = buildSparsePerformanceCues(staticResult, chunkJunctions);
