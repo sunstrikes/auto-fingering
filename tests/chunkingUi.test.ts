@@ -9,7 +9,7 @@ import { solveFingering } from "../src/solver/solveFingering";
 import { createSolverClient, type WorkerLike } from "../src/workers/solverClient";
 import type { WorkerRequest, WorkerResponse } from "../src/workers/protocol";
 import { createChunkingClient, type ChunkingWorkerLike } from "../src/workers/chunkingClient";
-import { handleChunkingWorkerRequest } from "../src/workers/chunking.worker";
+import { handleChunkingWorkerRequest } from "../src/workers/chunkingHandler";
 import type { ChunkingWorkerRequest, ChunkingWorkerResponse } from "../src/workers/chunkingProtocol";
 import { createInMemoryStorage } from "../src/persistence/inMemoryStorage";
 import { useStudioStore } from "../src/store/useStudioStore";
@@ -34,6 +34,18 @@ function mount(element: ReturnType<typeof createElement>): HTMLElement {
     mountedRoot!.render(element);
   });
   return mountedContainer;
+}
+
+function openChunkCueEditor(container: HTMLElement) {
+  const dialog = container.querySelector<HTMLDialogElement>('[data-testid="chunk-cue-editor-panel"]')!;
+  // jsdom does not implement the native top-layer dialog methods.
+  dialog.showModal = vi.fn(() => { dialog.open = true; });
+  dialog.close = vi.fn(() => { dialog.open = false; });
+  act(() => {
+    container.querySelector<HTMLButtonElement>('[data-testid="chunk-cue-editor-toggle"]')!.click();
+  });
+  expect(dialog.open).toBe(true);
+  return dialog;
 }
 
 afterEach(() => {
@@ -166,6 +178,9 @@ describe("Slice 3: TransportPracticeBar 4px Passage Cluster ribbon", () => {
     expect(ribbon).not.toBeNull();
     expect(track).not.toBeNull();
     expect(track!.className).toContain("h-[4px]");
+    const list = container.querySelector('[data-testid="passage-cluster-list"]')!;
+    expect(list.className).toContain("overflow-x-auto");
+    expect(list.className).not.toContain("flex-wrap");
 
     // Verify instance labels A1 / A2 / A3'
     const chip0 = container.querySelector<HTMLButtonElement>('[data-testid="passage-cluster-instance-inst-0"]')!;
@@ -301,6 +316,66 @@ describe("Slice 4: ScoreViewer barline Split/Merge, PerformanceCue editor, and o
     },
   ];
 
+  it("keeps long-score editors closed by default and bounds the modal instead of shrinking the canvas", async () => {
+    const props = {
+      xmlString: "<score-partwise/>",
+      motorChunks: Array.from({ length: 84 }, (_, index) => ({
+        ...sampleChunks[0],
+        chunkId: `long-chunk-${index}`,
+        index,
+      })),
+      performanceCues: Array.from({ length: 34 }, (_, index) => ({
+        ...sampleCues[0],
+        cueId: `long-cue-${index}`,
+      })),
+      chunkEditingEnabled: true,
+      rendererFactory: () => ({
+        async render() {
+          return { measureCount: 168, measureGeometry: [] };
+        },
+        highlightMeasure() {},
+        markAnchoredNotes() {},
+        scrollToMeasure() {},
+        dispose() {},
+      }),
+    };
+    const container = mount(createElement(ScoreViewer, props));
+    await act(async () => { await Promise.resolve(); });
+
+    const viewer = container.querySelector('[data-testid="score-viewer"]')!;
+    expect(viewer.className).toContain("overflow-hidden");
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="chunk-cue-editor-toggle"]')!;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.textContent).toContain("84");
+    expect(toggle.textContent).toContain("34");
+    const dialog = container.querySelector<HTMLDialogElement>('[data-testid="chunk-cue-editor-panel"]')!;
+    expect(dialog.open).toBe(false);
+    expect(dialog.className).toContain("max-h-[80dvh]");
+    expect(container.querySelector('[data-testid="chunk-cue-editor-scroll"]')!.className).toContain("overflow-y-auto");
+
+    openChunkCueEditor(container);
+    expect(dialog.showModal).toHaveBeenCalledTimes(1);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    act(() => {
+      container.querySelector<HTMLButtonElement>('[data-testid="chunk-cue-editor-close"]')!.click();
+    });
+    expect(dialog.open).toBe(false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    // Playback / Guided Session disables editing and must not leave the modal open.
+    act(() => { toggle.click(); });
+    act(() => {
+      mountedRoot!.render(createElement(ScoreViewer, { ...props, chunkEditingEnabled: false }));
+    });
+    expect(container.querySelector('[data-testid="chunk-cue-editor-panel"]')).toBeNull();
+    act(() => {
+      mountedRoot!.render(createElement(ScoreViewer, props));
+    });
+    expect(container.querySelector<HTMLDialogElement>('[data-testid="chunk-cue-editor-panel"]')!.open).toBe(false);
+    expect(container.querySelector('[data-testid="chunk-cue-editor-toggle"]')!.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("supports barline Split/Merge, PerformanceCue Pin/Add/Hide/Edit label, and reset-to-auto", async () => {
     const onSplitChunkAtMeasure = vi.fn();
     const onMergeChunkBoundary = vi.fn();
@@ -340,6 +415,7 @@ describe("Slice 4: ScoreViewer barline Split/Merge, PerformanceCue editor, and o
     await act(async () => {
       await Promise.resolve();
     });
+    openChunkCueEditor(container);
 
     // No variant diff highlights during default / non-inspected view
     expect(container.querySelector('[data-testid="variant-diff-banner"]')).toBeNull();
@@ -654,6 +730,7 @@ describe("Slice 5: App root chunking integration (worker + persistence + cross-m
     expect(highlightVariantDiffs).toHaveBeenLastCalledWith(null);
 
     // 1. Split or Merge a chunk + edit a PerformanceCue label
+    openChunkCueEditor(container);
     const splitBtn = container.querySelector<HTMLButtonElement>('[data-testid^="chunk-barline-split-"]');
     const mergeBtn = container.querySelector<HTMLButtonElement>('[data-testid^="chunk-barline-merge-"]');
     expect(splitBtn ?? mergeBtn).not.toBeNull();
@@ -685,6 +762,9 @@ describe("Slice 5: App root chunking integration (worker + persistence + cross-m
     const chunkLabelsBeforeModeSwitch = Array.from(
       container.querySelectorAll('[data-testid^="motor-chunk-pill-"]'),
     ).map((el) => el.textContent);
+    act(() => {
+      container.querySelector<HTMLButtonElement>('[data-testid="chunk-cue-editor-close"]')!.click();
+    });
 
     // 2. Switch PracticeMode (both -> rh-only -> lh-only): boundaries invariant, junctions recompute
     await act(async () => {

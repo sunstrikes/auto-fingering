@@ -2470,7 +2470,7 @@ export default function App({
       </header>
       )}
 
-      <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-1.5 px-2.5 pt-1.5 pb-1 sm:px-4">
+      <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-1.5 overflow-hidden px-2.5 pt-1.5 pb-1 sm:px-4">
         {scoreDoc && guided.studioMode === "free" && guided.sessionPhase === "idle" && (
           <div
             data-testid="guided-launch-strip"
@@ -3186,7 +3186,7 @@ export default function App({
         {/* Top Pane: Continuous Scrolling Score Canvas + Inline Note Anchor Popover */}
         <div
           data-testid="top-score-pane"
-          className="relative flex min-h-0 flex-1 flex-col"
+          className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
         >
           <ScoreViewer
             xmlString={renderedXml}

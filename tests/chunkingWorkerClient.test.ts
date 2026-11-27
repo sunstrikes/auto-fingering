@@ -9,7 +9,7 @@ import {
   toStaticScoreInput,
   type ChunkingWorkerLike,
 } from "../src/workers/chunkingClient";
-import { handleChunkingWorkerRequest } from "../src/workers/chunking.worker";
+import { handleChunkingWorkerRequest } from "../src/workers/chunkingHandler";
 import type {
   ChunkingWorkerRequest,
   ChunkingWorkerResponse,

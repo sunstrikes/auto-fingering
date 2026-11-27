@@ -27,7 +27,7 @@ import {
   type ChunkingClient,
   type ChunkingWorkerLike,
 } from "../workers/chunkingClient";
-import { handleChunkingWorkerRequest } from "../workers/chunking.worker";
+import { handleChunkingWorkerRequest } from "../workers/chunkingHandler";
 import type { ChunkingWorkerRequest, ChunkingWorkerResponse } from "../workers/chunkingProtocol";
 
 function defaultChunkingClientFactory(): ChunkingClient {

@@ -505,8 +505,11 @@ export function TransportPracticeBar({
                 </div>
               ))}
             </div>
-            <div className="flex flex-wrap items-center gap-1 text-[10px] leading-tight">
-              <span className="font-medium text-slate-500">重复簇:</span>
+            <div
+              data-testid="passage-cluster-list"
+              className="flex items-center gap-1 overflow-x-auto whitespace-nowrap pb-0.5 text-[10px] leading-tight"
+            >
+              <span className="shrink-0 font-medium text-slate-500">重复簇:</span>
               {clusterInstancesFlat.map(({ instance, label, palette }) => {
                 const isSelected = inspectedClusterInstanceId === instance.instanceId;
                 return (
@@ -516,7 +519,7 @@ export function TransportPracticeBar({
                     data-testid={`passage-cluster-instance-${instance.instanceId}`}
                     aria-pressed={isSelected}
                     onClick={() => onToggleInspectClusterInstance?.(instance.instanceId)}
-                    className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-medium transition ${
+                    className={`inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 font-medium transition ${
                       isSelected ? palette.activeChipClass : palette.chipClass
                     }`}
                   >

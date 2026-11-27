@@ -1599,7 +1599,7 @@ export function ScoreViewer({
       <div
         data-testid="score-viewer"
         data-layout-mode={layoutMode}
-        className="flex h-full min-h-60 flex-1 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500"
+        className="flex h-full min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500"
       >
         请上传 <code>.musicxml</code>、<code>.xml</code> 或 <code>.mxl</code> 乐谱文件，即可进行双手钢琴指法推导、滚动阅谱与键盘模拟。
       </div>
@@ -1621,9 +1621,9 @@ export function ScoreViewer({
       }
       data-scaffolding-level={fadingScaffolding ? `L${fadingScaffolding.level}` : undefined}
       data-scaffolding-peek={fadingScaffolding?.peekActive ? "true" : undefined}
-      className="flex min-h-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white p-2 shadow-sm sm:p-2.5"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white p-2 shadow-sm sm:p-2.5"
     >
-      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1 text-xs">
+      <div className="mb-1.5 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1 text-xs">
         <div className="flex flex-wrap items-center gap-2 text-slate-600">
           <span className="font-semibold text-slate-800">乐谱画布</span>
           <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800">
@@ -1739,7 +1739,7 @@ export function ScoreViewer({
       {anchoredNotes.length > 0 && (
         <div
           data-testid="anchor-indicators"
-          className="mb-2 flex items-center gap-1.5 overflow-x-auto rounded-lg border border-red-100 bg-red-50/50 px-2.5 py-1 text-xs"
+          className="mb-2 flex shrink-0 items-center gap-1.5 overflow-x-auto rounded-lg border border-red-100 bg-red-50/50 px-2.5 py-1 text-xs"
         >
           <span className="shrink-0 font-semibold text-red-700">
             锚点 ({anchoredNotes.length}):
