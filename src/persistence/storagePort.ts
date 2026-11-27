@@ -1,4 +1,5 @@
 import type { AbLoopBounds, AnchorOverride, ExportFormat, Hand, HandSpanProfile, NoteCoordKey, PracticeMode, ScoreCoord } from "../domain/types";
+import type { ChunkOverrides, PerformanceCueOverrides } from "../chunking/types";
 
 export const DATABASE_NAME = "auto-fingering-studio";
 export const SCHEMA_VERSION = 1;
@@ -11,11 +12,9 @@ export interface PieceProfile {
   measureHashesByFingerprint: Record<string, string[]>;
   lastPracticedAtMs?: number;
   archivedAtMs?: number;
-  chunkOverrides?: {
-    addedBoundaries: ScoreCoord[];
-    removedBoundaries: ScoreCoord[];
-    updatedAtMs: number;
-  };
+  bestStableSpeed?: number;
+  chunkOverrides?: ChunkOverrides;
+  performanceCueOverrides?: PerformanceCueOverrides;
 }
 
 export interface PracticeEvent {
@@ -103,6 +102,17 @@ export interface WorkspacePrefs {
   ignoreExistingFingerings?: boolean;
   absoluteStrictnessEnabled?: boolean;
   strictHoldDurationEnabled?: boolean;
+  cc64CommandEnabled?: boolean;
+  microRestDurationSec?: number;
+  audiationPreviewMode?: "auto-unfamiliar" | "manual";
+  audiationImageryTimerEnabled?: boolean;
+  overspeedProbeEnabled?: boolean;
+  scaffoldingPreference?: "auto-fade" | "always-full" | "hide-keyboard-early";
+  l3SilentBeatEnabled?: boolean;
+  ehsEnabled?: boolean;
+  ehsLookaheadPreset?: "1-beat" | "2-beats" | "1-bar";
+  ehsGhostOpacity?: 0 | 0.06;
+  ehsAutoStallFlashEnabled?: boolean;
   freePracticeMinutes?: number;
   repairEdge?: RepairEdge;
   updatedAtMs?: number;
@@ -150,6 +160,8 @@ export interface PracticeStoragePort {
   listPracticeEvents(pieceId: string): Promise<PracticeEvent[]>;
   accessScoreBlob(fingerprint: string): Promise<ScoreBlob | undefined>;
   commit(write: PracticeStorageWrite): Promise<void>;
+  /** One-way conservative Hard override on an existing persisted PracticeEvent. */
+  applyPracticeEventGradeOverride?(eventId: string, userGradeOverride: 2): Promise<void>;
 }
 
 export interface ScoreCacheOptions {

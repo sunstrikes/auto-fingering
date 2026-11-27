@@ -126,19 +126,26 @@ export async function handleWorkerRequestAsync(
   }
 }
 
-const workerScope = globalThis as unknown as WorkerScopeLike;
+// Keep the exported handlers safe to import from main-thread/test code.
+declare const DedicatedWorkerGlobalScope: { new (): WorkerScopeLike };
 
-workerScope.onmessage = (event: MessageEvent<WorkerRequest>) => {
-  const req = event.data;
-  const needsAsync =
-    req.type === "load-prior" ||
-    (req.priorMode === "model-assist" && !getCachedLumikeyPrior());
+if (
+  typeof DedicatedWorkerGlobalScope !== "undefined" &&
+  globalThis instanceof DedicatedWorkerGlobalScope
+) {
+  const workerScope = globalThis as unknown as WorkerScopeLike;
+  workerScope.onmessage = (event: MessageEvent<WorkerRequest>) => {
+    const req = event.data;
+    const needsAsync =
+      req.type === "load-prior" ||
+      (req.priorMode === "model-assist" && !getCachedLumikeyPrior());
 
-  if (needsAsync) {
-    void handleWorkerRequestAsync(req, (msg) => workerScope.postMessage(msg)).then((resp) => {
-      workerScope.postMessage(resp);
-    });
-  } else {
-    workerScope.postMessage(handleWorkerRequest(req));
-  }
-};
+    if (needsAsync) {
+      void handleWorkerRequestAsync(req, (msg) => workerScope.postMessage(msg)).then((resp) => {
+        workerScope.postMessage(resp);
+      });
+    } else {
+      workerScope.postMessage(handleWorkerRequest(req));
+    }
+  };
+}

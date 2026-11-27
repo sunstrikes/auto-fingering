@@ -5,6 +5,7 @@ import {
   type AbLoopBounds,
   type Hand,
   type OnsetSlice,
+  type PracticeMode,
   type ScoreDocument,
 } from "../domain/types";
 import {
@@ -69,6 +70,27 @@ export interface PlayOptions {
   restart?: boolean;
 }
 
+export type MetronomeMode = "full" | "count-in-only" | "off";
+
+export interface PlaybackClockAnchor {
+  t0PerfMs: number;
+  audioStartTimeSec: number;
+  startScoreSec: number;
+  endScoreSec: number;
+  speedMultiplier: SpeedMultiplier;
+}
+
+export interface SegmentPlayOptions {
+  startScoreSec: number;
+  endScoreSec: number;
+  countInBeats?: number;
+  muteTargetHand?: boolean;
+  practiceMode?: PracticeMode;
+  metronomeMode?: MetronomeMode;
+  onClockAnchor?: (anchor: PlaybackClockAnchor) => void;
+  onSegmentComplete?: () => void;
+}
+
 export interface BackgroundTicker {
   start(intervalMs: number, onTick: () => void): void;
   stop(): void;
@@ -86,6 +108,16 @@ export interface PlaybackEngineDeps {
   onCursorSync?: (target: CursorSyncTarget | null) => void;
   onFrame?: (frame: PlaybackFrame | null) => void;
   onMetronomeBeat?: (beat: MetronomeBeatEvent | null) => void;
+  onLoopClockAnchor?: (
+    anchor: PlaybackClockAnchor,
+    bounds: { startMeasureIndex: number; endMeasureIndex: number }
+  ) => void;
+  onAbLoopIterationComplete?: (info: {
+    anchor: PlaybackClockAnchor;
+    startMeasureIndex: number;
+    endMeasureIndex: number;
+    completedAtPerfMs: number;
+  }) => void;
 }
 
 export interface PlaybackEngine {
@@ -109,6 +141,7 @@ export interface PlaybackEngine {
     onComplete: () => void
   ): Promise<void>;
   play(scoreDoc: ScoreDocument, options?: PlayOptions): Promise<void>;
+  playSegment(scoreDoc: ScoreDocument, options: SegmentPlayOptions): Promise<void>;
   pause(): void;
   stop(): void;
   dispose(): void;
@@ -358,6 +391,31 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
   let nextScoreBeatIndex = 0;
   let visualBeatTimeline: ScheduledVisualBeat[] = [];
   let lastEmittedBeatKey: string | null = null;
+  let activeSegmentMetronomeMode: MetronomeMode | null = null;
+
+  const calibrateAnchorPerfMs = (ctx: AudioContext, anchorAudioTimeSec: number): number => {
+    const nowPerfMs = performance.now();
+    if (typeof ctx.getOutputTimestamp === "function") {
+      try {
+        const ts = ctx.getOutputTimestamp();
+        const contextTime = ts?.contextTime;
+        const performanceTime = ts?.performanceTime;
+        const isValidPair =
+          typeof contextTime === "number" &&
+          Number.isFinite(contextTime) &&
+          typeof performanceTime === "number" &&
+          Number.isFinite(performanceTime);
+        const isUninitializedZero =
+          contextTime === 0 && performanceTime === 0 && (ctx.currentTime > 0 || nowPerfMs > 0);
+        if (isValidPair && !isUninitializedZero) {
+          return performanceTime + (anchorAudioTimeSec - contextTime) * 1000;
+        }
+      } catch {
+        // fall back to performance.now()
+      }
+    }
+    return nowPerfMs + (anchorAudioTimeSec - ctx.currentTime) * 1000;
+  };
 
   const setState = (next: PlaybackState) => {
     if (state !== next) {
@@ -438,7 +496,11 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
   };
 
   const scheduleUpcomingBeats = () => {
-    if (!metronomeEnabled || metronomePaused) return;
+    const shouldPlayScoreBeats =
+      activeSegmentMetronomeMode !== null
+        ? activeSegmentMetronomeMode === "full"
+        : metronomeEnabled && !metronomePaused;
+    if (!shouldPlayScoreBeats) return;
     const ctx = deps.audioEngine.getAudioContext();
     const horizonScoreSec =
       anchorScoreSec + (ctx.currentTime + scheduleAheadRealSec - anchorAudioTime) * speed;
@@ -566,6 +628,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     }
 
     activeDoc = doc;
+    activeSegmentMetronomeMode = null;
     activeSchedule = schedule;
     nextNoteIndex = 0;
     minSliceIndex = fromSliceId
@@ -613,12 +676,31 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       }
     }
 
+    let currentLoopAnchor: PlaybackClockAnchor | null = null;
+    let loopAnchorEmitted = false;
+    const emitLoopAnchorOnce = () => {
+      if (!loopRange || loopAnchorEmitted) return;
+      loopAnchorEmitted = true;
+      currentLoopAnchor = {
+        t0PerfMs: calibrateAnchorPerfMs(deps.audioEngine.getAudioContext(), anchorAudioTime),
+        audioStartTimeSec: anchorAudioTime,
+        startScoreSec,
+        endScoreSec: loopRange.endSec,
+        speedMultiplier: speed,
+      };
+      deps.onLoopClockAnchor?.(currentLoopAnchor, {
+        startMeasureIndex: loopRange.startMeasureIndex,
+        endMeasureIndex: loopRange.endMeasureIndex,
+      });
+    };
+
     setState("playing");
     scheduleUpcomingNotes();
     scheduleUpcomingBeats();
     emitActiveMetronomeBeat();
 
     if (ctx.currentTime >= anchorAudioTime - 1e-6) {
+      emitLoopAnchorOnce();
       emitSyncForScoreSec(startScoreSec);
     } else {
       emitFrameForState(startScoreSec, "playing");
@@ -637,9 +719,19 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
         return true;
       }
 
+      emitLoopAnchorOnce();
+
       const scoreSec = getCurrentScoreSec();
       const activeLoop = resolveLoopRange(activeDoc);
       if (activeLoop && scoreSec >= activeLoop.endSec - 1e-6) {
+        if (currentLoopAnchor && currentLoopAnchor.startScoreSec <= activeLoop.startSec + 1e-4) {
+          deps.onAbLoopIterationComplete?.({
+            anchor: currentLoopAnchor,
+            startMeasureIndex: activeLoop.startMeasureIndex,
+            endMeasureIndex: activeLoop.endMeasureIndex,
+            completedAtPerfMs: performance.now(),
+          });
+        }
         const loopEndAudioTime =
           anchorAudioTime + Math.max(0, activeLoop.endSec - anchorScoreSec) / speed;
         startPlaybackLoop(
@@ -785,6 +877,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     },
 
     async playCountIn(scoreDoc: ScoreDocument, measureIndex: number, onComplete: () => void) {
+      activeSegmentMetronomeMode = null;
       const token = ++runToken;
       clearTimers();
       metronomeAudio.cancelPending();
@@ -838,6 +931,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
     },
 
     async play(scoreDoc: ScoreDocument, options?: PlayOptions) {
+      activeSegmentMetronomeMode = null;
       const token = ++runToken;
       clearTimers();
       const prevState = state;
@@ -888,6 +982,189 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       startPlaybackLoop(scoreDoc, startScoreSec, startSliceId, useCountIn);
     },
 
+    async playSegment(scoreDoc: ScoreDocument, options: SegmentPlayOptions) {
+      const token = ++runToken;
+      clearTimers();
+      const prevState = state;
+      if (prevState === "playing") {
+        deps.audioEngine.stopAll();
+        metronomeAudio.stopAll();
+      } else {
+        metronomeAudio.cancelPending();
+      }
+
+      await deps.audioEngine.prepare();
+      if (token !== runToken) return;
+
+      const startScoreSec = Math.max(
+        0,
+        Number.isFinite(options.startScoreSec) ? options.startScoreSec : 0
+      );
+      const endScoreSec = Math.max(
+        startScoreSec,
+        Number.isFinite(options.endScoreSec) ? options.endScoreSec : startScoreSec
+      );
+      if (endScoreSec <= startScoreSec + 1e-6) {
+        activeSegmentMetronomeMode = null;
+        setState("stopped");
+        deps.onCursorSync?.(null);
+        deps.onMetronomeBeat?.(null);
+        return;
+      }
+
+      const practiceMode = options.practiceMode ?? "both";
+      const muteTargetHand = Boolean(options.muteTargetHand);
+      const metronomeMode: MetronomeMode = options.metronomeMode ?? "full";
+
+      const isMutedHand = (hand: Hand): boolean => {
+        if (!muteTargetHand) return false;
+        if (practiceMode === "both") return true;
+        if (practiceMode === "rh-only") return hand === "RH";
+        return hand === "LH";
+      };
+
+      const fullSchedule = buildPlaybackSchedule(scoreDoc);
+      const segmentNotes = fullSchedule.notes
+        .filter((n) => n.onsetSec >= startScoreSec - 1e-4 && n.onsetSec < endScoreSec - 1e-6)
+        .filter((n) => !isMutedHand(n.hand))
+        .map((n) => ({
+          ...n,
+          durationSec: Math.min(n.durationSec, Math.max(0.05, endScoreSec - n.onsetSec)),
+        }));
+
+      const segmentSlices = fullSchedule.slices.filter(
+        (s) => s.onsetSec >= startScoreSec - 1e-4 && s.onsetSec < endScoreSec - 1e-6
+      );
+
+      activeDoc = scoreDoc;
+      activeSegmentMetronomeMode = metronomeMode;
+      activeSchedule = {
+        notes: segmentNotes,
+        slices: segmentSlices,
+        startScoreSec,
+        totalDurationSec: endScoreSec,
+      };
+      nextNoteIndex = 0;
+      minSliceIndex = 0;
+      lastEmittedSliceId = null;
+      lastCursorBeatKey = null;
+
+      activeScoreBeats =
+        metronomeMode === "full"
+          ? buildMetronomeBeats(scoreDoc).filter(
+              (b) => b.scoreSec >= startScoreSec - 1e-4 && b.scoreSec < endScoreSec - 1e-4
+            )
+          : [];
+      nextScoreBeatIndex = 0;
+      visualBeatTimeline = [];
+      lastEmittedBeatKey = null;
+
+      const ctx = deps.audioEngine.getAudioContext();
+      const countInStartAudioTime = ctx.currentTime;
+      const startMeasureIndex = resolveStartMeasureIndex(scoreDoc, startScoreSec);
+      const explicitCountIn = options.countInBeats;
+      const countIn =
+        metronomeMode === "off" && explicitCountIn === undefined
+          ? null
+          : buildCountInBeats(scoreDoc, startMeasureIndex, speed, explicitCountIn);
+      const countInDurationRealSec = countIn ? countIn.totalDurationRealSec : 0;
+
+      anchorAudioTime = countInStartAudioTime + countInDurationRealSec;
+      anchorScoreSec = startScoreSec;
+      pausedScoreSec = null;
+
+      if (countIn && countIn.beats.length > 0 && metronomeMode !== "off") {
+        for (const beat of countIn.beats) {
+          const audioTime = countInStartAudioTime + beat.offsetRealSec;
+          metronomeAudio.triggerClick({ time: audioTime, isAccent: beat.isAccent });
+          visualBeatTimeline.push({
+            key: `countin:${beat.measureIndex}:${beat.beatIndex}:${audioTime.toFixed(4)}`,
+            audioTime,
+            event: {
+              measureIndex: beat.measureIndex,
+              beatIndex: beat.beatIndex,
+              beatNumber: beat.beatNumber,
+              totalBeats: beat.totalBeats,
+              isAccent: beat.isAccent,
+              isCountIn: true,
+              countdownRemaining: beat.countdownRemaining,
+            },
+          });
+        }
+      }
+
+      let anchorEmitted = false;
+      const emitAnchorOnce = () => {
+        if (anchorEmitted) return;
+        anchorEmitted = true;
+        if (metronomeMode === "count-in-only") {
+          visualBeatTimeline = [];
+          lastEmittedBeatKey = null;
+          deps.onMetronomeBeat?.(null);
+        }
+        options.onClockAnchor?.({
+          t0PerfMs: calibrateAnchorPerfMs(deps.audioEngine.getAudioContext(), anchorAudioTime),
+          audioStartTimeSec: anchorAudioTime,
+          startScoreSec,
+          endScoreSec,
+          speedMultiplier: speed,
+        });
+      };
+
+      setState("playing");
+      scheduleUpcomingNotes();
+      scheduleUpcomingBeats();
+      emitActiveMetronomeBeat();
+
+      if (ctx.currentTime >= anchorAudioTime - 1e-6) {
+        emitAnchorOnce();
+        emitSyncForScoreSec(startScoreSec);
+      } else {
+        emitFrameForState(startScoreSec, "playing");
+      }
+
+      const tickSegment = (): boolean => {
+        if (token !== runToken || state !== "playing" || !activeSchedule || !activeDoc) {
+          return false;
+        }
+        const now = deps.audioEngine.getAudioContext().currentTime;
+        scheduleUpcomingNotes();
+        scheduleUpcomingBeats();
+        emitActiveMetronomeBeat();
+
+        if (now < anchorAudioTime - 1e-6) {
+          emitFrameForState(anchorScoreSec, "playing");
+          return true;
+        }
+
+        emitAnchorOnce();
+
+        const scoreSec = getCurrentScoreSec();
+        emitSyncForScoreSec(scoreSec);
+
+        if (scoreSec >= endScoreSec - 1e-6 && nextNoteIndex >= activeSchedule.notes.length) {
+          clearTimers();
+          activeSchedule = null;
+          activeSegmentMetronomeMode = null;
+          pausedScoreSec = null;
+          lastEmittedBeatKey = null;
+          state = "stopped";
+          deps.onCursorSync?.(null);
+          deps.onFrame?.(null);
+          deps.onMetronomeBeat?.(null);
+          options.onSegmentComplete?.();
+          if (state === "stopped") {
+            deps.onStateChange?.("stopped");
+          }
+          return false;
+        }
+
+        return true;
+      };
+
+      startDrivers(tickSegment);
+    },
+
     pause() {
       if (state !== "playing") return;
       const scoreSec = getCurrentScoreSec();
@@ -908,6 +1185,7 @@ export function createPlaybackEngine(deps: PlaybackEngineDeps): PlaybackEngine {
       deps.audioEngine.stopAll();
       metronomeAudio.stopAll();
       activeSchedule = null;
+      activeSegmentMetronomeMode = null;
       visualBeatTimeline = [];
       pausedScoreSec = null;
       lastEmittedSliceId = null;

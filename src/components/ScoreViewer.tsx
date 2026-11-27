@@ -1,9 +1,32 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { OpenSheetMusicDisplay, PointF2D, type Cursor } from "opensheetmusicdisplay";
-import type { CursorSyncTarget, PlaybackFrame } from "../audio/playbackEngine";
-import type { Finger, Hand, NoteEvent, ScoreDocument } from "../domain/types";
+import type { CursorSyncTarget, PlaybackClockAnchor, PlaybackFrame } from "../audio/playbackEngine";
+import type { MetronomeBeatEvent } from "../audio/metronome";
+import type { Finger, Hand, NoteEvent, PracticeStep, ScoreCoord, ScoreDocument } from "../domain/types";
+import type {
+  EhsActiveLookaheadPreset,
+  EhsController,
+  EhsFrameSnapshot,
+  EhsGhostOpacity,
+} from "../guided/ehsController";
+import {
+  createEhsOsmdOverlayApplier,
+  extractEhsOsmdGeometry,
+  type EhsExtractedGeometry,
+  type EhsVisualInspection,
+} from "./ehsOsmdOverlay";
+import type {
+  ChunkJunction,
+  MotorChunk,
+  PassageInstance,
+  PerformanceCue,
+  PerformanceCueKind,
+  PerformanceCueOverrideEntry,
+  VariantDiffCoord,
+} from "../chunking/types";
 import type { NoteDiffEntry } from "../store/useStudioStore";
 import { midiToPitchLabel } from "../solver/keyboard";
+import { ChunkCueEditorStrip } from "./ChunkCueEditorStrip";
 import {
   MarginRiskGutter,
   type MeasureGeometry,
@@ -38,6 +61,41 @@ export interface AbLoopHighlightRange {
   endMeasureIndex: number;
 }
 
+export interface ChunkSpotlightRange {
+  chunkId: string;
+  startMeasureIndex: number;
+  endMeasureIndex: number;
+}
+
+export interface FadingScaffoldingVisual {
+  level: 0 | 1 | 2 | 3;
+  peekActive: boolean;
+  preservedNoteUids: readonly string[];
+  preservedMeasureIndices: readonly number[];
+}
+
+export type { EhsVisualInspection } from "./ehsOsmdOverlay";
+
+export interface EhsScoreViewerRuntime {
+  enabled: boolean;
+  preset: EhsActiveLookaheadPreset;
+  ghostOpacity: EhsGhostOpacity;
+  autoStallFlashEnabled: boolean;
+  scaffoldingLevel: 0 | 1 | 2 | 3;
+  manualPeekActive: boolean;
+  peekActiveRef?: { current: boolean };
+  controller: EhsController;
+  practiceSteps: PracticeStep[];
+  speedMultiplier: number;
+  isPlaying: boolean;
+  clockAnchorRef: { current: PlaybackClockAnchor | null };
+  playbackFrameRef: { current: PlaybackFrame | null };
+  activeMetronomeBeatRef: { current: MetronomeBeatEvent | null };
+  nowMs: () => number;
+  requestAnimationFrame?: (cb: FrameRequestCallback) => number;
+  cancelAnimationFrame?: (id: number) => void;
+}
+
 export type AbPickStep = "idle" | "start" | "end";
 
 export interface ScoreRendererHandle {
@@ -49,10 +107,19 @@ export interface ScoreRendererHandle {
     measureGeometry: MeasureGeometry[];
   }>;
   setNoteEvents?(noteEvents: NoteEvent[]): void;
+  setScoreDoc?(scoreDoc: ScoreDocument | null): void;
+  setFadingScaffoldingVisual?(visual: FadingScaffoldingVisual | null): void;
+  applyEhsFrame?(
+    snapshot: EhsFrameSnapshot | null,
+    options?: { layoutMode?: ScoreLayoutMode; scrollContainer?: HTMLElement | null }
+  ): EhsVisualInspection;
+  getEhsInspection?(): EhsVisualInspection | null;
   highlightMeasure(measureIndex: number | null): void;
   highlightAbLoop?(range: AbLoopHighlightRange | null): void;
+  highlightSpotlightRange?(range: ChunkSpotlightRange | null): void;
   markAnchoredNotes(anchors: AnchorMarkerInfo[]): void;
   markDiffNotes?(diffs: NoteDiffEntry[]): void;
+  highlightVariantDiffs?(diffs: VariantDiffCoord[] | null): void;
   highlightSelectedNote?(note: NoteEvent | null): void;
   hitTestNoteAtClientPoint?(clientX: number, clientY: number): OsmdNoteHit | null;
   hitTestMeasureAtClientPoint?(clientX: number, clientY: number): number | null;
@@ -140,12 +207,19 @@ export interface MatchableScoreItem {
   isTieStop?: boolean;
 }
 
+interface IndexedFingeringNode {
+  element: HTMLElement | SVGElement;
+  noteUid: string | null;
+  measureIndex: number | null;
+}
+
 interface GraphicalNoteEntry {
   midi: number;
   staff: number | undefined;
   timestamp: number;
   isTieContinuation: boolean;
   noteSvg: SVGGElement;
+  sourceNote: unknown;
   order: number;
 }
 
@@ -218,6 +292,7 @@ function collectMeasureGraphicalNotes(row: unknown[]): GraphicalNoteEntry[] {
             timestamp,
             isTieContinuation: isSourceNoteTieContinuation(src),
             noteSvg,
+            sourceNote: src,
             order: order++,
           });
         }
@@ -367,7 +442,7 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     new OpenSheetMusicDisplay(container, {
       autoResize: mode === "page",
       backend: "svg",
-      drawFingerings: false,
+      drawFingerings: true,
       fingeringPosition: "aboveorbelow",
       followCursor: false, // OSMD scrollIntoView jitters on iPad; scrolling handled by ScoreViewer
       renderSingleHorizontalStaffline: mode === "horizontal",
@@ -377,6 +452,118 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
   let osmd = buildOsmd(activeLayoutMode);
   let lastCursorKey: { measureIndex: number; onsetTick: number; isGrace: boolean } | null = null;
   let currentNoteEvents: NoteEvent[] = [];
+  let currentScoreDoc: ScoreDocument | null = null;
+  let cachedFingeringNodes: IndexedFingeringNode[] | null = null;
+  let cachedEhsGeometry: EhsExtractedGeometry | null = null;
+  const ehsApplier = createEhsOsmdOverlayApplier(container);
+
+  const buildFingeringNodeIndex = (): IndexedFingeringNode[] => {
+    const nodes: IndexedFingeringNode[] = [];
+    const seen = new Set<Element>();
+    const measureList = osmd.GraphicSheet?.MeasureList as unknown[][] | undefined;
+
+    const eventsByMeasure = new Map<number, NoteEvent[]>();
+    for (const ev of currentNoteEvents) {
+      const list = eventsByMeasure.get(ev.measureIndex) ?? [];
+      list.push(ev);
+      eventsByMeasure.set(ev.measureIndex, list);
+    }
+
+    if (measureList) {
+      for (let m = 0; m < measureList.length; m++) {
+        const row = measureList[m];
+        if (!row) continue;
+
+        const gEntries = collectMeasureGraphicalNotes(row);
+        const measureEvents = eventsByMeasure.get(m) ?? [];
+        const sourceNoteToUid = new Map<unknown, string>();
+        const used = new Set<number>();
+
+        for (const ev of measureEvents) {
+          const idx = pickBestGraphicalEntryIndex(
+            gEntries,
+            used,
+            ev.midi,
+            ev.staff,
+            ev.isTieStop,
+            true,
+          );
+          if (idx === -1) continue;
+          used.add(idx);
+          sourceNoteToUid.set(gEntries[idx].sourceNote, ev.noteUid);
+        }
+
+        for (const gm of row) {
+          const gmObj = gm as { staffEntries?: unknown[] } | undefined;
+          for (const staffEntry of gmObj?.staffEntries ?? []) {
+            const seObj = staffEntry as {
+              FingeringEntries?: Array<{ SVGNode?: Node; sourceNote?: unknown }>;
+              graphicalVoiceEntries?: Array<{
+                notes?: Array<{
+                  sourceNote?: unknown;
+                  getModifierSVGs?: () => HTMLElement[];
+                }>;
+              }>;
+            };
+            for (const fEntry of seObj?.FingeringEntries ?? []) {
+              const svgEl = fEntry?.SVGNode as unknown as HTMLElement | SVGElement | undefined;
+              if (!svgEl || seen.has(svgEl)) continue;
+              seen.add(svgEl);
+              const uid =
+                fEntry.sourceNote !== undefined
+                  ? (sourceNoteToUid.get(fEntry.sourceNote) ?? null)
+                  : null;
+              nodes.push({ element: svgEl, noteUid: uid, measureIndex: m });
+            }
+
+            for (const gve of seObj?.graphicalVoiceEntries ?? []) {
+              for (const gNote of gve?.notes ?? []) {
+                let mods: HTMLElement[] = [];
+                try {
+                  mods = gNote.getModifierSVGs?.() ?? [];
+                } catch {
+                  mods = [];
+                }
+                for (const mod of mods) {
+                  if (!mod || seen.has(mod)) continue;
+                  const isFingeringMod =
+                    mod.classList?.contains("osmd-fingering") ||
+                    mod.classList?.contains("vf-fingering") ||
+                    mod.getAttribute?.("data-osmd-fingering") === "true";
+                  if (!isFingeringMod) continue;
+                  seen.add(mod);
+                  const uid =
+                    gNote.sourceNote !== undefined
+                      ? (sourceNoteToUid.get(gNote.sourceNote) ?? null)
+                      : null;
+                  nodes.push({ element: mod, noteUid: uid, measureIndex: m });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    container
+      .querySelectorAll<SVGElement | HTMLElement>(".osmd-fingering, [data-osmd-fingering='true']")
+      .forEach((el) => {
+        if (seen.has(el)) return;
+        seen.add(el);
+        const measureAttr = el.closest?.("[data-measure-index]")?.getAttribute("data-measure-index");
+        const parsedMeasure =
+          measureAttr !== null && measureAttr !== undefined && measureAttr !== ""
+            ? Number(measureAttr)
+            : NaN;
+        nodes.push({
+          element: el,
+          noteUid: null,
+          measureIndex: Number.isInteger(parsedMeasure) ? parsedMeasure : null,
+        });
+      });
+
+    return nodes;
+  };
 
   const getMeasureSvgElements = (measureIndex: number): SVGGElement[] => {
     const row = osmd.GraphicSheet?.MeasureList?.[measureIndex];
@@ -474,6 +661,9 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       await osmd.load(xmlString);
       osmd.Zoom = options?.zoom ?? 0.85;
       osmd.render();
+      cachedFingeringNodes = null;
+      cachedEhsGeometry = null;
+      ehsApplier.reset();
       lastCursorKey = null;
       osmd.cursor?.hide();
       const measureList = osmd.GraphicSheet?.MeasureList ?? [];
@@ -484,7 +674,79 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     },
 
     setNoteEvents(events: NoteEvent[]) {
-      currentNoteEvents = events;
+      if (events !== currentNoteEvents) {
+        currentNoteEvents = events;
+        cachedFingeringNodes = null;
+        cachedEhsGeometry = null;
+      }
+    },
+
+    setScoreDoc(doc: ScoreDocument | null) {
+      if (doc !== currentScoreDoc) {
+        currentScoreDoc = doc;
+        cachedEhsGeometry = null;
+      }
+    },
+
+    applyEhsFrame(
+      snapshot: EhsFrameSnapshot | null,
+      options?: { layoutMode?: ScoreLayoutMode; scrollContainer?: HTMLElement | null }
+    ): EhsVisualInspection {
+      if (!cachedEhsGeometry) {
+        cachedEhsGeometry = extractEhsOsmdGeometry(
+          osmd,
+          container,
+          currentScoreDoc,
+          currentNoteEvents,
+          options?.layoutMode ?? activeLayoutMode
+        );
+      }
+      return ehsApplier.applyFrame(cachedEhsGeometry, snapshot, {
+        layoutMode: options?.layoutMode ?? activeLayoutMode,
+        scrollContainer: options?.scrollContainer,
+      });
+    },
+
+    getEhsInspection() {
+      return ehsApplier.getInspection();
+    },
+
+    setFadingScaffoldingVisual(visual: FadingScaffoldingVisual | null) {
+      if (!cachedFingeringNodes) {
+        cachedFingeringNodes = buildFingeringNodeIndex();
+      }
+      if (cachedFingeringNodes.length === 0) return;
+
+      if (!visual || visual.peekActive || visual.level <= 1) {
+        const nextOpacity = visual ? "1" : "";
+        for (let i = 0; i < cachedFingeringNodes.length; i++) {
+          const node = cachedFingeringNodes[i];
+          node.element.style.opacity = nextOpacity;
+          node.element.setAttribute("data-scaffolding-opacity", "1");
+        }
+        return;
+      }
+
+      if (visual.level === 3) {
+        for (let i = 0; i < cachedFingeringNodes.length; i++) {
+          const node = cachedFingeringNodes[i];
+          node.element.style.opacity = "0";
+          node.element.setAttribute("data-scaffolding-opacity", "0");
+        }
+        return;
+      }
+
+      const preservedUids = new Set(visual.preservedNoteUids);
+      const preservedMeasures = new Set(visual.preservedMeasureIndices);
+      for (let i = 0; i < cachedFingeringNodes.length; i++) {
+        const node = cachedFingeringNodes[i];
+        const visible =
+          node.noteUid !== null
+            ? preservedUids.has(node.noteUid)
+            : node.measureIndex !== null && preservedMeasures.has(node.measureIndex);
+        node.element.style.opacity = visible ? "1" : "0";
+        node.element.setAttribute("data-scaffolding-opacity", visible ? "1" : "0");
+      }
     },
 
     highlightMeasure(measureIndex: number | null) {
@@ -548,6 +810,28 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
       }
     },
 
+    highlightSpotlightRange(range: ChunkSpotlightRange | null) {
+      const measureList = osmd.GraphicSheet?.MeasureList ?? [];
+      for (let m = 0; m < measureList.length; m++) {
+        const els = getMeasureSvgElements(m);
+        for (const g of els) {
+          if (!range) {
+            g.style.opacity = "";
+            g.removeAttribute("data-spotlight-dimmed");
+            g.removeAttribute("data-spotlight-active");
+          } else if (m >= range.startMeasureIndex && m <= range.endMeasureIndex) {
+            g.style.opacity = "1";
+            g.removeAttribute("data-spotlight-dimmed");
+            g.setAttribute("data-spotlight-active", "true");
+          } else {
+            g.style.opacity = "0.42";
+            g.setAttribute("data-spotlight-dimmed", "true");
+            g.removeAttribute("data-spotlight-active");
+          }
+        }
+      }
+    },
+
     markAnchoredNotes(anchors: AnchorMarkerInfo[]) {
       clearElementsByAttr("data-studio-anchor-marker", "data-anchor-note");
       iterateMeasureGraphicalNotes(anchors, false, (matched, noteSvg) => {
@@ -596,6 +880,39 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
           }
         }
       });
+    },
+
+    highlightVariantDiffs(diffs: VariantDiffCoord[] | null) {
+      clearElementsByAttr("data-studio-variant-diff", "data-variant-diff-measure");
+      if (!diffs || diffs.length === 0) return;
+      const seenMeasures = new Set<number>();
+      for (const diff of diffs) {
+        if (seenMeasures.has(diff.measureIndex)) continue;
+        seenMeasures.add(diff.measureIndex);
+        const els = getMeasureSvgElements(diff.measureIndex);
+        for (const g of els) {
+          g.setAttribute("data-variant-diff-measure", "true");
+          if (typeof g.getBBox === "function") {
+            try {
+              const box = g.getBBox();
+              const svgNs = "http://www.w3.org/2000/svg";
+              const rect = container.ownerDocument.createElementNS(svgNs, "rect");
+              rect.setAttribute("data-studio-variant-diff", "true");
+              rect.setAttribute("x", String(box.x - 2));
+              rect.setAttribute("y", String(box.y - 4));
+              rect.setAttribute("width", String(Math.max(10, box.width + 4)));
+              rect.setAttribute("height", String(Math.max(20, box.height + 8)));
+              rect.setAttribute("rx", "4");
+              rect.setAttribute("fill", "rgba(13, 148, 136, 0.14)");
+              rect.setAttribute("stroke", "rgba(13, 148, 136, 0.65)");
+              rect.setAttribute("stroke-width", "1.4");
+              g.insertBefore(rect, g.firstChild);
+            } catch {
+              // SVG getBBox unavailable in non-layout environments
+            }
+          }
+        }
+      }
     },
 
     highlightSelectedNote(note: NoteEvent | null) {
@@ -793,10 +1110,14 @@ export function createOsmdScoreRenderer(container: HTMLElement): ScoreRendererHa
     dispose() {
       osmd.cursor?.hide();
       lastCursorKey = null;
+      cachedFingeringNodes = null;
+      cachedEhsGeometry = null;
+      ehsApplier.reset();
       clearElementsByAttr("data-studio-highlight", "data-active-measure");
       clearElementsByAttr("data-studio-ab-loop", "data-ab-loop-measure");
       clearElementsByAttr("data-studio-anchor-marker", "data-anchor-note");
       clearElementsByAttr("data-studio-diff-marker", "data-diff-note");
+      clearElementsByAttr("data-studio-variant-diff", "data-variant-diff-measure");
       clearElementsByAttr("data-studio-selected-note", "data-selected-note");
       container.innerHTML = "";
     },
@@ -818,11 +1139,35 @@ export interface ScoreViewerProps {
   layoutMode?: ScoreLayoutMode;
   abLoopRange?: AbLoopHighlightRange | null;
   abPickStep?: AbPickStep;
+  spotlightChunk?: ChunkSpotlightRange | null;
+  fadingScaffolding?: FadingScaffoldingVisual | null;
+  ehsRuntime?: EhsScoreViewerRuntime | null;
+  motorChunks?: MotorChunk[];
+  chunkJunctions?: ChunkJunction[];
+  performanceCues?: PerformanceCue[];
+  chunkEditingEnabled?: boolean;
+  hasChunkOverrides?: boolean;
+  hasCueOverrides?: boolean;
+  inspectedClusterInstance?: PassageInstance | null;
+  inspectedClusterLabel?: string | null;
+  blindCurtainActive?: boolean;
+  blindPeeking?: boolean;
+  blindProbeLabel?: string | null;
+  onTriggerBlindPeek?: () => void;
   onLayoutModeChange?: (mode: ScoreLayoutMode) => void;
   onSelectMeasure?: (measureIndex: number) => void;
   onSelectNote?: (noteUid: string, anchorRect?: PopoverAnchorRect) => void;
   onPickAbMeasure?: (measureIndex: number) => void;
   onMeasureGeometryChange?: (geometry: MeasureGeometry[]) => void;
+  onSplitChunkAtMeasure?: (measureIndex: number) => void;
+  onMergeChunkBoundary?: (boundaryCoord: ScoreCoord) => void;
+  onResetChunkOverrides?: () => void;
+  onUpsertCueOverride?: (entry: PerformanceCueOverrideEntry) => void;
+  onRemoveCueOverride?: (coord: ScoreCoord, kind?: PerformanceCueKind) => void;
+  onResetCueOverrides?: () => void;
+  onPolishCueLabel?: (cue: PerformanceCue) => void;
+  polishingCueId?: string | null;
+  onCloseInspectCluster?: () => void;
   rendererFactory?: ScoreRendererFactory;
 }
 
@@ -845,11 +1190,35 @@ export function ScoreViewer({
   layoutMode = "page",
   abLoopRange = null,
   abPickStep = "idle",
+  spotlightChunk = null,
+  fadingScaffolding = null,
+  ehsRuntime = null,
+  motorChunks = [],
+  chunkJunctions = [],
+  performanceCues = [],
+  chunkEditingEnabled = false,
+  hasChunkOverrides = false,
+  hasCueOverrides = false,
+  inspectedClusterInstance = null,
+  inspectedClusterLabel = null,
+  blindCurtainActive = false,
+  blindPeeking = false,
+  blindProbeLabel = null,
+  onTriggerBlindPeek,
   onLayoutModeChange,
   onSelectMeasure,
   onSelectNote,
   onPickAbMeasure,
   onMeasureGeometryChange,
+  onSplitChunkAtMeasure,
+  onMergeChunkBoundary,
+  onResetChunkOverrides,
+  onUpsertCueOverride,
+  onRemoveCueOverride,
+  onResetCueOverrides,
+  onPolishCueLabel,
+  polishingCueId = null,
+  onCloseInspectCluster,
   rendererFactory = createOsmdScoreRenderer,
 }: ScoreViewerProps) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -981,6 +1350,161 @@ export function ScoreViewer({
     rendererRef.current.highlightAbLoop?.(abLoopRange ?? null);
   }, [isRendered, abLoopRange]);
 
+  const lastSpotlightKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isRendered || !rendererRef.current) return;
+    rendererRef.current.highlightSpotlightRange?.(spotlightChunk ?? null);
+    if (spotlightChunk) {
+      const key = `${spotlightChunk.chunkId}:${spotlightChunk.startMeasureIndex}:${spotlightChunk.endMeasureIndex}`;
+      if (lastSpotlightKeyRef.current !== key) {
+        lastSpotlightKeyRef.current = key;
+        rendererRef.current.scrollToMeasure(
+          spotlightChunk.startMeasureIndex,
+          scrollContainerRef.current,
+        );
+      }
+    } else {
+      lastSpotlightKeyRef.current = null;
+    }
+  }, [isRendered, spotlightChunk]);
+
+  useEffect(() => {
+    if (!isRendered || !rendererRef.current) return;
+    const diffs =
+      inspectedClusterInstance && inspectedClusterInstance.diffCoords.length > 0
+        ? inspectedClusterInstance.diffCoords
+        : null;
+    rendererRef.current.highlightVariantDiffs?.(diffs);
+  }, [isRendered, inspectedClusterInstance]);
+
+  useEffect(() => {
+    if (!isRendered || !rendererRef.current) return;
+    rendererRef.current.setNoteEvents?.(noteEvents);
+    rendererRef.current.setScoreDoc?.(scoreDoc);
+    rendererRef.current.setFadingScaffoldingVisual?.(fadingScaffolding ?? null);
+  }, [isRendered, fadingScaffolding, noteEvents, scoreDoc]);
+
+  // Imperative EHS Hybrid B+C requestAnimationFrame loop strictly outside React state
+  const ehsRuntimeRef = useRef<EhsScoreViewerRuntime | null>(ehsRuntime);
+  ehsRuntimeRef.current = ehsRuntime;
+  const stepEhsFrameRef = useRef<(() => void) | null>(null);
+  const ehsActiveForLoop = Boolean(
+    isRendered &&
+      ehsRuntime &&
+      ehsRuntime.enabled &&
+      ehsRuntime.scaffoldingLevel >= 1 &&
+      ehsRuntime.isPlaying
+  );
+
+  useEffect(() => {
+    if (!isRendered || !rendererRef.current) return;
+    const renderer = rendererRef.current;
+    renderer.setScoreDoc?.(scoreDoc);
+    renderer.setNoteEvents?.(noteEvents);
+
+    if (!ehsActiveForLoop) {
+      stepEhsFrameRef.current = null;
+      renderer.applyEhsFrame?.(null, {
+        layoutMode,
+        scrollContainer: scrollContainerRef.current,
+      });
+      return;
+    }
+
+    const reqRaf =
+      ehsRuntimeRef.current?.requestAnimationFrame ??
+      ((cb: FrameRequestCallback) => globalThis.requestAnimationFrame(cb));
+    const cancelRaf =
+      ehsRuntimeRef.current?.cancelAnimationFrame ??
+      ((id: number) => globalThis.cancelAnimationFrame(id));
+
+    let cancelled = false;
+    let rafId = 0;
+
+    const applyCurrentFrame = () => {
+      const rt = ehsRuntimeRef.current;
+      if (!rt || !rt.enabled || rt.scaffoldingLevel < 1 || !rt.isPlaying) {
+        renderer.applyEhsFrame?.(null, {
+          layoutMode,
+          scrollContainer: scrollContainerRef.current,
+        });
+        return false;
+      }
+
+      const tMs = rt.nowMs();
+      const beatEvent = rt.activeMetronomeBeatRef.current;
+      const anchor = rt.clockAnchorRef.current;
+      const frame = rt.playbackFrameRef.current;
+      const isCountIn = Boolean(beatEvent?.isCountIn || (anchor && tMs < anchor.t0PerfMs));
+
+      let scoreSec = frame?.scoreSec ?? anchor?.startScoreSec ?? 0;
+      if (!isCountIn && anchor) {
+        const anchorSec =
+          tMs >= anchor.t0PerfMs
+            ? Math.min(
+                anchor.endScoreSec,
+                anchor.startScoreSec + ((tMs - anchor.t0PerfMs) / 1000) * anchor.speedMultiplier
+              )
+            : anchor.startScoreSec;
+        if (frame && Math.abs(frame.scoreSec - anchorSec) > 0.05) {
+          scoreSec = frame.scoreSec;
+        } else {
+          scoreSec = anchorSec;
+        }
+      }
+
+      const snapshot = rt.controller.tick({
+        nowMs: tMs,
+        scoreDoc,
+        scoreSec,
+        isPlaying: rt.isPlaying,
+        isCountIn,
+        countdownRemaining: beatEvent?.countdownRemaining ?? 0,
+        speedMultiplier: rt.speedMultiplier,
+        practiceSteps: rt.practiceSteps,
+        config: {
+          enabled: rt.enabled,
+          preset: rt.preset,
+          ghostOpacity: rt.ghostOpacity,
+          autoStallFlashEnabled: rt.autoStallFlashEnabled,
+        },
+        scaffoldingLevel: rt.scaffoldingLevel,
+        manualPeekActive: rt.peekActiveRef ? rt.peekActiveRef.current : rt.manualPeekActive,
+      });
+
+      renderer.applyEhsFrame?.(snapshot, {
+        layoutMode,
+        scrollContainer: scrollContainerRef.current,
+      });
+      return true;
+    };
+
+    const stepFrame = () => {
+      if (cancelled) return;
+      if (!applyCurrentFrame()) return;
+      rafId = reqRaf(stepFrame);
+    };
+
+    stepEhsFrameRef.current = applyCurrentFrame;
+    stepFrame();
+
+    return () => {
+      cancelled = true;
+      stepEhsFrameRef.current = null;
+      if (rafId) cancelRaf(rafId);
+      renderer.applyEhsFrame?.(null, {
+        layoutMode,
+        scrollContainer: scrollContainerRef.current,
+      });
+    };
+  }, [isRendered, ehsActiveForLoop, layoutMode, scoreDoc, noteEvents]);
+
+  useEffect(() => {
+    if (ehsActiveForLoop) {
+      stepEhsFrameRef.current?.();
+    }
+  }, [ehsActiveForLoop, ehsRuntime?.manualPeekActive]);
+
   const handleSurfaceClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (abPickStep !== "idle" && onPickAbMeasure) {
       const pickedMeasure =
@@ -1075,7 +1599,7 @@ export function ScoreViewer({
       <div
         data-testid="score-viewer"
         data-layout-mode={layoutMode}
-        className="flex h-full min-h-60 flex-1 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500"
+        className="flex h-full min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-dashed border-slate-300 bg-white p-8 text-sm text-slate-500"
       >
         请上传 <code>.musicxml</code>、<code>.xml</code> 或 <code>.mxl</code> 乐谱文件，即可进行双手钢琴指法推导、滚动阅谱与键盘模拟。
       </div>
@@ -1089,9 +1613,17 @@ export function ScoreViewer({
       data-active-measure={selectedMeasureIndex !== null ? String(selectedMeasureIndex) : undefined}
       data-selected-slice={selectedSliceId ?? undefined}
       data-selected-note={selectedNoteUid ?? undefined}
-      className="flex min-h-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white p-2 shadow-sm sm:p-2.5"
+      data-spotlight-chunk-id={spotlightChunk?.chunkId ?? undefined}
+      data-spotlight-measures={
+        spotlightChunk
+          ? `${spotlightChunk.startMeasureIndex}-${spotlightChunk.endMeasureIndex}`
+          : undefined
+      }
+      data-scaffolding-level={fadingScaffolding ? `L${fadingScaffolding.level}` : undefined}
+      data-scaffolding-peek={fadingScaffolding?.peekActive ? "true" : undefined}
+      className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white p-2 shadow-sm sm:p-2.5"
     >
-      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1 text-xs">
+      <div className="mb-1.5 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1 text-xs">
         <div className="flex flex-wrap items-center gap-2 text-slate-600">
           <span className="font-semibold text-slate-800">乐谱画布</span>
           <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800">
@@ -1207,7 +1739,7 @@ export function ScoreViewer({
       {anchoredNotes.length > 0 && (
         <div
           data-testid="anchor-indicators"
-          className="mb-2 flex items-center gap-1.5 overflow-x-auto rounded-lg border border-red-100 bg-red-50/50 px-2.5 py-1 text-xs"
+          className="mb-2 flex shrink-0 items-center gap-1.5 overflow-x-auto rounded-lg border border-red-100 bg-red-50/50 px-2.5 py-1 text-xs"
         >
           <span className="shrink-0 font-semibold text-red-700">
             锚点 ({anchoredNotes.length}):
@@ -1239,6 +1771,28 @@ export function ScoreViewer({
           ))}
         </div>
       )}
+
+      <ChunkCueEditorStrip
+        motorChunks={motorChunks}
+        chunkJunctions={chunkJunctions}
+        performanceCues={performanceCues}
+        selectedMeasureIndex={selectedMeasureIndex}
+        measureCount={scoreDoc?.measureCount ?? measureRisks.length}
+        chunkEditingEnabled={chunkEditingEnabled}
+        hasChunkOverrides={hasChunkOverrides}
+        hasCueOverrides={hasCueOverrides}
+        inspectedClusterInstance={inspectedClusterInstance}
+        inspectedClusterLabel={inspectedClusterLabel}
+        onSplitChunkAtMeasure={onSplitChunkAtMeasure}
+        onMergeChunkBoundary={onMergeChunkBoundary}
+        onResetChunkOverrides={onResetChunkOverrides}
+        onUpsertCueOverride={onUpsertCueOverride}
+        onRemoveCueOverride={onRemoveCueOverride}
+        onResetCueOverrides={onResetCueOverrides}
+        onPolishCueLabel={onPolishCueLabel}
+        polishingCueId={polishingCueId}
+        onCloseInspectCluster={onCloseInspectCluster}
+      />
 
       {renderError && (
         <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -1292,6 +1846,42 @@ export function ScoreViewer({
             onClick={handleSurfaceClick}
             className={layoutMode === "horizontal" ? "min-w-full cursor-pointer" : "w-full cursor-pointer"}
           />
+
+          {blindCurtainActive && !blindPeeking && (
+            <div
+              data-testid="cold-probe-blind-curtain"
+              className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 rounded-lg bg-slate-900/95 p-6 text-center text-white backdrop-blur-xs"
+            >
+              <span className="rounded-full border border-teal-400/50 bg-teal-500/20 px-3 py-0.5 text-xs font-semibold text-teal-200">
+                Chaffin 盲考冷启动检索 · 乐谱已隐藏
+              </span>
+              <div className="text-sm font-semibold text-white">
+                {blindProbeLabel || "按 1 小节 Count-In 零助跑直接起弹"}
+              </div>
+              <p className="max-w-md text-xs text-slate-300">
+                随时按 B0 / F 键或下方按钮瞬时偷看 1.5s 乐谱与指法（不计入错音）。
+              </p>
+              {onTriggerBlindPeek && (
+                <button
+                  type="button"
+                  data-testid="cold-probe-peek-btn"
+                  onClick={onTriggerBlindPeek}
+                  className="min-h-[44px] min-w-[44px] rounded-lg border border-teal-300 bg-teal-600 px-4 py-2 text-xs font-semibold text-white hover:bg-teal-500"
+                >
+                  瞬时偷看乐谱与指法 1.5s (B0 / F)
+                </button>
+              )}
+            </div>
+          )}
+
+          {blindCurtainActive && blindPeeking && (
+            <div
+              data-testid="cold-probe-peek-active-badge"
+              className="pointer-events-none absolute top-2 right-2 z-20 rounded-full border border-amber-300 bg-amber-50/95 px-3 py-1 text-xs font-semibold text-amber-900 shadow-xs"
+            >
+              瞬时偷看中 · 1.5s（B0 / F 不计入错音）
+            </div>
+          )}
         </div>
       </div>
     </div>

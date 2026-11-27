@@ -137,6 +137,20 @@ export function createIndexedDbStorage(options: IndexedDbStorageOptions = {}): P
       return blob;
     },
     commit,
+    async applyPracticeEventGradeOverride(eventId, userGradeOverride) {
+      if (userGradeOverride !== 2) return;
+      const db = await database();
+      const tx = db.transaction("practiceEvents", "readwrite");
+      const done = completed(tx);
+      const store = tx.objectStore("practiceEvents");
+      const req = store.get(eventId);
+      req.onsuccess = () => {
+        const existing = req.result as PracticeStorageRecords["practiceEvents"] | undefined;
+        if (!existing || existing.userGradeOverride === 2) return;
+        store.put(copyStorageRecord("practiceEvents", { ...existing, userGradeOverride: 2 }));
+      };
+      await done;
+    },
     async close() {
       if (opening) (await opening).close();
       opening = undefined;

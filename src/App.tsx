@@ -51,10 +51,23 @@ import { applyAnchorOverridesToSlices, localResolveFingering } from "./solver/lo
 import type { PriorLoadProgress } from "./prior/loader";
 import { createSolverClient, SolverCancelledError, type SolverClient } from "./workers/solverClient";
 import { computeNextAnchorState, useStudioStore } from "./store/useStudioStore";
+import { useGuidedSessionStore } from "./store/useGuidedSessionStore";
 import type { PracticeStoragePort } from "./persistence/storagePort";
 import { remapAnchorState, type AnchorState } from "./persistence/anchorDrafts";
 import { usePracticePersistence } from "./hooks/usePracticePersistence";
 import { useWorkspaceScoreLifecycle } from "./hooks/useWorkspaceScoreLifecycle";
+import { useGuidedSessionController } from "./hooks/useGuidedSessionController";
+import { GuidedSessionLaunchCard } from "./components/GuidedSessionLaunchCard";
+import { GuidedResumePill, GuidedSessionHeader } from "./components/GuidedSessionHeader";
+import { EhsControlStrip } from "./components/EhsControlStrip";
+import { GuidedBottomSlot } from "./components/GuidedBottomSlot";
+import { AcousticProfileSlot } from "./components/AcousticProfileSlot";
+import { EarlyMacroRestVeil } from "./components/EarlyMacroRestVeil";
+import { MicroRestVeil } from "./components/MicroRestVeil";
+import {
+  analyzeContinuousPerformanceWindow,
+  type AcousticProfileResult,
+} from "./guided/acousticProfile";
 import { PracticeBackupPanel, ScoreOpenChoice } from "./components/PracticeBackupPanel";
 import { buildMeasureRiskSummaries, type MeasureGeometry } from "./components/MarginRiskGutter";
 import { NoteAnchorPopover, type PopoverAnchorRect } from "./components/NoteAnchorPopover";
@@ -66,6 +79,7 @@ import {
   ScoreViewer,
   type AbPickStep,
   type AnchorMarkerInfo,
+  type EhsScoreViewerRuntime,
   type ScoreLayoutMode,
   type ScoreRendererFactory,
 } from "./components/ScoreViewer";
@@ -110,6 +124,9 @@ import {
   type PlaybackState,
   type SpeedMultiplier,
 } from "./audio/playbackEngine";
+import type { ChunkingClient } from "./workers/chunkingClient";
+import { useChunkingAnalysis } from "./hooks/useChunkingAnalysis";
+import { useExternalFocusCoach } from "./hooks/useExternalFocusCoach";
 
 const PIANO_TIMBRE_STORAGE_KEY = "auto-fingering:piano-timbre";
 
@@ -140,21 +157,33 @@ export interface AppMidiDeps {
   requestMIDIAccess?: () => Promise<MIDIAccessLike>;
 }
 
+export interface AppClockDeps {
+  nowMs?: () => number;
+  getTimezoneOffsetMin?: () => number;
+}
+
 export interface AppProps {
   solverClientFactory?: () => SolverClient;
+  chunkingClientFactory?: () => ChunkingClient;
   scoreRendererFactory?: ScoreRendererFactory;
   audioDeps?: AppAudioDeps;
   midiDeps?: AppMidiDeps;
   practiceStorage?: PracticeStoragePort | null;
+  clockDeps?: AppClockDeps;
+  coachFetch?: typeof fetch;
 }
 
 export default function App({
   solverClientFactory = createSolverClient,
+  chunkingClientFactory,
   scoreRendererFactory,
   audioDeps,
   midiDeps,
   practiceStorage,
+  clockDeps,
+  coachFetch,
 }: AppProps) {
+  const nowMs = useCallback(() => clockDeps?.nowMs?.() ?? Date.now(), [clockDeps]);
   const solverClientRef = useRef<SolverClient | null>(null);
   const audioEngineRef = useRef<PianoAudioEngine | null>(null);
   const playbackEngineRef = useRef<PlaybackEngine | null>(null);
@@ -173,8 +202,17 @@ export default function App({
   const [isResolving, setIsResolving] = useState<boolean>(false);
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
   const updatePlaybackState = useCallback((state: PlaybackState) => {
-    if (state === "stopped") resetMidiCapture();
-    else midiCapture.setTransport(state, useStudioStore.getState().scoreDoc !== null);
+    if (state === "stopped") {
+      const g = useGuidedSessionStore.getState();
+      if (g.studioMode === "guided" && g.sessionPhase === "playing") {
+        // Keep recorded continuous MIDI intact until onSegmentComplete slices the window.
+        midiCapture.setTransport("paused", useStudioStore.getState().scoreDoc !== null);
+      } else {
+        resetMidiCapture();
+      }
+    } else {
+      midiCapture.setTransport(state, useStudioStore.getState().scoreDoc !== null);
+    }
     setPlaybackState(state);
   }, [midiCapture, resetMidiCapture]);
   const [playbackSpeed, setPlaybackSpeed] = useState<SpeedMultiplier>(1.0);
@@ -182,6 +220,7 @@ export default function App({
   const [metronomeVolume, setMetronomeVolume] = useState<number>(0.7);
   const [countInEnabled, setCountInEnabled] = useState<boolean>(false);
   const [activeMetronomeBeat, setActiveMetronomeBeat] = useState<MetronomeBeatEvent | null>(null);
+  const activeMetronomeBeatRef = useRef<MetronomeBeatEvent | null>(null);
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("both");
   const [waitingModeEnabled, setWaitingModeEnabled] = useState<boolean>(false);
   const setWaitingModeEnabledSync = (enabled: boolean) => {
@@ -212,6 +251,13 @@ export default function App({
     createPracticeAnalyticsState()
   );
   const [practiceReportOpen, setPracticeReportOpen] = useState<boolean>(false);
+  const [freeAcousticState, setFreeAcousticState] = useState<{
+    profile: AcousticProfileResult;
+    startMeasureIndex: number;
+    endMeasureIndex: number;
+    passCount: number;
+  } | null>(null);
+  const [freeAcousticOpen, setFreeAcousticOpen] = useState<boolean>(false);
   const [handsRejoinSpeed, setHandsRejoinSpeed] = useState<{ from: number; to: number } | null>(null);
   const [abLoop, setAbLoop] = useState<AbLoopBounds>(() => createDefaultAbLoopBounds(0));
   const waitingLoopGapActiveRef = useRef<boolean>(false);
@@ -225,6 +271,7 @@ export default function App({
   pianoTimbreRef.current = pianoTimbre;
   const [cursorTarget, setCursorTarget] = useState<CursorSyncTarget | null>(null);
   const [playbackFrame, setPlaybackFrame] = useState<PlaybackFrame | null>(null);
+  const playbackFrameRef = useRef<PlaybackFrame | null>(null);
   const [layoutMode, setLayoutMode] = useState<ScoreLayoutMode>("page");
   const [measureGeometry, setMeasureGeometry] = useState<MeasureGeometry[]>([]);
   const [abPickStep, setAbPickStep] = useState<AbPickStep>("idle");
@@ -281,12 +328,43 @@ export default function App({
   const status = useStudioStore((s) => s.status);
   const errorMsg = useStudioStore((s) => s.errorMsg);
 
+  const cc64CommandEnabled = useGuidedSessionStore((s) => s.cc64CommandEnabled);
+  const microRestDurationSec = useGuidedSessionStore((s) => s.microRestDurationSec);
+  const audiationPreviewMode = useGuidedSessionStore((s) => s.audiationPreviewMode);
+  const audiationImageryTimerEnabled = useGuidedSessionStore(
+    (s) => s.audiationImageryTimerEnabled,
+  );
+  const overspeedProbeEnabled = useGuidedSessionStore((s) => s.overspeedProbeEnabled);
+  const scaffoldingPreference = useGuidedSessionStore((s) => s.scaffoldingPreference);
+  const l3SilentBeatEnabled = useGuidedSessionStore((s) => s.l3SilentBeatEnabled);
+  const ehsEnabled = useGuidedSessionStore((s) => s.ehsEnabled);
+  const ehsLookaheadPreset = useGuidedSessionStore((s) => s.ehsLookaheadPreset);
+  const ehsGhostOpacity = useGuidedSessionStore((s) => s.ehsGhostOpacity);
+  const ehsAutoStallFlashEnabled = useGuidedSessionStore((s) => s.ehsAutoStallFlashEnabled);
   const durablePrefs = useMemo(() => ({
     handSpanProfile, speedMultiplier: playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
-    absoluteStrictnessEnabled, strictHoldDurationEnabled,
+    absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
+    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled,
+    scaffoldingPreference, l3SilentBeatEnabled,
+    ehsEnabled, ehsLookaheadPreset, ehsGhostOpacity, ehsAutoStallFlashEnabled,
   }), [handSpanProfile, playbackSpeed, abLoop, practiceMode, singleStaffHand, ignoreExistingFingerings,
-    absoluteStrictnessEnabled, strictHoldDurationEnabled]);
+    absoluteStrictnessEnabled, strictHoldDurationEnabled, cc64CommandEnabled,
+    microRestDurationSec, audiationPreviewMode, audiationImageryTimerEnabled, overspeedProbeEnabled,
+    scaffoldingPreference, l3SilentBeatEnabled,
+    ehsEnabled, ehsLookaheadPreset, ehsGhostOpacity, ehsAutoStallFlashEnabled]);
   const persistence = usePracticePersistence(practiceStorage, durablePrefs, playbackState === "playing");
+  const effectivePracticeMode: PracticeMode = isSingleStaff
+    ? singleStaffHand === "LH"
+      ? "lh-only"
+      : "rh-only"
+    : practiceMode;
+  const chunking = useChunkingAnalysis({
+    chunkingClientFactory,
+    scoreDoc,
+    solveResult,
+    practiceMode: effectivePracticeMode,
+    updatePieceProfileOverrides: persistence.updatePieceProfileOverrides,
+  });
   const [backupOpen, setBackupOpen] = useState(false);
 
   const [library, setLibrary] = useState<string[]>([]);
@@ -322,10 +400,28 @@ export default function App({
   // Close the old capture synchronously on score replacement, before another MIDI packet can arrive.
   useEffect(() => {
     const unsubscribe = useStudioStore.subscribe((state, previous) => {
-      if (state.scoreDoc !== previous.scoreDoc) resetMidiCapture();
+      if (state.scoreDoc !== previous.scoreDoc) {
+        resetMidiCapture();
+        setFreeAcousticState(null);
+        setFreeAcousticOpen(false);
+      }
     });
     return () => { unsubscribe(); resetMidiCapture(); };
   }, [resetMidiCapture]);
+
+  const freeLoopContextRef = useRef<{
+    waitingModeEnabled: boolean;
+    practiceSteps: PracticeStep[];
+    effectivePracticeMode: PracticeMode;
+    deviceNames: string[];
+    nowMs: () => number;
+  }>({
+    waitingModeEnabled: false,
+    practiceSteps: [],
+    effectivePracticeMode: "both",
+    deviceNames: [],
+    nowMs,
+  });
 
   useEffect(() => {
     const audioEngine = createPianoAudioEngine({
@@ -347,8 +443,40 @@ export default function App({
         useStudioStore.getState().selectSlice(slice.sliceId);
       },
       onCursorSync: setCursorTarget,
-      onFrame: setPlaybackFrame,
-      onMetronomeBeat: setActiveMetronomeBeat,
+      onFrame: (frame) => {
+        playbackFrameRef.current = frame;
+        setPlaybackFrame(frame);
+      },
+      onMetronomeBeat: (beat) => {
+        activeMetronomeBeatRef.current = beat;
+        setActiveMetronomeBeat(beat);
+      },
+      onAbLoopIterationComplete: ({ anchor, startMeasureIndex, endMeasureIndex, completedAtPerfMs }) => {
+        const ctx = freeLoopContextRef.current;
+        if (guidedControllerRef.current?.studioMode !== "free" || ctx.waitingModeEnabled) return;
+        const activeDoc = useStudioStore.getState().scoreDoc;
+        if (!activeDoc) return;
+        const loopSteps = ctx.practiceSteps.filter(
+          (s) => s.measureIndex >= startMeasureIndex && s.measureIndex <= endMeasureIndex,
+        );
+        const analyzed = analyzeContinuousPerformanceWindow({
+          clockAnchor: anchor,
+          expectedSteps: loopSteps,
+          scoreDoc: activeDoc,
+          practiceMode: ctx.effectivePracticeMode,
+          sliceContinuousMidiWindow: (fromMs, toMs) =>
+            midiCapture.sliceWindow(fromMs, toMs, { mode: "continuous", transport: "playing" }),
+          endClockMs: Math.max(completedAtPerfMs, ctx.nowMs()),
+          deviceNames: ctx.deviceNames,
+        });
+        if (!analyzed) return;
+        setFreeAcousticState((prev) => ({
+          profile: analyzed.acousticProfile,
+          startMeasureIndex,
+          endMeasureIndex,
+          passCount: (prev?.passCount ?? 0) + 1,
+        }));
+      },
     });
     playbackEngineRef.current = engine;
     return () => {
@@ -356,10 +484,26 @@ export default function App({
       playbackEngineRef.current = null;
       audioEngineRef.current = null;
     };
-  }, [audioDeps, updatePlaybackState]);
+  }, [audioDeps, updatePlaybackState, midiCapture]);
+
+  const guidedControllerRef = useRef<{
+    studioMode: "free" | "guided";
+    sessionPhase: string;
+    routeGuidedMidiEvent: (event: MidiInputEvent) => { intercepted: boolean };
+    routeGuidedKeyboardEvent: (event: KeyboardEvent) => boolean;
+    handleStage0WrongNote: (midi: number) => void;
+    handleStage0StepCompleted: (stepIdx: number) => void;
+    activeChunkSteps: PracticeStep[];
+  } | null>(null);
 
   const handleMidiInputEvent = (event: MidiInputEvent) => {
     midiCapture.record(event);
+    const guidedState = guidedControllerRef.current;
+    const isGuidedStage0 =
+      guidedState?.studioMode === "guided" && guidedState.sessionPhase === "stage0";
+    const waitingActive =
+      guidedState?.studioMode === "guided" ? isGuidedStage0 : waitingModeEnabled;
+
     if (event.type === "noteon") {
       setPressedMidis((prev) => {
         if (prev.has(event.midi)) return prev;
@@ -367,7 +511,13 @@ export default function App({
         next.add(event.midi);
         return next;
       });
-      const shouldPlayLocalAudio = waitingModeEnabled
+      if (guidedState?.studioMode === "guided") {
+        const routed = guidedState.routeGuidedMidiEvent(event);
+        if (routed.intercepted) {
+          return;
+        }
+      }
+      const shouldPlayLocalAudio = waitingActive
         ? midiLocalSoundRef.current
         : event.source !== "midi" || midiLocalSoundRef.current;
       if (shouldPlayLocalAudio) {
@@ -384,7 +534,7 @@ export default function App({
           });
         }
       }
-      if (waitingModeEnabled) {
+      if (waitingActive) {
         processWaitingNoteOn(event.midi);
       }
       return;
@@ -397,7 +547,10 @@ export default function App({
         next.delete(event.midi);
         return next;
       });
-      if (waitingModeEnabled) {
+      if (guidedState?.studioMode === "guided") {
+        guidedState.routeGuidedMidiEvent(event);
+      }
+      if (waitingActive) {
         processWaitingNoteOff(event.midi);
       }
       return;
@@ -405,6 +558,9 @@ export default function App({
 
     if (event.type === "sustain") {
       setSustainPedalPressed(event.pressed);
+      if (guidedState?.studioMode === "guided") {
+        guidedState.routeGuidedMidiEvent(event);
+      }
     }
   };
 
@@ -500,10 +656,11 @@ export default function App({
     setPracticeAnalytics(createPracticeAnalyticsState());
     setHandsRejoinSpeed(null);
     setPracticeReportOpen(false);
+    chunking.resetAllOverrides();
   };
   const workspaceScores = useWorkspaceScoreLifecycle({
     persistence, durablePrefs, solveScore, resetPracticeProgress,
-    restorePreferences(score, saved) {
+    restorePreferences(score, saved, profile) {
       const loop = saved?.abLoop ? normalizeAbLoopBounds(saved.abLoop, score.measureCount)
         : createDefaultAbLoopBounds(score.measureCount);
       if (saved?.speedMultiplier !== undefined) {
@@ -514,10 +671,46 @@ export default function App({
       if (saved?.practiceMode) setPracticeMode(saved.practiceMode);
       if (saved?.absoluteStrictnessEnabled !== undefined) setAbsoluteStrictnessEnabled(saved.absoluteStrictnessEnabled);
       if (saved?.strictHoldDurationEnabled !== undefined) setStrictHoldDurationEnabled(saved.strictHoldDurationEnabled);
+      if (saved?.cc64CommandEnabled !== undefined) {
+        useGuidedSessionStore.getState().setCc64CommandEnabled(saved.cc64CommandEnabled);
+      }
+      if (saved?.microRestDurationSec !== undefined) {
+        useGuidedSessionStore.getState().setMicroRestDurationSec(saved.microRestDurationSec);
+      }
+      if (saved?.audiationPreviewMode !== undefined) {
+        useGuidedSessionStore.getState().setAudiationPreviewMode(saved.audiationPreviewMode);
+      }
+      if (saved?.audiationImageryTimerEnabled !== undefined) {
+        useGuidedSessionStore
+          .getState()
+          .setAudiationImageryTimerEnabled(saved.audiationImageryTimerEnabled);
+      }
+      if (saved?.overspeedProbeEnabled !== undefined) {
+        useGuidedSessionStore.getState().setOverspeedProbeEnabled(saved.overspeedProbeEnabled);
+      }
+      if (saved?.scaffoldingPreference !== undefined) {
+        useGuidedSessionStore.getState().setScaffoldingPreference(saved.scaffoldingPreference);
+      }
+      if (saved?.l3SilentBeatEnabled !== undefined) {
+        useGuidedSessionStore.getState().setL3SilentBeatEnabled(saved.l3SilentBeatEnabled);
+      }
+      if (saved?.ehsEnabled !== undefined) {
+        useGuidedSessionStore.getState().setEhsEnabled(saved.ehsEnabled);
+      }
+      if (saved?.ehsLookaheadPreset !== undefined) {
+        useGuidedSessionStore.getState().setEhsLookaheadPreset(saved.ehsLookaheadPreset);
+      }
+      if (saved?.ehsGhostOpacity !== undefined) {
+        useGuidedSessionStore.getState().setEhsGhostOpacity(saved.ehsGhostOpacity);
+      }
+      if (saved?.ehsAutoStallFlashEnabled !== undefined) {
+        useGuidedSessionStore.getState().setEhsAutoStallFlashEnabled(saved.ehsAutoStallFlashEnabled);
+      }
       setAbLoop(loop);
       setAbPickStep("idle");
       setAbPickStartMeasure(null);
       resetPracticeProgress();
+      chunking.restoreProfileOverrides(profile);
       playbackEngineRef.current?.setAbLoop(loop);
     },
     stopPlayback() {
@@ -585,6 +778,7 @@ export default function App({
     }
 
     playbackEngineRef.current?.stop();
+    useGuidedSessionStore.getState().endSession();
     const store = useStudioStore.getState();
     store.setErrorMsg(null);
     store.setStatus("正在解析 MusicXML...");
@@ -840,18 +1034,30 @@ export default function App({
     return noteEvents.find((n) => n.noteUid === selectedNoteUid) ?? null;
   }, [selectedNoteUid, noteEvents]);
 
-  const effectivePracticeMode: PracticeMode = isSingleStaff
-    ? singleStaffHand === "LH"
-      ? "lh-only"
-      : "rh-only"
-    : practiceMode;
-
   const practiceSteps = useMemo(
     () =>
       scoreDoc
         ? buildPracticeSteps(scoreDoc, effectivePracticeMode, { skipGraceNotes })
         : [],
     [scoreDoc, effectivePracticeMode, skipGraceNotes]
+  );
+
+  const midiDeviceNames = useMemo(
+    () => midiState.devices.map((d) => d.name),
+    [midiState.devices],
+  );
+  freeLoopContextRef.current = {
+    waitingModeEnabled,
+    practiceSteps,
+    effectivePracticeMode,
+    deviceNames: midiDeviceNames,
+    nowMs,
+  };
+
+  const sliceContinuousMidiWindow = useCallback(
+    (fromMs: number, toMs: number) =>
+      midiCapture.sliceWindow(fromMs, toMs, { mode: "continuous", transport: "playing" }),
+    [midiCapture],
   );
 
   const measureErrorsByIndex = useMemo(
@@ -1114,6 +1320,112 @@ export default function App({
       state: frameState,
     });
   };
+
+  const guided = useGuidedSessionController({
+    scoreDoc,
+    solveResult,
+    anchors,
+    removedRawAnchorUids,
+    practiceSteps,
+    motorChunks: chunking.motorChunks,
+    macroSections: chunking.macroSections,
+    chunkJunctions: chunking.chunkJunctions,
+    passageClusters: chunking.passageClusters,
+    performanceCues: chunking.performanceCues,
+    effectivePracticeMode,
+    playbackSpeed,
+    playbackEngineRef,
+    playbackFrameRef,
+    audioEngineRef,
+    countInEnabled,
+    practiceStorage: persistence.storage,
+    activePieceProfile: persistence.getActive()?.profile ?? null,
+    getTimezoneOffsetMin: clockDeps?.getTimezoneOffsetMin,
+    onChangePlaybackSpeed: (speed) => setPlaybackSpeed(speed),
+    setMidiCaptureMode: (mode) => midiCapture.setMode(mode),
+    resetMidiCapture,
+    sliceContinuousMidiWindow,
+    deviceNames: midiDeviceNames,
+    syncWaitingToStep: syncToPracticeStep,
+    resetWaitingCursor: (stepIndex = 0) => setWaitingStateSync(createWaitingModeState(stepIndex)),
+    nowMs,
+  });
+  guidedControllerRef.current = guided;
+
+  const ehsRuntime = useMemo<EhsScoreViewerRuntime | null>(() => {
+    if (!guided.ehsActive) return null;
+    return {
+      enabled: guided.ehsEnabled,
+      preset: guided.ehsLookaheadPreset,
+      ghostOpacity: guided.ehsGhostOpacity,
+      autoStallFlashEnabled: guided.ehsAutoStallFlashEnabled,
+      scaffoldingLevel: guided.scaffoldingLevel,
+      manualPeekActive: guided.peekActive,
+      peekActiveRef: guided.peekActiveRef,
+      controller: guided.ehsController,
+      practiceSteps: guided.activeChunkSteps,
+      speedMultiplier: playbackSpeed,
+      isPlaying: playbackState === "playing",
+      clockAnchorRef: guided.clockAnchorRef,
+      playbackFrameRef,
+      activeMetronomeBeatRef,
+      nowMs,
+      requestAnimationFrame: audioDeps?.requestAnimationFrame,
+      cancelAnimationFrame: audioDeps?.cancelAnimationFrame,
+    };
+  }, [
+    guided.ehsActive,
+    guided.ehsEnabled,
+    guided.ehsLookaheadPreset,
+    guided.ehsGhostOpacity,
+    guided.ehsAutoStallFlashEnabled,
+    guided.scaffoldingLevel,
+    guided.peekActive,
+    guided.ehsController,
+    guided.activeChunkSteps,
+    guided.clockAnchorRef,
+    playbackSpeed,
+    playbackState,
+    nowMs,
+    audioDeps,
+  ]);
+
+  const coach = useExternalFocusCoach({
+    coachFetch,
+    scoreDoc,
+    solveResult,
+    scoreTitle,
+    effectivePracticeMode,
+    studioMode: guided.studioMode,
+    sessionPhase: guided.sessionPhase,
+    lastBoutSummary: guided.lastBoutSummary,
+    onUpsertCueOverride: chunking.handleUpsertCueOverride,
+  });
+  const triggerCoachActionRef = useRef<() => boolean>(() => false);
+  triggerCoachActionRef.current = () => {
+    const g = useGuidedSessionStore.getState();
+    if (
+      g.studioMode !== "guided" ||
+      g.sessionPhase === "idle" ||
+      g.sessionPhase === "suspended" ||
+      g.sessionPhase === "stage0" ||
+      g.sessionPhase === "playing" ||
+      g.sessionPhase === "micro-rest" ||
+      g.sessionPhase === "macro-rest" ||
+      !g.lastBoutSummary?.acousticProfile
+    ) {
+      return false;
+    }
+    if (g.bottomSlotView !== "feedback") {
+      g.setBottomSlotView("feedback");
+    }
+    coach.triggerCoach();
+    return true;
+  };
+  const freeAcousticCoachTip = useMemo(
+    () => coach.buildFreeOfflineTip(freeAcousticState),
+    [coach.buildFreeOfflineTip, freeAcousticState],
+  );
 
   const playAccompanimentNotes = (step: PracticeStep) => {
     if (effectivePracticeMode === "both" || step.accompanimentNotes.length === 0) return;
@@ -1463,13 +1775,15 @@ export default function App({
   };
 
   const processWaitingNoteOn = (midi: number) => {
-    if (!waitingModeEnabled || practiceSteps.length === 0) return;
-    if (waitingLoopGapActiveRef.current) return;
+    const isGuidedStage0 = guided.studioMode === "guided" && guided.sessionPhase === "stage0";
+    const activeSteps = isGuidedStage0 ? guided.activeChunkSteps : practiceSteps;
+    if ((!waitingModeEnabled && !isGuidedStage0) || activeSteps.length === 0) return;
+    if (!isGuidedStage0 && waitingLoopGapActiveRef.current) return;
 
     const currentWaiting = waitingStateRef.current;
-    let isPlayingNow = playbackState === "playing";
-    if (playbackState === "paused") {
-      const currentStep = practiceSteps[currentWaiting.currentStepIndex];
+    let isPlayingNow = isGuidedStage0 || playbackState === "playing";
+    if (!isGuidedStage0 && playbackState === "paused") {
+      const currentStep = activeSteps[currentWaiting.currentStepIndex];
       if (!doesNoteOnMatchPausedStep(currentStep, midi)) {
         return;
       }
@@ -1481,17 +1795,18 @@ export default function App({
 
     if (!isPlayingNow) return;
 
-    const activeStep = practiceSteps[currentWaiting.currentStepIndex];
-    const result = handleWaitingNoteOn(currentWaiting, practiceSteps, midi, abLoop, {
-      absoluteStrictness: absoluteStrictnessEnabled,
-      enforceHoldDuration: strictHoldDurationEnabled,
+    const activeStep = activeSteps[currentWaiting.currentStepIndex];
+    const effectiveAbLoop = isGuidedStage0 ? createDefaultAbLoopBounds(0) : abLoop;
+    const result = handleWaitingNoteOn(currentWaiting, activeSteps, midi, effectiveAbLoop, {
+      absoluteStrictness: isGuidedStage0 ? false : absoluteStrictnessEnabled,
+      enforceHoldDuration: isGuidedStage0 ? false : strictHoldDurationEnabled,
       nowSec: getWaitingClockSec(),
       speedMultiplier: playbackSpeed,
     });
     setWaitingStateSync(result.nextState);
 
     if (result.faultReason === "wrong-note") {
-      if (!absoluteStrictnessEnabled) {
+      if (isGuidedStage0 || !absoluteStrictnessEnabled) {
         // Keep quick grazes visible even if NoteOn and NoteOff render together.
         const timers = wrongKeyFlashTimers.current;
         clearTimeout(timers.get(midi));
@@ -1505,25 +1820,48 @@ export default function App({
           });
         }, 180));
       }
-      setPracticeAnalytics((prev) =>
-        recordPracticeStepFault(prev, activeStep, "wrong-note", midi)
-      );
+      if (isGuidedStage0) {
+        guided.handleStage0WrongNote(midi);
+      } else {
+        setPracticeAnalytics((prev) =>
+          recordPracticeStepFault(prev, activeStep, "wrong-note", midi)
+        );
+      }
+    }
+
+    if (isGuidedStage0) {
+      if (result.completedStep) {
+        playAccompanimentNotes(result.completedStep);
+        guided.handleStage0StepCompleted(currentWaiting.currentStepIndex);
+        if (useGuidedSessionStore.getState().sessionPhase === "stage0") {
+          if (result.advancedToStep) {
+            triggerStepAdvanceMetronome(result.advancedToStep);
+            syncToPracticeStep(result.advancedToStep, "playing");
+          } else if (result.completedScore) {
+            setWaitingStateSync(createWaitingModeState(0));
+            syncToPracticeStep(activeSteps[0] ?? null, "playing");
+          }
+        }
+      }
+      return;
     }
 
     applyWaitingAdvanceSideEffects(result);
   };
 
   const processWaitingNoteOff = (midi: number) => {
-    if (!waitingModeEnabled || practiceSteps.length === 0) return;
+    const isGuidedStage0 = guided.studioMode === "guided" && guided.sessionPhase === "stage0";
+    const activeSteps = isGuidedStage0 ? guided.activeChunkSteps : practiceSteps;
+    if ((!waitingModeEnabled && !isGuidedStage0) || activeSteps.length === 0) return;
     const currentWaiting = waitingStateRef.current;
-    const activeStep = practiceSteps[currentWaiting.currentStepIndex];
+    const activeStep = activeSteps[currentWaiting.currentStepIndex];
     const res = handleWaitingNoteOffWithResult(currentWaiting, midi, {
-      absoluteStrictness: absoluteStrictnessEnabled,
-      enforceHoldDuration: strictHoldDurationEnabled,
+      absoluteStrictness: isGuidedStage0 ? false : absoluteStrictnessEnabled,
+      enforceHoldDuration: isGuidedStage0 ? false : strictHoldDurationEnabled,
       sustainPedalPressed,
     });
     setWaitingStateSync(res.nextState);
-    if (res.faultReason === "early-release") {
+    if (!isGuidedStage0 && res.faultReason === "early-release") {
       setPracticeAnalytics((prev) =>
         recordPracticeStepFault(prev, activeStep, "early-release", midi)
       );
@@ -1593,6 +1931,22 @@ export default function App({
         setRepairPanelOpen(false);
         setPracticeReportOpen(false);
         setSettingsOpen(false);
+        return;
+      }
+      if (guidedControllerRef.current?.routeGuidedKeyboardEvent(e)) {
+        if (e.code === "Space" || e.key === " ") {
+          e.preventDefault();
+        }
+        return;
+      }
+      if (
+        e.key.toLowerCase() === "g" &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.repeat &&
+        triggerCoachActionRef.current()
+      ) {
         return;
       }
       if (
@@ -1875,7 +2229,11 @@ export default function App({
 
   const handlePlaySimulatedMidi = () => {
     if (!simulatedMidi) return;
-    if (practiceSteps.length === 0) {
+    const sourceSteps =
+      guided.studioMode === "guided" && guided.activeChunkSteps.length > 0
+        ? guided.activeChunkSteps
+        : practiceSteps;
+    if (sourceSteps.length === 0) {
       simulatedMidi.play([60, 64, 67, 72].map((midi, stepIndex) => ({
         stepIndex,
         onsetMs: stepIndex * 300,
@@ -1885,9 +2243,16 @@ export default function App({
     }
 
     const waitingIndex = waitingStateRef.current.currentStepIndex;
-    const startIndex = waitingModeEnabled && waitingIndex < practiceSteps.length ? waitingIndex : 0;
-    const startSec = practiceSteps[startIndex].onsetSec;
-    const steps: SimulatedMidiStep[] = practiceSteps.slice(startIndex).map((step) => ({
+    const useWaitingCursor =
+      guided.studioMode === "guided"
+        ? guided.sessionPhase === "stage0"
+        : waitingModeEnabled;
+    const startIndex =
+      useWaitingCursor && waitingIndex >= 0 && waitingIndex < sourceSteps.length
+        ? waitingIndex
+        : 0;
+    const startSec = sourceSteps[startIndex].onsetSec;
+    const steps: SimulatedMidiStep[] = sourceSteps.slice(startIndex).map((step) => ({
       stepIndex: step.stepIndex,
       onsetMs: (step.onsetSec - startSec) * 1000,
       notes: step.expectedNotes.map((note) => ({
@@ -1902,19 +2267,56 @@ export default function App({
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-slate-50 text-slate-900">
       {simulatedMidi && <SimulatedMidiDebugBar harness={simulatedMidi} onPlay={handlePlaySimulatedMidi} />}
-      <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-1.5 sm:px-4">
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 lg:flex-nowrap">
-          <div className="shrink-0">
-            <h1 className="whitespace-nowrap text-sm font-semibold tracking-tight text-slate-900 sm:text-base">
-              MusicXML 钢琴自动指法
-            </h1>
-            <p className="hidden text-[11px] text-slate-500 2xl:block">
-              纯浏览器端 Beam Search DP 钢琴指法推导与双轨实时演练
-            </p>
-          </div>
+      {guided.studioMode === "guided" ? (
+        <GuidedSessionHeader
+          pieceTitle={scoreTitle || fileName}
+          sessionPhase={guided.sessionPhase}
+          activeChunk={guided.activeChunk}
+          queueIndex={guided.currentQueueIndex}
+          queueLength={guided.chunkQueue.length}
+          timeBoxMinutes={guided.timeBoxMinutes}
+          remainingMinutes={guided.remainingMinutes}
+          effectivePracticeMode={effectivePracticeMode}
+          isSingleStaff={isSingleStaff}
+          midiState={midiState}
+          onChangePracticeMode={handlePracticeModeChange}
+          onSuspendForFingering={guided.handleSuspendForFingering}
+          onEndSession={guided.handleEndSession}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
+      ) : (
+        <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-1.5 sm:px-4">
+          <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 lg:flex-nowrap">
+            <div className="shrink-0">
+              <h1 className="whitespace-nowrap text-sm font-semibold tracking-tight text-slate-900 sm:text-base">
+                MusicXML 钢琴自动指法
+              </h1>
+              <p className="hidden text-[11px] text-slate-500 2xl:block">
+                纯浏览器端 Beam Search DP 钢琴指法推导与双轨实时演练
+              </p>
+            </div>
 
-          <div className="flex flex-wrap items-center gap-1.5 lg:flex-nowrap">
-            <label className="shrink-0 cursor-pointer whitespace-nowrap rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-800">
+            <div className="flex flex-wrap items-center gap-1.5 lg:flex-nowrap">
+              {guided.sessionPhase === "suspended" && guided.suspendedSnapshot ? (
+                <GuidedResumePill
+                  remainingMinutes={guided.remainingMinutes}
+                  queueIndex={guided.suspendedSnapshot.currentQueueIndex}
+                  queueLength={guided.suspendedSnapshot.chunkQueue.length}
+                  onResume={guided.handleResumeSuspendedSession}
+                  onEndSession={guided.handleEndSession}
+                />
+              ) : scoreDoc ? (
+                <button
+                  type="button"
+                  data-testid="enter-guided-session-btn"
+                  onClick={guided.enterGuidedLaunch}
+                  className="shrink-0 whitespace-nowrap rounded-lg border border-teal-500 bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-900 hover:bg-teal-100"
+                >
+                  科学练琴 (Guided)
+                </button>
+              ) : null}
+
+              <label className="shrink-0 cursor-pointer whitespace-nowrap rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-800">
               上传<span className="hidden xl:inline"> .musicxml / .mxl</span>
               <input
                 type="file"
@@ -2077,8 +2479,214 @@ export default function App({
           </div>
         </div>
       </header>
+      )}
 
-      <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-1.5 px-2.5 pt-1.5 pb-1 sm:px-4">
+      <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-1.5 overflow-hidden px-2.5 pt-1.5 pb-1 sm:px-4">
+        {scoreDoc && guided.studioMode === "free" && guided.sessionPhase === "idle" && (
+          <div
+            data-testid="guided-launch-strip"
+            className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-teal-50/70 px-3 py-1 text-xs text-teal-950"
+          >
+            <span>
+              当前处于 <strong data-testid="free-studio-mode-label">Free Studio</strong> · 可自由修改指法或随时进入科学练琴。
+            </span>
+            <button
+              type="button"
+              data-testid="guided-strip-start-btn"
+              onClick={guided.enterGuidedLaunch}
+              className="rounded-md bg-teal-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-teal-700"
+            >
+              开启 Guided Session
+            </button>
+          </div>
+        )}
+
+        {guided.studioMode === "guided" && guided.sessionPhase === "launch" && (
+          <GuidedSessionLaunchCard
+            pieceTitle={scoreTitle || fileName}
+            macroSections={chunking.macroSections}
+            motorChunks={chunking.motorChunks}
+            passageClusters={chunking.passageClusters}
+            chunkJunctions={chunking.chunkJunctions}
+            sessionPlan={guided.sessionPlan}
+            timeBoxMinutes={guided.timeBoxMinutes}
+            selectedMacroSectionId={guided.selectedMacroSectionId}
+            blindColdProbeEnabled={guided.blindColdProbeEnabled}
+            onSelectTimeBox={guided.setTimeBoxMinutes}
+            onSelectMacroSection={guided.setSelectedMacroSectionId}
+            onToggleBlindColdProbe={() =>
+              guided.setBlindColdProbeEnabled(!guided.blindColdProbeEnabled)
+            }
+            onStartSession={guided.handleStartSession}
+            onStartQuickTriage={guided.handleStartQuickTriage}
+            onStartColdProbeDrill={guided.handleStartColdProbeDrill}
+            onFocusChunkEditor={() => {
+              const btn = document.querySelector<HTMLButtonElement>('[data-testid="chunk-cue-editor-toggle"]');
+              btn?.click();
+              btn?.scrollIntoView?.({ block: "center" });
+            }}
+            onBackToFreeStudio={guided.returnToFreeStudio}
+          />
+        )}
+
+        {guided.studioMode === "guided" &&
+          guided.sessionPhase !== "launch" &&
+          guided.sessionPhase !== "idle" &&
+          guided.sessionPhase !== "suspended" && (
+            <div
+              data-testid="guided-control-strip"
+              className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-white px-3 py-1 text-xs"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                {guided.sessionPhase === "playing" && activeMetronomeBeat?.isCountIn && (
+                  <span
+                    data-testid="guided-count-in-indicator"
+                    className="rounded border border-sky-300 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-900"
+                  >
+                    预备拍: {activeMetronomeBeat.countdownRemaining}
+                  </span>
+                )}
+                {guided.bridgeWindowState && (
+                  <span
+                    data-testid="guided-bridge-status"
+                    className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-950"
+                  >
+                    {guided.bridgeWindowState.phase === "linked-verify"
+                      ? `双块联排检验 · 恢复原速 ${guided.bridgeWindowState.activeSpeed.toFixed(2)}×`
+                      : `Bridge Window 接缝桥接 · 顺畅 ${guided.bridgeWindowState.smoothPassesDone}/${guided.bridgeWindowState.requiredSmoothPasses} · ${guided.bridgeWindowState.activeSpeed.toFixed(2)}×`}
+                  </span>
+                )}
+                <span
+                  data-testid="guided-scaffolding-badge"
+                  className="rounded-full border border-teal-300 bg-teal-50 px-2 py-0.5 text-[11px] font-semibold text-teal-900"
+                >
+                  L{guided.scaffoldingLevel}
+                  {guided.scaffoldingPolicy.steppedDown ? " · 已自动退降1级" : ""}
+                </span>
+                {guided.scaffoldingLevel === 3 && (
+                  <label className="inline-flex cursor-pointer items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
+                    <input
+                      type="checkbox"
+                      data-testid="guided-l3-silent-beat-toggle"
+                      checked={guided.l3SilentBeatEnabled}
+                      onChange={(e) => guided.setL3SilentBeatEnabled(e.target.checked)}
+                      className="h-3 w-3 accent-teal-600"
+                    />
+                    <span>L3 静音跟拍 (仅Count-In)</span>
+                  </label>
+                )}
+                <EhsControlStrip
+                  scaffoldingLevel={guided.scaffoldingLevel}
+                  sessionPhase={guided.sessionPhase}
+                  ehsEnabled={guided.ehsEnabled}
+                  ehsLookaheadPreset={guided.ehsLookaheadPreset}
+                  ehsGhostOpacity={guided.ehsGhostOpacity}
+                  progressionPrompt={guided.ehsProgressionPrompt}
+                  onToggleEhs={guided.setEhsEnabled}
+                  onChangePreset={guided.setEhsLookaheadPreset}
+                  onChangeGhostOpacity={guided.setEhsGhostOpacity}
+                  onAcceptProgression={guided.acceptEhsProgressionPrompt}
+                  onDismissProgression={guided.dismissEhsProgressionPrompt}
+                />
+                {guided.dualPitchDisabled && (
+                  <span
+                    data-testid="guided-dual-pitch-notice"
+                    className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900"
+                  >
+                    当前块包含 A0+A#0，已自动禁用双键紧急暂停，请使用触控暂停或空格键
+                  </span>
+                )}
+                {guided.b0PeekDisabled && (
+                  <span
+                    data-testid="guided-b0-conflict-notice"
+                    className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-900"
+                  >
+                    当前块包含 B0，已自动禁用演奏态 B0 偷看，请按 F 键或触控「偷看指法」
+                  </span>
+                )}
+                {guided.commandNotice && (
+                  <span
+                    data-testid="guided-command-notice"
+                    className="rounded bg-teal-50 px-2 py-0.5 text-[11px] font-medium text-teal-900"
+                  >
+                    {guided.commandNotice}
+                  </span>
+                )}
+                {guided.sessionPhase === "stage0" && guided.stage0State && (
+                  <span
+                    data-testid="guided-stage0-progress"
+                    className="text-[11px] font-medium text-slate-600"
+                  >
+                    Stage 0 落键步进: {guided.stage0State.currentStepIndex + 1}/
+                    {Math.max(1, guided.stage0State.steps.length)} · 尝试{" "}
+                    {guided.stage0State.passAttempts + 1}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {guided.bridgeWindowState && (
+                  <button
+                    type="button"
+                    data-testid="guided-skip-bridge-btn"
+                    onClick={guided.handleSkipBridgeWindow}
+                    className="min-h-[44px] min-w-[44px] rounded-lg border border-amber-400 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-950 hover:bg-amber-100"
+                  >
+                    跳过接缝桥接 (C8)
+                  </button>
+                )}
+                {guided.sessionPhase === "playing" && guided.scaffoldingPolicy.cuesObscured && (
+                  <button
+                    type="button"
+                    data-testid="guided-peek-fingerings-btn"
+                    onClick={() => guided.triggerScaffoldingPeek()}
+                    className="min-h-[44px] min-w-[44px] rounded-lg border border-teal-400 bg-teal-50 px-3 py-1.5 text-xs font-semibold text-teal-900 hover:bg-teal-100"
+                  >
+                    {guided.peekActive ? "指法闪现中…" : "偷看指法 1.5s (B0 / F)"}
+                  </button>
+                )}
+                {guided.sessionPhase === "stage0" || guided.sessionPhase === "playing" ? (
+                  <button
+                    type="button"
+                    data-testid="guided-cmd-pause-btn"
+                    onClick={() => guided.executeCommandAction("emergency-pause")}
+                    className="min-h-[44px] min-w-[44px] rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+                  >
+                    暂停 (A0+A#0 / Space)
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      data-testid="guided-cmd-replay-btn"
+                      onClick={() => guided.executeCommandAction("replay-chunk")}
+                      className="min-h-[44px] min-w-[44px] rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                    >
+                      重练本块 (A0 / ←)
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="guided-cmd-toggle-view-btn"
+                      onClick={() => guided.executeCommandAction("toggle-view")}
+                      className="min-h-[44px] min-w-[44px] rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                    >
+                      {guided.bottomSlotView === "piano" ? "查看延迟反馈 (B0 / F)" : "查看指法与 88 键 (B0 / F)"}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="guided-cmd-continue-btn"
+                      onClick={() => guided.executeCommandAction("continue-next")}
+                      className="min-h-[44px] min-w-[44px] rounded-lg bg-teal-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-teal-700"
+                    >
+                      {guided.sessionPhase === "paused"
+                        ? "继续 (C8 / Space)"
+                        : "下一块 (C8 / →)"}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
         {persistence.backupReminder && (
           <aside data-testid="practice-backup-reminder" className="flex shrink-0 items-center gap-2 rounded-md bg-amber-50 px-3 py-1 text-xs text-amber-900">
             <span>浏览器可能会清理本地数据，建议定期备份练习记录。</span>
@@ -2094,7 +2702,7 @@ export default function App({
           onArchive={scoreDoc && persistence.getActive() ? workspaceScores.handleArchivePiece : undefined} />}
         {workspaceScores.openChoice && <ScoreOpenChoice choice={workspaceScores.openChoice} onAnswer={workspaceScores.answerOpenChoice} />}
 
-        {showStatusBar && (
+        {showStatusBar && (guided.studioMode === "free" || guided.sessionPhase === "launch") && (
           <div
             data-testid="top-status-warning-bar"
             className="relative flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
@@ -2211,6 +2819,79 @@ export default function App({
                     onDismissSuggestion={handleDismissRepair}
                     onClose={() => setRepairPanelOpen(false)}
                   />
+                )}
+              </div>
+            )}
+
+            {guided.studioMode === "free" && freeAcousticState && (
+              <div className="relative">
+                <button
+                  type="button"
+                  data-testid="free-acoustic-badge-btn"
+                  aria-expanded={freeAcousticOpen}
+                  onClick={() => {
+                    setFreeAcousticOpen((v) => !v);
+                    setPracticeReportOpen(false);
+                    setRepairPanelOpen(false);
+                    setDiffDropdownOpen(false);
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition ${
+                    freeAcousticState.profile.troubleMeasures.length > 0
+                      ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+                      : "border-teal-300 bg-teal-50 text-teal-900 hover:bg-teal-100"
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      freeAcousticState.profile.timingEvennessStatus === "red"
+                        ? "bg-rose-500"
+                        : freeAcousticState.profile.troubleMeasures.length > 0
+                          ? "bg-amber-500"
+                          : "bg-emerald-500"
+                    }`}
+                  />
+                  声学画像 · m.{freeAcousticState.startMeasureIndex + 1}–{freeAcousticState.endMeasureIndex + 1}
+                </button>
+                {freeAcousticOpen && (
+                  <div
+                    data-testid="free-acoustic-popover"
+                    className="absolute right-0 top-7 z-40 w-[360px] max-w-[92vw] rounded-xl border border-slate-200 bg-white p-3 shadow-xl"
+                  >
+                    <div className="mb-2 flex items-center justify-between border-b border-slate-100 pb-1.5 text-xs">
+                      <div>
+                        <span className="font-semibold text-slate-900">
+                          A-B Loop 声学画像（纯内存只读）
+                        </span>
+                        <span className="ml-2 text-[11px] text-slate-500">
+                          m.{freeAcousticState.startMeasureIndex + 1}–{freeAcousticState.endMeasureIndex + 1} · 第 {freeAcousticState.passCount} 遍
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFreeAcousticOpen(false)}
+                        className="rounded px-1 text-slate-400 hover:text-slate-700"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <AcousticProfileSlot
+                      profile={freeAcousticState.profile}
+                      compact
+                      onSelectTroubleMeasure={(mIdx) => {
+                        handleSelectMeasure(mIdx);
+                        setFreeAcousticOpen(false);
+                      }}
+                    />
+                    {freeAcousticCoachTip && (
+                      <div
+                        data-testid="free-acoustic-coach-tip"
+                        className="mt-2 rounded-lg border border-teal-200 bg-teal-50/70 px-2.5 py-1.5 text-[11px] text-teal-950"
+                      >
+                        <span className="font-semibold">外部注意提示（0 ms）：</span>
+                        <span>{freeAcousticCoachTip}</span>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -2529,7 +3210,7 @@ export default function App({
         {/* Top Pane: Continuous Scrolling Score Canvas + Inline Note Anchor Popover */}
         <div
           data-testid="top-score-pane"
-          className="relative flex min-h-0 flex-1 flex-col"
+          className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
         >
           <ScoreViewer
             xmlString={renderedXml}
@@ -2553,11 +3234,40 @@ export default function App({
                 : null
             }
             abPickStep={abPickStep}
+            spotlightChunk={guided.spotlightChunk}
+            fadingScaffolding={guided.fadingScaffoldingVisual}
+            ehsRuntime={ehsRuntime}
+            motorChunks={chunking.motorChunks}
+            chunkJunctions={chunking.chunkJunctions}
+            performanceCues={chunking.performanceCues}
+            chunkEditingEnabled={
+              playbackState !== "playing" &&
+              (guided.studioMode === "free" || guided.sessionPhase === "launch")
+            }
+            hasChunkOverrides={chunking.hasChunkOverrides}
+            hasCueOverrides={chunking.hasCueOverrides}
+            inspectedClusterInstance={
+              playbackState === "playing" ? null : chunking.inspectedClusterInstance
+            }
+            inspectedClusterLabel={chunking.inspectedClusterLabel}
+            blindCurtainActive={guided.blindCurtainActive}
+            blindPeeking={guided.blindPeeking}
+            blindProbeLabel={guided.blindProbeLabel}
+            onTriggerBlindPeek={guided.triggerBlindPeek}
             onLayoutModeChange={setLayoutMode}
             onSelectMeasure={handleSelectMeasure}
             onSelectNote={handleSelectNote}
             onPickAbMeasure={handlePickAbMeasure}
             onMeasureGeometryChange={setMeasureGeometry}
+            onSplitChunkAtMeasure={chunking.handleSplitChunkAtMeasure}
+            onMergeChunkBoundary={chunking.handleMergeChunkBoundary}
+            onResetChunkOverrides={chunking.handleResetChunkOverrides}
+            onUpsertCueOverride={chunking.handleUpsertCueOverride}
+            onRemoveCueOverride={chunking.handleRemoveCueOverride}
+            onResetCueOverrides={chunking.handleResetCueOverrides}
+            onPolishCueLabel={coach.polishCueLabel}
+            polishingCueId={coach.polishingCueId}
+            onCloseInspectCluster={chunking.closeInspectCluster}
             rendererFactory={scoreRendererFactory}
           />
 
@@ -2577,10 +3287,28 @@ export default function App({
               onClose={() => setPopoverOpen(false)}
             />
           )}
+
+          {guided.studioMode === "guided" && guided.sessionPhase === "micro-rest" && (
+            <MicroRestVeil
+              remainingSec={guided.microRestTick.remainingSec}
+              progress={guided.microRestTick.progress}
+              reminderMessage={guided.microRestState?.reminderMessage ?? guided.microRestReminder}
+              reminderPulseToken={guided.microRestState?.reminderPulseToken ?? 0}
+              onSkip={() => guided.executeCommandAction("continue-next")}
+            />
+          )}
+
+          {guided.studioMode === "guided" && guided.sessionPhase === "macro-rest" && (
+            <EarlyMacroRestVeil
+              remainingSec={guided.macroRestRemainingSec}
+              onSkip={() => guided.executeCommandAction("continue-next")}
+            />
+          )}
         </div>
       </main>
 
       {/* Middle Pane: Dedicated Transport & Practice Bar */}
+      {(guided.studioMode === "free" || guided.sessionPhase === "launch") && (
       <TransportPracticeBar
         hasScore={Boolean(scoreDoc && onsetSlices.length > 0)}
         hasSelectedSlice={Boolean(selectedSliceId)}
@@ -2605,6 +3333,9 @@ export default function App({
         abLoop={abLoop}
         abPickStep={abPickStep}
         abPickStartMeasure={abPickStartMeasure}
+        passageClusters={chunking.passageClusters}
+        inspectedClusterInstanceId={chunking.inspectedClusterInstanceId}
+        onToggleInspectClusterInstance={chunking.toggleInspectClusterInstance}
         onPlay={handlePlay}
         onPlayFromSlice={handlePlayFromSlice}
         onPause={handlePause}
@@ -2619,9 +3350,41 @@ export default function App({
         onChangeAbLoopBounds={handleChangeAbLoopBounds}
         onClearAbLoop={handleClearAbLoop}
       />
+      )}
 
       {/* Bottom Pane: Full-Width 88-Key Physical Piano & Dual-Hand Posture Simulation */}
       <div data-testid="bottom-piano-pane" className="shrink-0">
+        {guided.studioMode === "guided" &&
+        guided.sessionPhase !== "micro-rest" &&
+        guided.sessionPhase !== "macro-rest" &&
+        guided.bottomSlotView === "feedback" ? (
+          <GuidedBottomSlot
+            sessionPhase={guided.sessionPhase}
+            lastBoutSummary={guided.lastBoutSummary}
+            lastProbeResult={guided.lastProbeResult}
+            audiationCue={guided.audiationCue}
+            audiationState={guided.audiationState}
+            imageryRemainingSec={
+              guided.audiationImageryTick.active
+                ? guided.audiationImageryTick.remainingSec
+                : null
+            }
+            coachResult={coach.coachResult}
+            coachLoading={coach.coachLoading}
+            coachRemoteConfigured={coach.remoteConfigured}
+            onTriggerCoach={coach.triggerCoach}
+            onTriggerPreview={guided.triggerAudiationPreview}
+            onStopPreview={() => guided.stopAudiationPreview("manual-stop")}
+            onShowFingerings={() => guided.setBottomSlotView("piano")}
+            onContinueNext={() => guided.executeCommandAction("continue-next")}
+            onReplayCurrent={() => guided.executeCommandAction("replay-chunk")}
+            onSelectTroubleMeasure={(measureIndex) => {
+              handleSelectMeasure(measureIndex);
+              guided.setBottomSlotView("piano");
+            }}
+            onMarkHard={() => void guided.handleMarkLastBoutHard()}
+          />
+        ) : (
         <UnifiedPiano88
           scoreDoc={scoreDoc}
           solveResult={solveResult}
@@ -2631,16 +3394,46 @@ export default function App({
           practiceMode={effectivePracticeMode}
           showOverhead={showPianoOverhead}
           showFullPalm={showFullPalm}
-          wrongMidis={waitingModeEnabled && !absoluteStrictnessEnabled && flashedWrongMidis.size > 0
-            ? new Set([...waitingState.wrongMidis, ...flashedWrongMidis])
-            : waitingState.wrongMidis}
-          hitMidis={waitingState.hitMidis}
+          scaffoldingHideTargets={guided.hideKeyboardTargets}
+          wrongMidis={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? undefined
+              : (guided.studioMode === "guided" && guided.sessionPhase === "stage0") ||
+                  (waitingModeEnabled && !absoluteStrictnessEnabled)
+                ? flashedWrongMidis.size > 0
+                  ? new Set([...waitingState.wrongMidis, ...flashedWrongMidis])
+                  : waitingState.wrongMidis
+                : waitingState.wrongMidis
+          }
+          hitMidis={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? undefined
+              : waitingState.hitMidis
+          }
           pressedMidis={pressedMidis}
           sustainPedalPressed={sustainPedalPressed}
-          waitingTainted={waitingState.tainted}
-          waitingResetReason={waitingState.lastResetReason}
-          waitingIsHolding={waitingState.isHolding}
-          waitingHoldProgress={waitingState.holdProgress}
+          waitingTainted={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? false
+              : waitingState.tainted
+          }
+          waitingResetReason={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? null
+              : waitingState.lastResetReason
+          }
+          waitingIsHolding={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? false
+              : waitingState.isHolding
+          }
+          waitingHoldProgress={
+            guided.studioMode === "guided" && guided.sessionPhase === "playing"
+              ? 0
+              : waitingState.holdProgress
+          }
+          commandKeyBadges={guided.commandKeyBadges}
+          bridgeHandPreview={guided.bridgeHandPreview}
           onSelectSlice={handleSelectSlice}
           onVirtualNoteOn={(midi, velocity = 96) =>
             handleMidiInputEvent(createLocalMidiNoteEvent("virtual", midi, velocity))
@@ -2649,6 +3442,7 @@ export default function App({
             handleMidiInputEvent(createLocalMidiNoteEvent("virtual", midi, 0))
           }
         />
+        )}
       </div>
 
       <PracticeSettingsModal
@@ -2665,6 +3459,23 @@ export default function App({
         skipGraceNotes={skipGraceNotes}
         absoluteStrictnessEnabled={absoluteStrictnessEnabled}
         strictHoldDurationEnabled={strictHoldDurationEnabled}
+        cc64CommandEnabled={guided.cc64CommandEnabled}
+        microRestDurationSec={guided.microRestDurationSec}
+        audiationPreviewMode={guided.audiationPreviewMode}
+        audiationImageryTimerEnabled={guided.audiationImageryTimerEnabled}
+        overspeedProbeEnabled={guided.overspeedProbeEnabled}
+        scaffoldingPreference={guided.scaffoldingPreference}
+        l3SilentBeatEnabled={guided.l3SilentBeatEnabled}
+        ehsEnabled={guided.ehsEnabled}
+        ehsLookaheadPreset={guided.ehsLookaheadPreset}
+        ehsGhostOpacity={guided.ehsGhostOpacity}
+        ehsAutoStallFlashEnabled={guided.ehsAutoStallFlashEnabled}
+        ehsDisabledInL0={
+          guided.studioMode === "guided" &&
+          guided.sessionPhase !== "launch" &&
+          guided.sessionPhase !== "idle" &&
+          guided.scaffoldingLevel === 0
+        }
         showStatusBar={showStatusBar}
         showPianoOverhead={showPianoOverhead}
         showFullPalm={showFullPalm}
@@ -2716,6 +3527,25 @@ export default function App({
           setStrictHoldDurationEnabled((prev) => !prev);
           setWaitingStateSync(createWaitingModeState(waitingStateRef.current.currentStepIndex));
         }}
+        onToggleCc64Command={() => guided.setCc64CommandEnabled(!guided.cc64CommandEnabled)}
+        onChangeMicroRestDurationSec={guided.setMicroRestDurationSec}
+        onChangeAudiationPreviewMode={guided.setAudiationPreviewMode}
+        onToggleAudiationImageryTimer={() =>
+          guided.setAudiationImageryTimerEnabled(!guided.audiationImageryTimerEnabled)
+        }
+        onToggleOverspeedProbe={() =>
+          guided.setOverspeedProbeEnabled(!guided.overspeedProbeEnabled)
+        }
+        onChangeScaffoldingPreference={guided.setScaffoldingPreference}
+        onToggleL3SilentBeat={() =>
+          guided.setL3SilentBeatEnabled(!guided.l3SilentBeatEnabled)
+        }
+        onToggleEhsEnabled={() => guided.setEhsEnabled(!guided.ehsEnabled)}
+        onChangeEhsLookaheadPreset={guided.setEhsLookaheadPreset}
+        onChangeEhsGhostOpacity={guided.setEhsGhostOpacity}
+        onToggleEhsAutoStallFlash={() =>
+          guided.setEhsAutoStallFlashEnabled(!guided.ehsAutoStallFlashEnabled)
+        }
         onToggleShowStatusBar={() => setShowStatusBar((v) => !v)}
         onToggleShowPianoOverhead={() => setShowPianoOverhead((v) => !v)}
         onToggleShowFullPalm={() => setShowFullPalm((v) => !v)}
@@ -2723,6 +3553,7 @@ export default function App({
         onChangePriorMode={handlePriorModeChange}
         onChangePriorLambda={handlePriorLambdaChange}
         onChangeCustomModelBaseUrl={handleCustomModelBaseUrlChange}
+        coachSettingsProps={coach.coachSettingsProps}
         onClose={() => setSettingsOpen(false)}
       />
     </div>

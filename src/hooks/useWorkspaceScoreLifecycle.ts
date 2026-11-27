@@ -6,7 +6,8 @@ import { getScoreIdentity } from "../persistence/fingerprint";
 import { applyDraft, type AnchorState } from "../persistence/anchorDrafts";
 import { archivePieceAndRestart, newPieceProfile, readLastOpenedPrefs, readRepairAlternate, resolvePieceOpen,
   type CurrentWorkspace, type OpenChoice, type OpenDecision } from "../persistence/studioPersistence";
-import type { ScoreBlobSource, WorkspacePrefs } from "../persistence/storagePort";
+import type { BackupImportResolutions } from "../persistence/backupMerge";
+import type { PieceProfile, ScoreBlobSource, WorkspacePrefs } from "../persistence/storagePort";
 import { useStudioStore, type StudioSnapshot, type StudioState } from "../store/useStudioStore";
 import { SolverCancelledError } from "../workers/solverClient";
 import type { usePracticePersistence } from "./usePracticePersistence";
@@ -15,7 +16,7 @@ interface WorkspaceScoreLifecycleOptions {
   persistence: Pick<ReturnType<typeof usePracticePersistence>, "storage" | "getActive" | "activate" | "persistCurrent" | "importBackup">;
   durablePrefs: CurrentWorkspace["prefs"];
   solveScore(score: ScoreDocument, profile: HandSpanProfile, ignoreAnchors: boolean, state: AnchorState): Promise<SolveResult>;
-  restorePreferences(score: ScoreDocument, saved: WorkspacePrefs | undefined): void;
+  restorePreferences(score: ScoreDocument, saved: WorkspacePrefs | undefined, profile?: PieceProfile): void;
   stopPlayback(): void;
   resetPracticeProgress(): void;
 }
@@ -107,7 +108,7 @@ export function useWorkspaceScoreLifecycle({
     assertCurrent();
     store.setHandSpanProfile(profile);
     store.setIgnoreExistingFingerings(ignore);
-    restorePreferences(score, saved);
+    restorePreferences(score, saved, identity?.profile);
     if (storage) persistence.activate(identity?.profile ?? newPieceProfile(score), saved?.freePracticeMinutes, cachedPrefs ? "restore" : "open");
     store.setSolvedScore({ scoreDoc: score, rawXmlText: session.rawXmlText, mxlContainer: session.mxlContainer,
       fileName: name, exportFormat: session.sourceFormat, solveResult: result, resetHistory: true,
@@ -153,7 +154,7 @@ export function useWorkspaceScoreLifecycle({
     };
   }, [persistence.storage]);
 
-  const handleBackupImport = async (json: string) => {
+  const handleBackupImport = async (json: string, resolutions?: BackupImportResolutions) => {
     const { storage } = persistence;
     if (!storage) return;
     const generation = beginScoreOpen();
@@ -174,7 +175,7 @@ export function useWorkspaceScoreLifecycle({
         if (error instanceof SolverCancelledError) return;
       }
       if (isCurrent(generation)) opened.setStatus("练习数据已导入，请重新上传乐谱");
-    });
+    }, resolutions);
   };
 
   const handleArchivePiece = async () => {

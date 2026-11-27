@@ -7,8 +7,14 @@ import {
 } from "../audio/pianoAudio";
 import type { SpeedMultiplier } from "../audio/playbackEngine";
 import type { HandSpanProfile, PriorMode, SpanPreset } from "../domain/types";
+import type { EhsActiveLookaheadPreset, EhsGhostOpacity } from "../guided/ehsController";
+import type { ScaffoldingPreference } from "../guided/fadingScaffolding";
 import type { MidiConnectionState } from "../midi/webMidi";
 import type { PriorLoadProgress } from "../prior/loader";
+import {
+  CoachSettingsSection,
+  type CoachSettingsSectionProps,
+} from "./CoachSettingsSection";
 
 const SPAN_PRESETS: Array<{ preset: SpanPreset; title: string }> = [
   { preset: "S", title: "小手型（偏保守跨度，0.82×）" },
@@ -30,6 +36,18 @@ export interface PracticeSettingsModalProps {
   skipGraceNotes?: boolean;
   absoluteStrictnessEnabled?: boolean;
   strictHoldDurationEnabled?: boolean;
+  cc64CommandEnabled?: boolean;
+  microRestDurationSec?: number;
+  audiationPreviewMode?: "auto-unfamiliar" | "manual";
+  audiationImageryTimerEnabled?: boolean;
+  overspeedProbeEnabled?: boolean;
+  scaffoldingPreference?: ScaffoldingPreference;
+  l3SilentBeatEnabled?: boolean;
+  ehsEnabled?: boolean;
+  ehsLookaheadPreset?: EhsActiveLookaheadPreset;
+  ehsGhostOpacity?: EhsGhostOpacity;
+  ehsAutoStallFlashEnabled?: boolean;
+  ehsDisabledInL0?: boolean;
   showStatusBar?: boolean;
   showPianoOverhead?: boolean;
   showFullPalm?: boolean;
@@ -50,6 +68,17 @@ export interface PracticeSettingsModalProps {
   onToggleSkipGraceNotes?: () => void;
   onToggleAbsoluteStrictness?: () => void;
   onToggleStrictHoldDuration?: () => void;
+  onToggleCc64Command?: () => void;
+  onChangeMicroRestDurationSec?: (sec: number) => void;
+  onChangeAudiationPreviewMode?: (mode: "auto-unfamiliar" | "manual") => void;
+  onToggleAudiationImageryTimer?: () => void;
+  onToggleOverspeedProbe?: () => void;
+  onChangeScaffoldingPreference?: (preference: ScaffoldingPreference) => void;
+  onToggleL3SilentBeat?: () => void;
+  onToggleEhsEnabled?: () => void;
+  onChangeEhsLookaheadPreset?: (preset: EhsActiveLookaheadPreset) => void;
+  onChangeEhsGhostOpacity?: (opacity: EhsGhostOpacity) => void;
+  onToggleEhsAutoStallFlash?: () => void;
   onToggleShowStatusBar?: () => void;
   onToggleShowPianoOverhead?: () => void;
   onToggleShowFullPalm?: () => void;
@@ -57,6 +86,7 @@ export interface PracticeSettingsModalProps {
   onChangePriorMode?: (mode: PriorMode) => void;
   onChangePriorLambda?: (lambda: number) => void;
   onChangeCustomModelBaseUrl?: (url: string) => void;
+  coachSettingsProps?: CoachSettingsSectionProps;
   onClose: () => void;
 }
 
@@ -108,6 +138,18 @@ export function PracticeSettingsModal({
   skipGraceNotes = false,
   absoluteStrictnessEnabled = false,
   strictHoldDurationEnabled = false,
+  cc64CommandEnabled = false,
+  microRestDurationSec = 12,
+  audiationPreviewMode = "auto-unfamiliar",
+  audiationImageryTimerEnabled = false,
+  overspeedProbeEnabled = false,
+  scaffoldingPreference = "auto-fade",
+  l3SilentBeatEnabled = true,
+  ehsEnabled = false,
+  ehsLookaheadPreset = "2-beats",
+  ehsGhostOpacity = 0.06,
+  ehsAutoStallFlashEnabled = true,
+  ehsDisabledInL0 = false,
   showStatusBar = true,
   showPianoOverhead = true,
   showFullPalm = true,
@@ -128,6 +170,17 @@ export function PracticeSettingsModal({
   onToggleSkipGraceNotes,
   onToggleAbsoluteStrictness,
   onToggleStrictHoldDuration,
+  onToggleCc64Command,
+  onChangeMicroRestDurationSec,
+  onChangeAudiationPreviewMode,
+  onToggleAudiationImageryTimer,
+  onToggleOverspeedProbe,
+  onChangeScaffoldingPreference,
+  onToggleL3SilentBeat,
+  onToggleEhsEnabled,
+  onChangeEhsLookaheadPreset,
+  onChangeEhsGhostOpacity,
+  onToggleEhsAutoStallFlash,
   onToggleShowStatusBar,
   onToggleShowPianoOverhead,
   onToggleShowFullPalm,
@@ -135,6 +188,7 @@ export function PracticeSettingsModal({
   onChangePriorMode,
   onChangePriorLambda,
   onChangeCustomModelBaseUrl,
+  coachSettingsProps,
   onClose,
 }: PracticeSettingsModalProps) {
   useEffect(() => {
@@ -397,6 +451,277 @@ export function PracticeSettingsModal({
               onChange={() => onToggleStrictHoldDuration?.()}
               className="h-4 w-4 accent-blue-600"
             />
+          </div>
+
+          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div>
+              <div className="font-medium text-slate-900">Guided Session 允许 CC64 延音踏板触发继续</div>
+              <div className="text-[11px] text-slate-500">
+                默认关闭（防乐句延音误触）。开启后在非演奏空窗踩下 CC64 踏板可等价 C8 继续/下一块。
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              data-testid="cc64-command-toggle"
+              aria-label="Guided Session 允许 CC64 延音踏板触发继续"
+              checked={cc64CommandEnabled}
+              onChange={() => onToggleCc64Command?.()}
+              className="h-4 w-4 accent-teal-600"
+            />
+          </label>
+
+          {/* Guided Session Transition Gap (Micro-Rest + Audiation Priming) */}
+          <div className="space-y-2.5 rounded-lg border border-teal-200/80 bg-teal-50/40 p-2.5">
+            <div className="font-semibold text-teal-950">科学练琴过渡间隙（Micro-Rest &amp; Audiation）</div>
+
+            <div>
+              <div className="mb-1 flex items-center justify-between">
+                <label htmlFor="micro-rest-duration-slider" className="font-medium text-slate-900">
+                  清醒微休息（Micro-Rest）时长
+                </label>
+                <span
+                  data-testid="micro-rest-duration-value"
+                  className="text-[11px] font-semibold text-teal-800"
+                >
+                  {microRestDurationSec} s
+                </span>
+              </div>
+              <input
+                id="micro-rest-duration-slider"
+                data-testid="micro-rest-duration-slider"
+                type="range"
+                min={10}
+                max={15}
+                step={1}
+                value={microRestDurationSec}
+                onChange={(e) => onChangeMicroRestDurationSec?.(Number.parseInt(e.target.value, 10))}
+                className="w-full accent-teal-600"
+              />
+              <div className="mt-0.5 text-[11px] text-slate-500">
+                默认 12 s（可调 10–15 s），休息期间严格零数据，按 C8 可随时跳过。
+              </div>
+            </div>
+
+            <div className="space-y-1 border-t border-teal-200/60 pt-2">
+              <label htmlFor="audiation-preview-mode-select" className="block font-medium text-slate-900">
+                Audiation Priming 音频范奏触发
+              </label>
+              <select
+                id="audiation-preview-mode-select"
+                data-testid="audiation-preview-mode-select"
+                aria-label="Audiation Priming 音频范奏触发"
+                value={audiationPreviewMode}
+                onChange={(e) =>
+                  onChangeAudiationPreviewMode?.(e.target.value as "auto-unfamiliar" | "manual")
+                }
+                className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+              >
+                <option value="auto-unfamiliar">生疏块（&lt; 2 遍）自动轻声范奏（击键即停）</option>
+                <option value="manual">仅手动点击试听</option>
+              </select>
+            </div>
+
+            <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-teal-200/60 pt-2">
+              <div>
+                <div className="font-medium text-slate-900">开启 10 s 进阶意象引导计时（非阻塞）</div>
+                <div className="text-[11px] text-slate-500">
+                  默认关闭。开启后在就绪窗显示 10 s 默听与手位意象计时参考，随时可按 C8 或首音打断开始。
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                data-testid="audiation-imagery-timer-toggle"
+                aria-label="开启 10 s 进阶意象引导计时"
+                checked={audiationImageryTimerEnabled}
+                onChange={() => onToggleAudiationImageryTimer?.()}
+                className="h-4 w-4 shrink-0 accent-teal-600"
+              />
+            </label>
+
+            <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-teal-200/60 pt-2">
+              <div>
+                <div className="font-medium text-slate-900">开启 1.05x 亚超速安全探针</div>
+                <div className="text-[11px] text-slate-500">
+                  默认关闭。仅对已连续跨夜巩固 2 晚且达到 1.00x 的短技术组块偶发开放 1.05x 裕度验证。
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                data-testid="overspeed-probe-toggle"
+                aria-label="开启 1.05x 亚超速安全探针"
+                checked={overspeedProbeEnabled}
+                onChange={() => onToggleOverspeedProbe?.()}
+                className="h-4 w-4 shrink-0 accent-teal-600"
+              />
+            </label>
+
+            <div className="space-y-1.5 border-t border-teal-200/60 pt-2">
+              <div className="font-medium text-slate-900">渐进撤拐策略（Fading Scaffolding · L0–L3）</div>
+              <div
+                data-testid="scaffolding-preference-group"
+                role="group"
+                aria-label="渐进撤拐策略"
+                className="grid grid-cols-1 gap-1 sm:grid-cols-3"
+              >
+                {(
+                  [
+                    { id: "auto-fade" as const, label: "Auto-Fade (推荐)" },
+                    { id: "always-full" as const, label: "始终显示完整辅助" },
+                    { id: "hide-keyboard-early" as const, label: "提前隐去底部琴键" },
+                  ] as const
+                ).map((item) => {
+                  const active = scaffoldingPreference === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      data-testid={`scaffolding-pref-${item.id}`}
+                      aria-pressed={active}
+                      onClick={() => onChangeScaffoldingPreference?.(item.id)}
+                      className={`rounded-lg border px-2 py-1.5 text-[11px] font-medium transition ${
+                        active
+                          ? "border-teal-600 bg-teal-600 text-white shadow-xs"
+                          : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                L2 隐去键盘高亮与常规指法（仅留高危 Transition Cue 与 Finger Anchor），L3 仅留稀疏 Performance Cue。遭遇 Again 或连错熔断自动退降 1 级。
+              </div>
+            </div>
+
+            <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-teal-200/60 pt-2">
+              <div>
+                <div className="font-medium text-slate-900">L3 净谱级仅保留 Count-In 后静音跟拍</div>
+                <div className="text-[11px] text-slate-500">
+                  开启后在 L3 仅播放 1 小节预备拍，随后静音连续演奏并适度放宽局部拍漂移容差。
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                data-testid="settings-l3-silent-beat-toggle"
+                aria-label="L3 净谱级仅保留 Count-In 后静音跟拍"
+                checked={l3SilentBeatEnabled}
+                onChange={() => onToggleL3SilentBeat?.()}
+                className="h-4 w-4 shrink-0 accent-teal-600"
+              />
+            </label>
+
+            <div className="space-y-2 border-t border-teal-200/60 pt-2">
+              <label className="flex cursor-pointer items-center justify-between gap-3">
+                <div>
+                  <div className="font-medium text-slate-900">
+                    Eye-Hand Span Overlay（L1+ 视奏前瞻渐隐）
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    {ehsDisabledInL0
+                      ? "仅在 L1+ 定速连续演奏可用（当前为 L0 Stage 0 落键阶段）。"
+                      : "默认关闭。渐隐已过音符并聚焦前方 1.5 拍，绝不替代 L3，按 B0/F 随时闪现 1.5 s。"}
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  data-testid="settings-ehs-enabled-toggle"
+                  aria-label="开启 Eye-Hand Span Overlay"
+                  checked={ehsEnabled}
+                  disabled={ehsDisabledInL0}
+                  onChange={() => onToggleEhsEnabled?.()}
+                  className="h-4 w-4 shrink-0 accent-teal-600 disabled:cursor-not-allowed disabled:opacity-40"
+                />
+              </label>
+
+              <div className="space-y-1">
+                <div className="text-[11px] font-medium text-slate-700">固定前瞻跨度档位</div>
+                <div
+                  data-testid="settings-ehs-preset-group"
+                  role="group"
+                  aria-label="EHS 固定前瞻跨度"
+                  className="grid grid-cols-3 gap-1"
+                >
+                  {(
+                    [
+                      { id: "1-beat" as const, label: "1 拍" },
+                      { id: "2-beats" as const, label: "2 拍 (默认)" },
+                      { id: "1-bar" as const, label: "1 小节" },
+                    ] as const
+                  ).map((item) => {
+                    const active = ehsLookaheadPreset === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        data-testid={`settings-ehs-preset-${item.id}`}
+                        aria-pressed={active}
+                        onClick={() => onChangeEhsLookaheadPreset?.(item.id)}
+                        className={`rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
+                          active
+                            ? "border-teal-600 bg-teal-600 text-white shadow-xs"
+                            : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <div className="text-[11px] font-medium text-slate-700">已过音符残影浓度</div>
+                <div
+                  data-testid="settings-ehs-ghost-group"
+                  role="group"
+                  aria-label="EHS 残影浓度"
+                  className="grid grid-cols-2 gap-1"
+                >
+                  {(
+                    [
+                      { value: 0.06 as const, label: "6% 微透残影" },
+                      { value: 0 as const, label: "0% 纯白消散" },
+                    ] as const
+                  ).map((item) => {
+                    const active = ehsGhostOpacity === item.value;
+                    return (
+                      <button
+                        key={item.value}
+                        type="button"
+                        data-testid={`settings-ehs-ghost-${item.value}`}
+                        aria-pressed={active}
+                        onClick={() => onChangeEhsGhostOpacity?.(item.value)}
+                        className={`rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
+                          active
+                            ? "border-teal-600 bg-teal-600 text-white shadow-xs"
+                            : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <label className="flex cursor-pointer items-center justify-between gap-3">
+                <div>
+                  <div className="font-medium text-slate-900">卡壳自动局部小节闪现（1.5 s）</div>
+                  <div className="text-[11px] text-slate-500">
+                    默认开启。定速连续演奏连续漏弹 ≥ 2 步时自动琥珀色显影当前小节 1.5 s 后恢复。
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  data-testid="settings-ehs-autostall-toggle"
+                  aria-label="卡壳自动局部小节闪现"
+                  checked={ehsAutoStallFlashEnabled}
+                  onChange={() => onToggleEhsAutoStallFlash?.()}
+                  className="h-4 w-4 shrink-0 accent-teal-600"
+                />
+              </label>
+            </div>
           </div>
 
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
@@ -676,6 +1001,8 @@ export function PracticeSettingsModal({
               />
             </label>
           </div>
+
+          {coachSettingsProps && <CoachSettingsSection {...coachSettingsProps} />}
 
           <p className="text-[11px] text-slate-400">
             当前基准速度: ♩={Math.round(baseBpm)} · 倍速:{" "}

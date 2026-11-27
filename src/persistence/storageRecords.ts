@@ -4,7 +4,17 @@ import type { PracticeStorageRecords, PracticeStore } from "./storagePort";
 // JS callers and untrusted backup fields inside the durable record contract.
 const fields: { [K in PracticeStore]: readonly (keyof PracticeStorageRecords[K])[] } = {
   meta: ["key", "value"],
-  pieceProfiles: ["pieceId", "title", "fingerprints", "measureHashesByFingerprint", "lastPracticedAtMs", "archivedAtMs", "chunkOverrides"],
+  pieceProfiles: [
+    "pieceId",
+    "title",
+    "fingerprints",
+    "measureHashesByFingerprint",
+    "lastPracticedAtMs",
+    "archivedAtMs",
+    "bestStableSpeed",
+    "chunkOverrides",
+    "performanceCueOverrides",
+  ],
   practiceEvents: ["eventId", "pieceId", "scoreFingerprint", "timestampMs", "localDateKey", "timezoneOffsetMin",
     "sessionId", "boutKind", "startCoord", "endCoord", "junctionBoundaryCoord", "cueCoord", "practiceMode", "speedMultiplier",
     "durationSec", "passCount", "wasColdFirstPass", "scaffoldingLevel", "ehsLookaheadPreset", "autoGrade",
@@ -13,6 +23,9 @@ const fields: { [K in PracticeStore]: readonly (keyof PracticeStorageRecords[K])
   fingerAnchorDrafts: ["pieceId", "anchorsByCoord", "removedRawCoords", "sourceFingeringHash", "updatedAtMs"],
   workspacePrefs: ["scopeKey", "lastOpenedPieceId", "scoreFingerprint", "handSpanProfile", "speedMultiplier", "abLoop",
     "practiceMode", "singleStaffHand", "ignoreExistingFingerings", "absoluteStrictnessEnabled", "strictHoldDurationEnabled",
+    "cc64CommandEnabled", "microRestDurationSec", "audiationPreviewMode", "audiationImageryTimerEnabled",
+    "overspeedProbeEnabled", "scaffoldingPreference", "l3SilentBeatEnabled",
+    "ehsEnabled", "ehsLookaheadPreset", "ehsGhostOpacity", "ehsAutoStallFlashEnabled",
     "freePracticeMinutes", "repairEdge", "updatedAtMs"],
   scoreBlobs: ["fingerprint", "bytes", "fileName", "byteLength", "lastAccessedAtMs", "sourceFormat", "repairAlternate"],
 };
