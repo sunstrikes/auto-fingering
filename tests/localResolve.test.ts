@@ -106,6 +106,21 @@ describe("Seam 1: localResolveFingering", () => {
     const prevFinger = initial.fingerByNoteUid[rhTarget.noteUid];
     const overrideFinger: Finger = prevFinger === 5 ? 4 : 5;
 
+    // Warm up JIT before measuring the 20 ms local re-solve budget
+    const warmupTarget = doc.noteEvents.find(
+      (n) => !n.isTieStop && n.hand === "RH" && n.measureIndex === 0
+    );
+    if (warmupTarget) {
+      localResolveFingering({
+        onsetSlices: doc.onsetSlices,
+        priorFingerByNoteUid: initial.fingerByNoteUid,
+        targetNoteUid: warmupTarget.noteUid,
+        override: { finger: 3, mode: "phrase" },
+        anchors: { [warmupTarget.noteUid]: { finger: 3, mode: "phrase" } },
+        profile: DEFAULT_HAND_SPAN_PROFILE,
+      });
+    }
+
     const t0 = performance.now();
     const updated = localResolveFingering({
       onsetSlices: doc.onsetSlices,

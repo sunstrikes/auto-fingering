@@ -1,12 +1,11 @@
+import { scoreCoordToTick } from "../domain/scoreCoord";
 import { computeHandRoot } from "../solver/costModel";
 import type {
   Finger,
   Hand,
-  MeasureTimeline,
   NoteEvent,
   OnsetSlice,
   PracticeMode,
-  ScoreCoord,
   SolveResult,
   TransitionCue,
 } from "../domain/types";
@@ -26,16 +25,6 @@ import type {
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
-}
-
-function coordToTick(
-  coord: ScoreCoord,
-  timelines: MeasureTimeline[],
-  ticksPerQuarter: number,
-): number {
-  const tl = timelines[coord.measureIndex];
-  const base = tl?.startTick ?? coord.measureIndex * ticksPerQuarter * 4;
-  return base + (coord.beatNum * ticksPerQuarter) / Math.max(1, coord.beatDen);
 }
 
 function isTargetHand(hand: Hand, practiceMode: PracticeMode): boolean {
@@ -394,11 +383,7 @@ function computeChunkJunctions(
     const rightChunk = chunks[i + 1];
     const boundaryCoord = rightChunk.startCoord;
     const boundaryMeasure = Math.min(M - 1, Math.max(0, boundaryCoord.measureIndex));
-    const boundaryTick = coordToTick(
-      boundaryCoord,
-      scoreDoc.measureTimelines,
-      scoreDoc.ticksPerQuarter,
-    );
+    const boundaryTick = scoreCoordToTick(scoreDoc, boundaryCoord);
 
     const junctionStepIndex = findFirstStepAtOrAfterTick(compactStepTicks, boundaryTick);
     const startStepIndex = Math.max(0, junctionStepIndex - 2);

@@ -1,10 +1,10 @@
 import type { ChunkJunction, MotorChunk } from "../chunking/types";
+import { scoreCoordToTick } from "../domain/scoreCoord";
 import type {
   Hand,
   HandPosition,
   PracticeMode,
   PracticeStep,
-  ScoreCoord,
   ScoreDocument,
   SolveResult,
 } from "../domain/types";
@@ -107,14 +107,6 @@ function clampStepsEachSide(n: number | undefined, fallback: number): number {
   return Math.max(BRIDGE_MIN_STEPS_EACH_SIDE, Math.min(BRIDGE_MAX_STEPS_EACH_SIDE, Math.round(n)));
 }
 
-function coordToTick(scoreDoc: ScoreDocument, coord: ScoreCoord): number {
-  const tl = scoreDoc.measureTimelines[coord.measureIndex];
-  if (!tl) {
-    return coord.measureIndex >= scoreDoc.measureCount ? Number.POSITIVE_INFINITY : 0;
-  }
-  return tl.startTick + (coord.beatNum / Math.max(1, coord.beatDen)) * scoreDoc.ticksPerQuarter;
-}
-
 /**
  * Returns compact Count-In beat count for Bridge Window:
  * 2 beats for standard simple meters (4/4, 3/4, 2/4), or compact half-measure for compound meters (e.g. 3 for 6/8).
@@ -167,7 +159,7 @@ export function resolveBridgeWindowSpan(params: {
     };
   }
 
-  const boundaryTick = coordToTick(scoreDoc, junction.boundaryCoord);
+  const boundaryTick = scoreCoordToTick(scoreDoc, junction.boundaryCoord);
   let junctionIdx = practiceSteps.findIndex((s) => s.onsetTick >= boundaryTick - 1e-6);
   if (junctionIdx < 0) {
     junctionIdx = Math.max(
@@ -583,8 +575,8 @@ export function buildLinkedVerificationSpan(
     compareScoreCoord(leftChunk.endCoord, rightChunk.endCoord) >= 0
       ? leftChunk.endCoord
       : rightChunk.endCoord;
-  const startTick = coordToTick(scoreDoc, startCoord);
-  const endTick = coordToTick(scoreDoc, endCoord);
+  const startTick = scoreCoordToTick(scoreDoc, startCoord);
+  const endTick = scoreCoordToTick(scoreDoc, endCoord);
 
   const steps = practiceSteps.filter(
     (s) => s.onsetTick >= startTick - 1e-6 && s.onsetTick < endTick - 1e-6,

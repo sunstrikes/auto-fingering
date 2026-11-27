@@ -696,34 +696,9 @@ export const useGuidedSessionStore = create<GuidedSessionState>((set, get) => ({
       };
     }),
 
-  finishMicroRest: (nowMs = Date.now()) =>
-    set((state) => {
-      const nextChunk = state.chunkQueue[state.currentQueueIndex + 1] ?? null;
-      if (!nextChunk) {
-        return {
-          sessionPhase: "summary",
-          bottomSlotView: "feedback",
-          microRestStartedAtMs: null,
-          microRestReminder: null,
-          microRestState: null,
-          audiationState: null,
-        };
-      }
-      return {
-        sessionPhase: "audiation",
-        bottomSlotView: "feedback",
-        microRestStartedAtMs: null,
-        microRestReminder: null,
-        microRestState: null,
-        audiationState: createAudiationPrimingState({
-          enteredAtMs: nowMs,
-          chunkId: nextChunk.chunkId,
-          historicalPassCount: state.chunkPassCountsById[nextChunk.chunkId] ?? 0,
-          previewMode: state.audiationPreviewMode,
-          imageryTimerEnabled: state.audiationImageryTimerEnabled,
-        }),
-      };
-    }),
+  finishMicroRest: (nowMs = Date.now()) => {
+    get().skipMicroRest(nowMs);
+  },
 
   skipMacroRest: (nowMs = Date.now()) =>
     set((state) => {
