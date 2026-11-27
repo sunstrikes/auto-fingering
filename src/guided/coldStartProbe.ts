@@ -7,6 +7,7 @@ import type {
   PerformanceCue,
   SwitchPoint,
 } from "../chunking/types";
+import { scoreCoordToTick } from "../domain/scoreCoord";
 import type {
   MeasureTimeline,
   PracticeStep,
@@ -61,14 +62,6 @@ export interface ColdStartProbeEvaluation {
   retriesUsed: number;
   queuedBridgeJunction?: ChunkJunction;
   reasonSummary: string;
-}
-
-function coordToTick(scoreDoc: ScoreDocument, coord: ScoreCoord): number {
-  const tl = scoreDoc.measureTimelines[coord.measureIndex];
-  if (!tl) {
-    return coord.measureIndex >= scoreDoc.measureCount ? Number.POSITIVE_INFINITY : 0;
-  }
-  return tl.startTick + (coord.beatNum / Math.max(1, coord.beatDen)) * scoreDoc.ticksPerQuarter;
 }
 
 function nextPrng(seed: number): { value: number; nextSeed: number } {
@@ -242,8 +235,8 @@ export function computeColdProbeSpan(params: {
       (c) => cue.measureIndex >= c.startMeasureIndex && cue.measureIndex <= c.endMeasureIndex,
     ) ?? motorChunks[0];
 
-  const startTick = coordToTick(scoreDoc, cue.coord);
-  const endTick = coordToTick(scoreDoc, endCoord);
+  const startTick = scoreCoordToTick(scoreDoc, cue.coord);
+  const endTick = scoreCoordToTick(scoreDoc, endCoord);
   const steps = practiceSteps.filter(
     (s) => s.onsetTick >= startTick - 1e-6 && s.onsetTick < endTick - 1e-6,
   );

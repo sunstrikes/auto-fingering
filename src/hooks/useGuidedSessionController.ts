@@ -8,11 +8,11 @@ import type {
   PassageCluster,
   PerformanceCue,
 } from "../chunking/types";
+import { scoreCoordToSec, scoreCoordToTick } from "../domain/scoreCoord";
 import type {
   AnchorOverride,
   PracticeMode,
   PracticeStep,
-  ScoreCoord,
   ScoreDocument,
   SolveResult,
 } from "../domain/types";
@@ -64,6 +64,7 @@ import {
   roundSpeed,
   spanContains,
   timestampToUtcDateKey,
+  type PiecePracticeState,
 } from "../guided/motorFsrs";
 import {
   EARLY_MACRO_REST_DURATION_MS,
@@ -82,7 +83,11 @@ import {
   type KeyboardCommandEventLike,
   type PianoCommandAction,
 } from "../guided/pianoCommandKeys";
-import { writeDerivedSnapshot, loadOrReducePiecePracticeState } from "../guided/replayInvalidation";
+import {
+  loadOrReducePiecePracticeState,
+  projectPieceStateForScore,
+  writeDerivedSnapshot,
+} from "../guided/replayInvalidation";
 import {
   planGuidedSession,
   planQuickTriageSession,
@@ -145,29 +150,19 @@ export interface UseGuidedSessionControllerOptions {
   nowMs: () => number;
 }
 
-function coordToTick(scoreDoc: ScoreDocument, coord: ScoreCoord): number {
-  const tl = scoreDoc.measureTimelines[coord.measureIndex];
-  if (!tl) {
-    if (coord.measureIndex >= scoreDoc.measureCount) {
-      return Number.POSITIVE_INFINITY;
-    }
-    return 0;
-  }
-  return tl.startTick + (coord.beatNum / Math.max(1, coord.beatDen)) * scoreDoc.ticksPerQuarter;
-}
-
 function resolveChunkBounds(scoreDoc: ScoreDocument, chunk: MotorChunk) {
-  const startTick = coordToTick(scoreDoc, chunk.startCoord);
-  const endTick = coordToTick(scoreDoc, chunk.endCoord);
-  const startTl = scoreDoc.measureTimelines[chunk.startMeasureIndex];
+  const startTick = scoreCoordToTick(scoreDoc, chunk.startCoord);
+  const endTick = scoreCoordToTick(scoreDoc, chunk.endCoord);
+  const startScoreSec = scoreCoordToSec(scoreDoc, chunk.startCoord);
+  const hasEndTimeline =
+    chunk.endCoord.measureIndex >= scoreDoc.measureCount
+      ? scoreDoc.measureTimelines.length > 0
+      : Boolean(scoreDoc.measureTimelines[chunk.endCoord.measureIndex]);
   const endTl = scoreDoc.measureTimelines[chunk.endMeasureIndex];
-  const startScoreSec = startTl
-    ? startTl.startSec +
-      ((chunk.startCoord.beatNum / Math.max(1, chunk.startCoord.beatDen)) *
-        (startTl.endSec - startTl.startSec)) /
-        Math.max(1, startTl.timeBeats)
-    : 0;
-  const endScoreSec = endTl ? endTl.endSec : startScoreSec + 1;
+  const rawEndScoreSec = hasEndTimeline
+    ? scoreCoordToSec(scoreDoc, chunk.endCoord)
+    : (endTl?.endSec ?? startScoreSec + 1);
+  const endScoreSec = Math.max(startScoreSec + 0.05, rawEndScoreSec);
   return { startTick, endTick, startScoreSec, endScoreSec };
 }
 
@@ -207,21 +202,27 @@ export function getMidisForChunk(
     .map((ev) => ev.midi);
 }
 
+const EMPTY_ANCHORS: Record<string, AnchorOverride> = {};
+const EMPTY_STRING_ARRAY: readonly string[] = [];
+const EMPTY_CHUNK_JUNCTIONS: ChunkJunction[] = [];
+const EMPTY_PASSAGE_CLUSTERS: PassageCluster[] = [];
+const EMPTY_PERFORMANCE_CUES: PerformanceCue[] = [];
+
 /**
  * Coordinates Guided Session lifecycle, Piano Command Keys routing, Stage 0 Waiting Mode
- * auto-graduation, continuous chunk segment playback, Micro-Rest timers, and Suspend/Resume.
+ * auto-graduation, continuous Motor Chunk playback, Micro-Rest timers, and Suspend/Resume.
  */
 export function useGuidedSessionController({
   scoreDoc,
   solveResult,
-  anchors = {},
-  removedRawAnchorUids = [],
+  anchors = EMPTY_ANCHORS,
+  removedRawAnchorUids = EMPTY_STRING_ARRAY,
   practiceSteps,
   motorChunks,
   macroSections,
-  chunkJunctions = [],
-  passageClusters = [],
-  performanceCues = [],
+  chunkJunctions = EMPTY_CHUNK_JUNCTIONS,
+  passageClusters = EMPTY_PASSAGE_CLUSTERS,
+  performanceCues = EMPTY_PERFORMANCE_CUES,
   effectivePracticeMode,
   playbackSpeed,
   playbackEngineRef,
@@ -320,9 +321,24 @@ export function useGuidedSessionController({
     [getTimezoneOffsetMin],
   );
 
-  const scoreFingerprint = useMemo(
-    () => (scoreDoc ? getScoreIdentity(scoreDoc).fingerprint : ""),
+  const scoreIdentity = useMemo(
+    () => (scoreDoc ? getScoreIdentity(scoreDoc) : null),
     [scoreDoc],
+  );
+  const scoreFingerprint = scoreIdentity?.fingerprint ?? "";
+
+  const projectForActiveScore = useCallback(
+    (baseState: PiecePracticeState): PiecePracticeState => {
+      if (!scoreDoc || !activePieceProfile || !scoreIdentity) {
+        return baseState;
+      }
+      return projectPieceStateForScore(baseState, {
+        currentFingerprint: scoreIdentity.fingerprint,
+        currentMeasureHashes: scoreIdentity.measureHashes,
+        measureHashesByFingerprint: activePieceProfile.measureHashesByFingerprint,
+      });
+    },
+    [scoreDoc, activePieceProfile?.measureHashesByFingerprint, scoreIdentity],
   );
 
   // Load persisted Motor-FSRS PiecePracticeState whenever piece or chunks refresh
@@ -342,9 +358,10 @@ export function useGuidedSessionController({
     }).then(({ state }) => {
       if (cancelled) return;
       const store = useGuidedSessionStore.getState();
-      store.setPiecePracticeState(state);
+      const projectedState = projectForActiveScore(state);
+      store.setPiecePracticeState(projectedState);
       const passCounts: Record<string, number> = {};
-      for (const [id, unit] of Object.entries(state.chunkStates)) {
+      for (const [id, unit] of Object.entries(projectedState.chunkStates)) {
         if (unit.reviewCount > 0) passCounts[id] = unit.reviewCount;
       }
       store.seedChunkPassCounts(passCounts);
@@ -360,6 +377,7 @@ export function useGuidedSessionController({
     chunkJunctions,
     nowMs,
     resolveTimezoneOffsetMin,
+    projectForActiveScore,
   ]);
 
   const sessionPlan = useMemo(() => {
@@ -865,7 +883,7 @@ export function useGuidedSessionController({
               nowLocalDateKey: localDateKey,
             });
             await writeDerivedSnapshot(practiceStorage, activePieceProfile.pieceId, nextState);
-            useGuidedSessionStore.getState().setPiecePracticeState(nextState);
+            useGuidedSessionStore.getState().setPiecePracticeState(projectForActiveScore(nextState));
           })
           .catch(() => undefined);
       }
@@ -1157,6 +1175,7 @@ export function useGuidedSessionController({
     playbackEngineRef,
     onChangePlaybackSpeed,
     clearPeekTimer,
+    projectForActiveScore,
   ]);
 
   const startContinuousChunkPlay = useCallback(
@@ -1287,7 +1306,7 @@ export function useGuidedSessionController({
         startScoreSec: resolved.startScoreSec,
         endScoreSec: resolved.endScoreSec,
         countInBeats,
-        muteTargetHand: false,
+        muteTargetHand: true,
         practiceMode: boutPracticeMode,
         metronomeMode,
         onClockAnchor: (anchor) => {
@@ -1559,6 +1578,28 @@ export function useGuidedSessionController({
     }, 1500);
   }, [clearPeekTimer, nowMs]);
 
+  const advanceToQueuedChunkOrEnd = useCallback(
+    (speedOverride?: number, onQueueExhausted?: () => void) => {
+      const store = useGuidedSessionStore.getState();
+      const nextIdx = store.currentQueueIndex + 1;
+      const effectiveSpeed = speedOverride ?? playbackSpeed;
+      if (nextIdx >= store.chunkQueue.length) {
+        if (onQueueExhausted) {
+          onQueueExhausted();
+        } else {
+          store.advanceToNextChunk([], effectiveSpeed, nowMs());
+        }
+        return;
+      }
+      const next = store.chunkQueue[nextIdx];
+      const nextPlanned = store.plannedQueue[nextIdx] ?? null;
+      const nextSteps = getStepsForChunk(scoreDoc, practiceSteps, next);
+      store.advanceToNextChunk(nextSteps, effectiveSpeed, nowMs());
+      beginChunkStage0(next, nextSteps, nextPlanned);
+    },
+    [scoreDoc, practiceSteps, playbackSpeed, nowMs, beginChunkStage0],
+  );
+
   const handleSkipBridgeWindow = useCallback(() => {
     const store = useGuidedSessionStore.getState();
     const bState = store.bridgeWindowState;
@@ -1585,25 +1626,13 @@ export function useGuidedSessionController({
     store.setBridgeWindowState(null);
     store.setCommandNotice("已跳过当前 Bridge Window 接缝桥接");
 
-    const nextIdx = store.currentQueueIndex + 1;
-    if (nextIdx >= store.chunkQueue.length) {
-      store.advanceToNextChunk([], playbackSpeed, nowMs());
-      return;
-    }
-    const next = store.chunkQueue[nextIdx];
-    const nextPlanned = store.plannedQueue[nextIdx] ?? null;
-    const nextSteps = getStepsForChunk(scoreDoc, practiceSteps, next);
-    store.advanceToNextChunk(nextSteps, skipped.originalSpeed, nowMs());
-    beginChunkStage0(next, nextSteps, nextPlanned);
+    advanceToQueuedChunkOrEnd(skipped.originalSpeed);
   }, [
     playbackEngineRef,
     resetMidiCapture,
     onChangePlaybackSpeed,
     nowMs,
-    playbackSpeed,
-    scoreDoc,
-    practiceSteps,
-    beginChunkStage0,
+    advanceToQueuedChunkOrEnd,
   ]);
 
   const handleMarkLastBoutHard = useCallback(async () => {
@@ -1652,7 +1681,11 @@ export function useGuidedSessionController({
       };
     }
 
-    store.markLastBoutHardUI(updatedEvent, nextPieceState, nextScheduler);
+    store.markLastBoutHardUI(
+      updatedEvent,
+      nextPieceState ? projectForActiveScore(nextPieceState) : null,
+      nextScheduler,
+    );
   }, [
     practiceStorage,
     nowMs,
@@ -1660,6 +1693,7 @@ export function useGuidedSessionController({
     motorChunks,
     chunkJunctions,
     activePieceProfile?.chunkOverrides,
+    projectForActiveScore,
   ]);
 
   const executeCommandAction = useCallback(
@@ -1734,6 +1768,20 @@ export function useGuidedSessionController({
           return;
         }
         const steps = getStepsForChunk(scoreDoc, practiceSteps, chunk);
+        const unitRuntime = store.schedulerState?.units[chunk.chunkId];
+        const keepContinuous = Boolean(
+          plannedItem?.skipStage0 || (unitRuntime && unitRuntime.phase >= 1),
+        );
+        if (keepContinuous) {
+          store.replayCurrentChunk(
+            steps,
+            plannedItem?.targetSpeed ?? unitRuntime?.workingSpeed ?? playbackSpeed,
+            nowMs(),
+            false,
+          );
+          startContinuousChunkPlay(chunk, plannedItem);
+          return;
+        }
         store.replayCurrentChunk(steps, playbackSpeed, nowMs(), true);
         beginChunkStage0(chunk, steps, null);
         return;
@@ -1758,16 +1806,7 @@ export function useGuidedSessionController({
           if (store.lastProbeResult && !store.lastProbeResult.passed) {
             // C8 log-and-continue on failed cold-start probe
             store.setLastProbeResult(null);
-            const nextIdx = store.currentQueueIndex + 1;
-            if (nextIdx >= store.chunkQueue.length) {
-              store.advanceToNextChunk([], playbackSpeed, nowMs());
-              return;
-            }
-            const next = store.chunkQueue[nextIdx];
-            const nextPlanned = store.plannedQueue[nextIdx] ?? null;
-            const nextSteps = getStepsForChunk(scoreDoc, practiceSteps, next);
-            store.advanceToNextChunk(nextSteps, playbackSpeed, nowMs());
-            beginChunkStage0(next, nextSteps, nextPlanned);
+            advanceToQueuedChunkOrEnd();
             return;
           }
           const resumeTarget = store.pausedFromPhase ?? "playing";
@@ -1796,18 +1835,11 @@ export function useGuidedSessionController({
           if (store.sessionPhase === "audiation") {
             stopAudiationPreview(action === "start-first-note" ? "first-note" : "c8");
           }
-          const nextIdx = store.currentQueueIndex + 1;
-          if (nextIdx >= store.chunkQueue.length) {
+          advanceToQueuedChunkOrEnd(undefined, () => {
             if (store.sessionPhase === "summary") {
               handleStartSession();
             }
-            return;
-          }
-          const next = store.chunkQueue[nextIdx];
-          const nextPlanned = store.plannedQueue[nextIdx] ?? null;
-          const nextSteps = getStepsForChunk(scoreDoc, practiceSteps, next);
-          store.advanceToNextChunk(nextSteps, playbackSpeed, nowMs());
-          beginChunkStage0(next, nextSteps, nextPlanned);
+          });
         }
       }
     },
@@ -1817,6 +1849,7 @@ export function useGuidedSessionController({
       stopAudiationPreview,
       triggerBlindPeek,
       handleSkipBridgeWindow,
+      advanceToQueuedChunkOrEnd,
       scoreDoc,
       practiceSteps,
       playbackSpeed,

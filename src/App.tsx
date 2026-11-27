@@ -2229,7 +2229,11 @@ export default function App({
 
   const handlePlaySimulatedMidi = () => {
     if (!simulatedMidi) return;
-    if (practiceSteps.length === 0) {
+    const sourceSteps =
+      guided.studioMode === "guided" && guided.activeChunkSteps.length > 0
+        ? guided.activeChunkSteps
+        : practiceSteps;
+    if (sourceSteps.length === 0) {
       simulatedMidi.play([60, 64, 67, 72].map((midi, stepIndex) => ({
         stepIndex,
         onsetMs: stepIndex * 300,
@@ -2239,9 +2243,16 @@ export default function App({
     }
 
     const waitingIndex = waitingStateRef.current.currentStepIndex;
-    const startIndex = waitingModeEnabled && waitingIndex < practiceSteps.length ? waitingIndex : 0;
-    const startSec = practiceSteps[startIndex].onsetSec;
-    const steps: SimulatedMidiStep[] = practiceSteps.slice(startIndex).map((step) => ({
+    const useWaitingCursor =
+      guided.studioMode === "guided"
+        ? guided.sessionPhase === "stage0"
+        : waitingModeEnabled;
+    const startIndex =
+      useWaitingCursor && waitingIndex >= 0 && waitingIndex < sourceSteps.length
+        ? waitingIndex
+        : 0;
+    const startSec = sourceSteps[startIndex].onsetSec;
+    const steps: SimulatedMidiStep[] = sourceSteps.slice(startIndex).map((step) => ({
       stepIndex: step.stepIndex,
       onsetMs: (step.onsetSec - startSec) * 1000,
       notes: step.expectedNotes.map((note) => ({
@@ -2509,6 +2520,11 @@ export default function App({
             onStartSession={guided.handleStartSession}
             onStartQuickTriage={guided.handleStartQuickTriage}
             onStartColdProbeDrill={guided.handleStartColdProbeDrill}
+            onFocusChunkEditor={() => {
+              const btn = document.querySelector<HTMLButtonElement>('[data-testid="chunk-cue-editor-toggle"]');
+              btn?.click();
+              btn?.scrollIntoView?.({ block: "center" });
+            }}
             onBackToFreeStudio={guided.returnToFreeStudio}
           />
         )}
@@ -2522,6 +2538,14 @@ export default function App({
               className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-white px-3 py-1 text-xs"
             >
               <div className="flex flex-wrap items-center gap-2">
+                {guided.sessionPhase === "playing" && activeMetronomeBeat?.isCountIn && (
+                  <span
+                    data-testid="guided-count-in-indicator"
+                    className="rounded border border-sky-300 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-900"
+                  >
+                    预备拍: {activeMetronomeBeat.countdownRemaining}
+                  </span>
+                )}
                 {guided.bridgeWindowState && (
                   <span
                     data-testid="guided-bridge-status"
